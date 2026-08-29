@@ -127,29 +127,40 @@ LOG_JSON+="]"
 # ago that has since been resolved is not a current fault, and reporting it as
 # one is worse than reporting nothing.
 if (( $(cache_age "${ELIG_CACHE}") > ELIGIBILITY_INTERVAL )); then
-BLOCKED_REASON=""
+BLOCKED_REASON=""; BLOCKED_KEY=""
 ELIG_LOG="$(docker logs --since "${ELIGIBILITY_WINDOW}" "${CONTAINER}" 2>&1 | tail -n 4000 | tr '[:upper:]' '[:lower:]')"
 if [[ -n "${ELIG_LOG}" ]]; then
   # needle|reason — the protocol's own phrasing on the left, plain English right.
-  while IFS='|' read -r needle reason; do
+  # needle|key|reason. The key is stable and machine-readable; the reason is
+  # prose and may be reworded. Anything classifying these must use the key —
+  # whether a complaint matters depends on the network, and that decision is
+  # made by the dashboard, which knows which network this is. This script only
+  # reports what the node said.
+  while IFS='|' read -r needle key reason; do
     [[ -z "${needle}" ]] && continue
-    if [[ "${ELIG_LOG}" == *"${needle}"* ]]; then BLOCKED_REASON="${reason}"; break; fi
+    if [[ "${ELIG_LOG}" == *"${needle}"* ]]; then
+      BLOCKED_REASON="${reason}"; BLOCKED_KEY="${key}"; break
+    fi
   done <<'PATTERNS'
-insufficient stake|insufficient stake
-has no balance|no balance
-add stake to contract|insufficient stake — no intent declared
-not in the allowed|not on the allowed-producer list
-not an allowed producer|not on the allowed-producer list
-no-intent|no stake intent declared
-unseasoned-or-understaked|stake too new or too small
-unseasoned|stake not yet seasoned
-insufficient-self-bond|self-bond below the minimum
-behind-finalized-head|blocks rejected: built too slowly for the chain
+insufficient stake|insufficient-stake|insufficient stake
+add stake to contract|insufficient-stake|insufficient stake — no intent declared
+has no balance|no-balance|no balance
+not in the allowed|not-allowed|not on the allowed-producer list
+not an allowed producer|not-allowed|not on the allowed-producer list
+no-intent|no-intent|no stake intent declared
+unseasoned-or-understaked|unseasoned|stake too new or too small
+unseasoned|unseasoned|stake not yet seasoned
+insufficient-self-bond|self-bond|self-bond below the minimum
+behind-finalized-head|too-slow|blocks rejected: built too slowly for the chain
 PATTERNS
 fi
-  printf '%s' "${BLOCKED_REASON}" > "${ELIG_CACHE}"
+  printf '%s\t%s\n' "${BLOCKED_KEY:-}" "${BLOCKED_REASON}" > "${ELIG_CACHE}"
 fi
-BLOCKED_REASON="$(cat "${ELIG_CACHE}" 2>/dev/null || echo "")"
+# `read` reports failure at EOF even when it populated the variables, so a
+# trailing newline above is load-bearing and the result is not tested for
+# success — doing so discarded the values it had just read.
+BLOCKED_KEY=""; BLOCKED_REASON=""
+[[ -s "${ELIG_CACHE}" ]] && IFS=$'\t' read -r BLOCKED_KEY BLOCKED_REASON < "${ELIG_CACHE}"
 
 # ------------------------------------------------- which CLI the node is running
 #
@@ -239,8 +250,8 @@ fi
   # false. "We did not look" and "we looked and found nothing" are different
   # claims, and the dashboard renders them differently.
   if [[ -n "${BLOCKED_REASON}" ]]; then
-    printf '"eligibility":{"blocked":true,"reason":"%s","window":"%s"},' \
-      "$(json_escape "${BLOCKED_REASON}")" "$(json_escape "${ELIGIBILITY_WINDOW}")"
+    printf '"eligibility":{"blocked":true,"key":"%s","reason":"%s","window":"%s"},' \
+      "$(json_escape "${BLOCKED_KEY}")" "$(json_escape "${BLOCKED_REASON}")" "$(json_escape "${ELIGIBILITY_WINDOW}")"
   else
     printf '"eligibility":{"blocked":false,"window":"%s"},' "$(json_escape "${ELIGIBILITY_WINDOW}")"
   fi

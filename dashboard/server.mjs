@@ -40,6 +40,17 @@ const CLI_REGISTRY = process.env.DASH_CLI_REGISTRY ?? 'https://registry.npmjs.or
 // Four times a day is plenty for something that changes every few weeks.
 const CLI_CHECK_MS = Number(process.env.DASH_CLI_CHECK_MS ?? 21_600_000)
 
+// Not every complaint the node makes applies to every network. Sequence is
+// federated: producers are authorized by an allowlist, and staking is not part
+// of how it decides who may produce — so a stake complaint there is the node
+// reciting a rule this network does not enforce. Still shown, because the node
+// did say it and hiding output is worse than explaining it, but not counted as
+// a fault and not worth waking anyone for.
+const IGNORED_BY_NETWORK = { sequence: ['insufficient-stake', 'no-intent', 'unseasoned', 'self-bond'] }
+const ELIGIBILITY_IGNORED = (process.env.DASH_ELIGIBILITY_IGNORE ?? '')
+  .split(',').map((x) => x.trim()).filter(Boolean)
+const ignoredKeys = new Set(ELIGIBILITY_IGNORED.length ? ELIGIBILITY_IGNORED : (IGNORED_BY_NETWORK[NETWORK] ?? []))
+
 // XL1 balances are keyed by bare lowercase hex — a 0x prefix is rejected by the
 // gateway, and the env examples ship the 0x form, so normalize every address.
 const bareHex = (a) => (a ?? '').trim().replace(/^0x/i, '').toLowerCase()
@@ -262,6 +273,15 @@ async function pollNode() {
       ageSeconds: Math.round(age / 1000),
       ...parsed,
     }
+    // Classify here rather than in the collector: whether a complaint matters is
+    // a property of the network, and the collector does not know which one this
+    // is. It reports what the node said; this decides what that means.
+    const key = parsed.eligibility?.key
+    state.node.eligibilityIgnored = Boolean(parsed.eligibility?.blocked && key && ignoredKeys.has(key))
+    if (state.node.eligibilityIgnored) {
+      state.node.eligibilityNote = `not enforced on ${NETWORK}`
+    }
+
     sample('blocks', parsed.blocksPublished)
   } catch (error) {
     state.node = {
@@ -371,7 +391,7 @@ function overall() {
 
   // A node can be up, healthy and unable to produce a single block. Nothing
   // else on this page distinguishes that from working.
-  if (state.node.ok && state.node.eligibility?.blocked) {
+  if (state.node.ok && state.node.eligibility?.blocked && !state.node.eligibilityIgnored) {
     problems.push(`producer ineligible: ${state.node.eligibility.reason}`)
   }
 

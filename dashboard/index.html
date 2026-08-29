@@ -148,7 +148,7 @@ function render(d) {
   // The one thing that explains a healthy node producing nothing. Loud, at the
   // top, in its own banner — it is the answer to the question everything else
   // on this page raises but cannot settle.
-  if (d.node?.eligibility?.blocked) {
+  if (d.node?.eligibility?.blocked && !d.node?.eligibilityIgnored) {
     cards.push(`<section class="wide" style="border-color:color-mix(in srgb,var(--bad) 40%,transparent)">
       <h2>Producer cannot produce</h2>
       <div class="big bad">${esc(d.node.eligibility.reason)}</div>
@@ -175,7 +175,9 @@ function render(d) {
       d.node?.lastPublishedAt && ['Last submission', esc(d.node.lastPublishedAt)],
       d.node?.errorCount !== undefined && ['Log errors', `<span class="${d.node.errorCount > 0 ? 'warn' : ''}">${num(d.node.errorCount)}</span>`],
       d.node?.eligibility && ['Eligibility', d.node.eligibility.blocked
-        ? `<span class="bad">${esc(d.node.eligibility.reason)}</span>`
+        ? (d.node.eligibilityIgnored
+            ? `<span class="sub">${esc(d.node.eligibility.reason)}</span> <span class="ok">· ${esc(d.node.eligibilityNote ?? 'not enforced here')}</span>`
+            : `<span class="bad">${esc(d.node.eligibility.reason)}</span>`)
         : `<span class="ok">no complaint in ${esc(d.node.eligibility.window)}</span>`],
     ])}
     ${d.node?.ok === false ? `<div class="err" style="margin-top:8px">${esc(d.node.error)}</div>` : ''}

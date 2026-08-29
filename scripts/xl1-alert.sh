@@ -104,7 +104,7 @@ else
         then "node-down|urgent|Producer is DOWN" else empty end),
       (if ($s.node.container.running // true) | not
         then "container-stopped|urgent|Producer container is not running" else empty end),
-      (if $s.node.eligibility.blocked // false
+      (if ($s.node.eligibility.blocked // false) and (($s.node.eligibilityIgnored // false) | not)
         then "ineligible|high|Producer cannot produce: " + ($s.node.eligibility.reason // "unknown") else empty end),
       (if ($s.health.ok // true) | not
         then "health-failing|high|Health probe /livez is failing" else empty end),

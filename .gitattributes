@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.cmd text eol=crlf
+windows/README.txt text eol=crlf
+*.tar.gz binary

@@ -13,7 +13,10 @@ for the differences and why each one exists.
 
 | Path | Purpose |
 |---|---|
+| `preflight.sh` | Read-only readiness check. **Run this first** — it catches a 32-bit OS before you spend 40 minutes. |
 | `provision.sh` | One-shot, idempotent setup. Run once with `sudo`. |
+| `scripts/xl1ctl` | Day-to-day control: status, start/stop, logs, backup, doctor. |
+| `windows/` | Double-clickable `.cmd` launchers that drive the Pi over SSH. |
 | `xl1-local-arm64.tar.gz` | The producer image, cross-built for arm64. |
 | `xl1-dashboard-arm64.tar.gz` | The dashboard image, cross-built for arm64. |
 | `sequence-producer.env.template` | Producer secrets → `/etc/xl1/sequence-producer.env` (mode 0600). |
@@ -70,8 +73,14 @@ sudo cp -r /boot/firmware/xl1-pi ~/ && cd ~/xl1-pi
 # otherwise:
 cd ~/xl1-pi
 
+./preflight.sh        # read-only; ~30s. Fix anything it marks FAIL.
 sudo ./provision.sh
 ```
+
+`preflight.sh` changes nothing and exits non-zero if the Pi is not ready. It is
+worth the thirty seconds: the most common way to lose an evening here is writing
+the 32-bit OS image, and preflight says so immediately instead of letting
+provisioning get most of the way through first.
 
 Expect **20–40 minutes**, nearly all of it `apt` and the Docker install. The
 script is idempotent — if it fails partway, fix the cause and run it again.
@@ -146,13 +155,18 @@ in the wallet you name there either way.
 The dashboard shows both balances side by side. A climbing **reward** balance is
 the only real confirmation that blocks are being accepted.
 
-### One thing to fix in your env file
+### Worth checking in your env file
 
-The commented `XL1_EVM_RPC_URL` line carries a live Alchemy API key and points
-at **eth-mainnet**, while the Sequence preset expects **Sepolia**. It is
-commented out, so nothing loads it and the preset default applies correctly —
-but the key is still sitting in a file in a project directory. Rotate it if that
-file has ever been shared or committed, and delete the line.
+The upstream example carries a commented `XL1_EVM_RPC_URL` line. Two things to
+watch there:
+
+- If you filled it in with a provider URL, it probably has an **API key in it**.
+  That key sits in a plaintext file in a project directory — easy to commit or
+  share by accident. Prefer leaving the line commented and letting the preset
+  default apply.
+- The Sequence preset expects **Sepolia** (`0xaa36a7`). Pointing this at
+  eth-mainnet is a mismatch, and it is an easy one to copy in from a Pi 4 setup
+  or another project.
 
 ## Step 4 — Tailscale
 
@@ -218,12 +232,40 @@ role. It is harmless to leave open; close it if you want a tighter surface.
 
 ### Everyday commands
 
+`xl1ctl` wraps the systemd and Docker incantations:
+
 ```bash
-systemctl status xl1-producer xl1-dashboard xl1-collect.timer
-journalctl -u xl1-producer -f
-curl -s localhost:8088/api/status | jq .
-sudo systemctl restart xl1-producer
+xl1ctl status        # running? what block? what balance?
+xl1ctl logs -f       # follow the producer log
+xl1ctl addr          # which address the node actually signs as
+xl1ctl doctor        # diagnose a producer that is not working
+xl1ctl dashboard     # print the dashboard URLs
+sudo xl1ctl restart
 ```
+
+`xl1ctl addr` is the one to reach for when blocks are submitted but never
+accepted. It derives the signing address out of the mnemonic and tells you
+whether it matches the reward address — the thing nothing else in the running
+system will show you.
+
+### Backups
+
+```bash
+sudo xl1ctl backup                    # encrypted tarball of /etc/xl1
+sudo xl1ctl restore FILE
+```
+
+The archive contains your seed phrase, encrypted with a passphrase you choose.
+Lose the passphrase and the backup is unrecoverable. Copy it off the Pi — an SD
+card is not a backup. `windows/Fetch backup to this PC.cmd` does both steps.
+
+### Driving it from Windows
+
+`windows/` holds double-clickable launchers that SSH in and run one command
+each — preflight, provision, start/stop, live logs, dashboard, backup. Edit
+`windows/_config.cmd` if the Pi is not at `xl1pi.local`. Provisioning grants
+your user passwordless `sudo` for `xl1ctl` alone, so the shortcuts work in one
+click; see `windows/README.txt`.
 
 ---
 

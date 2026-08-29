@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+# xl1ctl — one command for operating the producer.
+#
+#   xl1ctl status              what is running, chain position, balance
+#   xl1ctl start | stop | restart
+#   xl1ctl logs [-f|-n N]      producer logs
+#   xl1ctl health              raw probe + dashboard summary
+#   xl1ctl addr                which address the node actually signs as
+#   xl1ctl dashboard           print the dashboard URLs
+#   xl1ctl backup [FILE]       encrypted backup of /etc/xl1 (contains the seed)
+#   xl1ctl restore FILE        restore from one
+#   xl1ctl update              reload images from tarballs and restart
+#   xl1ctl doctor              diagnose a producer that is not working
+
+set -uo pipefail
+
+CONF_DIR=/etc/xl1
+STATE_DIR=/var/lib/xl1
+PRODUCER_ENV="${CONF_DIR}/sequence-producer.env"
+DASH_ENV="${CONF_DIR}/dashboard.env"
+DASH_IMAGE=xl1-dashboard:local
+
+BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; BLUE=$'\033[34m'
+
+die()  { printf '%serror:%s %s\n' "${RED}" "${RESET}" "$*" >&2; exit 1; }
+head_() { printf '\n%s%s%s\n' "${BOLD}${BLUE}" "$1" "${RESET}"; }
+row()  { printf '  %-22s %s\n' "$1" "$2"; }
+
+need_root() { [[ ${EUID} -eq 0 ]] || die "this needs root — try: sudo xl1ctl $*"; }
+
+dash_port() { grep -oP '^DASH_PORT=\K.*' "${DASH_ENV}" 2>/dev/null || echo 8088; }
+
+# --------------------------------------------------------------------- status
+
+cmd_status() {
+  head_ "Services"
+  for unit in xl1-producer xl1-dashboard xl1-collect.timer; do
+    state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "${unit}" 2>/dev/null || echo '-')"
+    case "${state}" in
+      active) mark="${GREEN}●${RESET}" ;;
+      inactive|failed) mark="${RED}●${RESET}" ;;
+      *) mark="${YELLOW}●${RESET}" ;;
+    esac
+    printf '  %s %-22s %-10s %s%s%s\n' "${mark}" "${unit}" "${state:-unknown}" "${DIM}" "${enabled}" "${RESET}"
+  done
+
+  head_ "Container"
+  if docker inspect xl1-producer >/dev/null 2>&1; then
+    docker ps -a --filter name=xl1-producer \
+      --format '  {{.Status}}   {{.Image}}' 2>/dev/null
+  else
+    row "xl1-producer" "not present"
+  fi
+
+  head_ "Chain"
+  local port; port="$(dash_port)"
+  local json; json="$(curl -sf --max-time 10 "http://127.0.0.1:${port}/api/status" 2>/dev/null || true)"
+  if [[ -z "${json}" ]]; then
+    row "dashboard API" "not responding on :${port}"
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s' "${json}" | jq -r '
+      "  overall                \(.status)",
+      "  current block          \(.chain.currentBlock // "—")",
+      "  finalized              \(.chain.finalizedBlock // "—")",
+      "  reward balance         \(.chain.balances.reward.xl1 // "—") XL1",
+      "  signing balance        \(.chain.balances.producer.xl1 // "—") XL1",
+      "  blocks submitted       \(.node.blocksPublished // "—")",
+      (if (.problems | length) > 0 then "  problems               " + (.problems | join("; ")) else empty end)'
+  else
+    row "dashboard API" "responding (install jq for detail)"
+  fi
+  printf '\n'
+}
+
+# ------------------------------------------------------------ start and stop
+
+cmd_start() {
+  need_root start
+  [[ -f "${PRODUCER_ENV}" ]] || die "${PRODUCER_ENV} not found — copy your env file there first"
+  grep -qE '^XL1_MNEMONIC=.+$' "${PRODUCER_ENV}" || die "${PRODUCER_ENV} has no XL1_MNEMONIC set"
+  systemctl enable --now xl1-collect.timer >/dev/null 2>&1
+  systemctl enable --now xl1-dashboard >/dev/null 2>&1
+  systemctl enable --now xl1-producer || die "producer failed to start — try: xl1ctl doctor"
+  printf '%s✓%s producer, dashboard and collector started\n' "${GREEN}" "${RESET}"
+  cmd_status
+}
+
+cmd_stop() {
+  need_root stop
+  systemctl stop xl1-producer 2>/dev/null
+  printf '%s✓%s producer stopped (dashboard left running)\n' "${GREEN}" "${RESET}"
+}
+
+cmd_restart() {
+  need_root restart
+  systemctl restart xl1-producer || die "restart failed — try: xl1ctl doctor"
+  printf '%s✓%s producer restarted\n' "${GREEN}" "${RESET}"
+  sleep 3
+  cmd_status
+}
+
+# ----------------------------------------------------------------- log tails
+
+cmd_logs() {
+  local follow="" lines=100
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--follow) follow=1; shift ;;
+      -n) lines="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if docker inspect xl1-producer >/dev/null 2>&1; then
+    if [[ -n "${follow}" ]]; then docker logs -f --tail "${lines}" xl1-producer 2>&1
+    else docker logs --tail "${lines}" xl1-producer 2>&1; fi
+  else
+    if [[ -n "${follow}" ]]; then journalctl -u xl1-producer -f
+    else journalctl -u xl1-producer -n "${lines}" --no-pager; fi
+  fi
+}
+
+# -------------------------------------------------------------------- health
+
+cmd_health() {
+  head_ "Producer probe"
+  for p in livez readyz healthz; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:9099/${p}" 2>/dev/null || echo 000)"
+    [[ "${code}" == "200" ]] && mark="${GREEN}ok${RESET}" || mark="${RED}${code}${RESET}"
+    printf '  /%-8s %b\n' "${p}" "${mark}"
+  done
+  head_ "Dashboard"
+  local port; port="$(dash_port)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${port}/healthz" 2>/dev/null || echo 000)"
+  row "/healthz" "${code}"
+  printf '\n'
+}
+
+# ---------------------------------------------------------------- addresses
+
+# The gap this closes: nothing in the running node ever prints which key it
+# signs with. Without this you cannot tell "not yet allowlisted" from "wrong
+# seed in the env file" — and both look like a perfectly healthy node.
+cmd_addr() {
+  need_root addr
+  [[ -f "${PRODUCER_ENV}" ]] || die "${PRODUCER_ENV} not found"
+  docker image inspect "${DASH_IMAGE}" >/dev/null 2>&1 \
+    || die "${DASH_IMAGE} not loaded — run: xl1ctl update"
+
+  local reward
+  reward="$(grep -oP '^XL1_REWARD_ADDRESS=\K.*' "${PRODUCER_ENV}" 2>/dev/null | tr -d '"'"'"' ' | sed 's/^0[xX]//' | tr 'A-Z' 'a-z')"
+
+  head_ "Addresses"
+
+  # The mnemonic is passed via --env-file, never on the command line, so it
+  # never lands in ps output or shell history.
+  local derived
+  derived="$(docker run --rm --env-file "${PRODUCER_ENV}" -w /app \
+      --entrypoint node "${DASH_IMAGE}" --input-type=module -e '
+      const { generateXyoBaseWalletFromPhrase } = await import("@xyo-network/xl1-sdk/protocol-sdk")
+      const w = await generateXyoBaseWalletFromPhrase(process.env.XL1_MNEMONIC)
+      process.stdout.write((await w.derivePath("0")).address.toLowerCase())
+    ' 2>/dev/null)"
+
+  if [[ -z "${derived}" ]]; then
+    printf '  %scould not derive the signing address%s\n\n' "${RED}" "${RESET}"
+    return 1
+  fi
+
+  row "signing (accountPath 0)" "${derived}"
+  row "reward address" "${reward:-<unset>}"
+
+  if [[ "${derived}" == "${reward}" ]]; then
+    printf '\n  %s✓%s Signer and reward are the same address.\n' "${GREEN}" "${RESET}"
+    printf '    If that address is allowlisted, blocks will be accepted.\n\n'
+  else
+    printf '\n  %s!%s Signer and reward differ.\n' "${YELLOW}" "${RESET}"
+    printf '    Rewards still go to the reward address, but authorization depends\n'
+    printf '    on the %ssigning%s address — that is the one that must be allowlisted.\n' "${BOLD}" "${RESET}"
+    printf '    If you meant to sign as the reward address, put its seed in\n'
+    printf '    %s instead.\n\n' "${PRODUCER_ENV}"
+  fi
+}
+
+# ----------------------------------------------------------------- dashboard
+
+cmd_dashboard() {
+  local port ip ts
+  port="$(dash_port)"
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  head_ "Dashboard"
+  row "LAN" "http://${ip}:${port}"
+  row "mDNS" "http://$(hostname).local:${port}"
+  if command -v tailscale >/dev/null 2>&1; then
+    ts="$(tailscale ip -4 2>/dev/null | head -1)"
+    [[ -n "${ts}" ]] && row "Tailscale" "http://${ts}:${port}"
+  fi
+  row "JSON" "http://${ip}:${port}/api/status"
+  printf '\n'
+}
+
+# -------------------------------------------------------- backup and restore
+
+cmd_backup() {
+  need_root backup
+  local out="${1:-${HOME:-/root}/xl1-backup-$(date +%Y%m%d-%H%M%S).tar.gz.enc}"
+  [[ -d "${CONF_DIR}" ]] || die "${CONF_DIR} not found — nothing to back up"
+  command -v openssl >/dev/null || die "openssl not installed"
+
+  cat <<EOF
+
+  This backs up ${CONF_DIR}, which contains ${BOLD}your producer seed phrase${RESET}.
+  It is encrypted with a passphrase you choose now. If you lose that
+  passphrase the backup is unrecoverable — there is no reset.
+
+EOF
+  tar -czf - -C / etc/xl1 var/lib/xl1/.blocks-published 2>/dev/null \
+    | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -out "${out}" \
+    || die "backup failed"
+
+  chmod 600 "${out}"
+  printf '\n%s✓%s backup written to %s%s%s (%s)\n' "${GREEN}" "${RESET}" "${BOLD}" "${out}" "${RESET}" "$(du -h "${out}" | cut -f1)"
+  printf '  Copy it somewhere off this Pi. An SD card is not a backup.\n\n'
+}
+
+cmd_restore() {
+  need_root restore
+  local in="${1:-}"
+  [[ -n "${in}" ]] || die "usage: xl1ctl restore FILE"
+  [[ -f "${in}" ]] || die "no such file: ${in}"
+  command -v openssl >/dev/null || die "openssl not installed"
+
+  printf '\n  This overwrites %s. Continue? [y/N] ' "${CONF_DIR}"
+  read -r reply
+  [[ "${reply}" =~ ^[Yy] ]] || { printf '  aborted\n\n'; return 1; }
+
+  # Decrypt to a staging area first, so a wrong passphrase cannot leave
+  # /etc/xl1 half-written.
+  local tmp; tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' RETURN
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "${in}" 2>/dev/null \
+    | tar -xzf - -C "${tmp}" 2>/dev/null \
+    || die "could not decrypt — wrong passphrase, or the file is corrupt. Nothing was changed."
+
+  [[ -d "${tmp}/etc/xl1" ]] || die "archive does not contain etc/xl1. Nothing was changed."
+
+  cp -a "${tmp}/etc/xl1/." "${CONF_DIR}/"
+  chmod 600 "${PRODUCER_ENV}" 2>/dev/null
+  [[ -f "${tmp}/var/lib/xl1/.blocks-published" ]] && \
+    cp -a "${tmp}/var/lib/xl1/.blocks-published" "${STATE_DIR}/" 2>/dev/null
+
+  printf '\n%s✓%s restored to %s\n' "${GREEN}" "${RESET}" "${CONF_DIR}"
+  printf '  Start it with: sudo xl1ctl start\n\n'
+}
+
+# -------------------------------------------------------------------- update
+
+cmd_update() {
+  need_root update
+  local dir="${1:-}"
+  if [[ -z "${dir}" ]]; then
+    for c in "${HOME:-/root}/xl1-pi" /boot/firmware/xl1-pi /opt/xl1-pi "$(pwd)"; do
+      [[ -f "${c}/xl1-local-arm64.tar.gz" ]] && { dir="${c}"; break; }
+    done
+  fi
+  [[ -n "${dir}" ]] || die "could not find the image tarballs — pass the bundle directory: xl1ctl update /path/to/xl1-pi"
+
+  for t in xl1-local-arm64 xl1-dashboard-arm64; do
+    [[ -f "${dir}/${t}.tar.gz" ]] || { printf '  %sskipping%s %s (not present)\n' "${DIM}" "${RESET}" "${t}"; continue; }
+    printf '  loading %s…\n' "${t}"
+    gunzip -c "${dir}/${t}.tar.gz" | docker load | sed 's/^/    /'
+  done
+
+  docker image inspect xl1:local-arm64 >/dev/null 2>&1 && docker tag xl1:local-arm64 xl1:local
+  docker image inspect xl1-dashboard:local-arm64 >/dev/null 2>&1 && docker tag xl1-dashboard:local-arm64 xl1-dashboard:local
+
+  systemctl restart xl1-dashboard 2>/dev/null
+  systemctl is-active --quiet xl1-producer && systemctl restart xl1-producer
+  printf '\n%s✓%s images reloaded and services restarted\n\n' "${GREEN}" "${RESET}"
+}
+
+# -------------------------------------------------------------------- doctor
+
+cmd_doctor() {
+  head_ "Diagnosis"
+  local issues=0
+
+  if ! systemctl is-active --quiet xl1-producer; then
+    printf '  %s✗%s producer not running\n' "${RED}" "${RESET}"
+    issues=$((issues+1))
+    if [[ ! -f "${PRODUCER_ENV}" ]]; then
+      printf '    → %s is missing. Copy your env file there.\n' "${PRODUCER_ENV}"
+    elif ! grep -qE '^XL1_MNEMONIC=.+$' "${PRODUCER_ENV}"; then
+      printf '    → XL1_MNEMONIC is empty in %s.\n' "${PRODUCER_ENV}"
+    else
+      printf '    → last failure:\n'
+      journalctl -u xl1-producer -n 12 --no-pager -p err 2>/dev/null | sed 's/^/      /'
+      printf '    → full log: xl1ctl logs -n 60\n'
+    fi
+  else
+    printf '  %s✓%s producer running\n' "${GREEN}" "${RESET}"
+  fi
+
+  if ! docker image inspect xl1:local >/dev/null 2>&1; then
+    printf '  %s✗%s image xl1:local missing → xl1ctl update\n' "${RED}" "${RESET}"; issues=$((issues+1))
+  fi
+
+  local rc; rc="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST \
+    https://beta.api.chain.xyo.network/rpc -H 'content-type: application/json' --data '{}' 2>/dev/null || echo 000)"
+  if [[ "${rc}" == "000" ]]; then
+    printf '  %s✗%s cannot reach the Sequence gateway\n' "${RED}" "${RESET}"; issues=$((issues+1))
+  else
+    printf '  %s✓%s Sequence gateway reachable\n' "${GREEN}" "${RESET}"
+  fi
+
+  local swap_used
+  swap_used="$(awk '/^SwapTotal:/{t=$2}/^SwapFree:/{f=$2}END{if(t>0)print int((t-f)*100/t); else print 0}' /proc/meminfo)"
+  if (( swap_used > 60 )); then
+    printf '  %s!%s swap %s%% used — memory pressure; consider lowering --max-old-space-size\n' "${YELLOW}" "${RESET}" "${swap_used}"
+  fi
+
+  if [[ -r /sys/devices/platform/soc/soc:firmware/get_throttled ]]; then
+    local b; b=$(( $(cat /sys/devices/platform/soc/soc:firmware/get_throttled) ))
+    (( (b >> 0) & 1 )) && { printf '  %s✗%s undervoltage right now — replace the power supply\n' "${RED}" "${RESET}"; issues=$((issues+1)); }
+  fi
+
+  printf '\n'
+  if (( issues == 0 )); then
+    printf '  Nothing obviously wrong. If blocks are not being accepted, check\n'
+    printf '  that the signing address is allowlisted:  %ssudo xl1ctl addr%s\n\n' "${BOLD}" "${RESET}"
+  fi
+}
+
+usage() {
+  cat <<EOF
+${BOLD}xl1ctl${RESET} — operate the XL1 block producer
+
+  ${BOLD}status${RESET}              what is running, chain position, balances
+  ${BOLD}start${RESET} | ${BOLD}stop${RESET} | ${BOLD}restart${RESET}
+  ${BOLD}logs${RESET} [-f] [-n N]    producer logs
+  ${BOLD}health${RESET}              raw probes
+  ${BOLD}addr${RESET}                which address the node actually signs as
+  ${BOLD}dashboard${RESET}           dashboard URLs
+  ${BOLD}backup${RESET} [FILE]       encrypted backup of /etc/xl1 (holds the seed)
+  ${BOLD}restore${RESET} FILE        restore from a backup
+  ${BOLD}update${RESET} [DIR]        reload images from tarballs, restart
+  ${BOLD}doctor${RESET}              diagnose a producer that is not working
+
+EOF
+}
+
+case "${1:-status}" in
+  status)    shift; cmd_status "$@" ;;
+  start)     shift; cmd_start "$@" ;;
+  stop)      shift; cmd_stop "$@" ;;
+  restart)   shift; cmd_restart "$@" ;;
+  logs)      shift; cmd_logs "$@" ;;
+  health)    shift; cmd_health "$@" ;;
+  addr|address|whoami) shift; cmd_addr "$@" ;;
+  dashboard|dash) shift; cmd_dashboard "$@" ;;
+  backup)    shift; cmd_backup "$@" ;;
+  restore)   shift; cmd_restore "$@" ;;
+  update)    shift; cmd_update "$@" ;;
+  doctor)    shift; cmd_doctor "$@" ;;
+  -h|--help|help) usage ;;
+  *) printf '%sunknown command:%s %s\n\n' "${RED}" "${RESET}" "$1"; usage; exit 1 ;;
+esac

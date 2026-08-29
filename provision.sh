@@ -249,6 +249,26 @@ fi
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-collect.sh" /usr/local/bin/xl1-collect.sh
 info "installed /usr/local/bin/xl1-collect.sh"
 
+# Root-owned and not operator-writable: the sudoers grant below would otherwise
+# be a way to escalate by editing the script it exempts.
+install -o root -g root -m 755 "${BUNDLE_DIR}/scripts/xl1ctl" /usr/local/bin/xl1ctl
+info "installed /usr/local/bin/xl1ctl"
+
+# Let the operator drive xl1ctl without retyping a password, so the desktop
+# shortcuts work in one click. Scoped to this one command, nothing else.
+if [[ -n "${TARGET_USER}" ]] && id "${TARGET_USER}" >/dev/null 2>&1; then
+  SUDOERS=/etc/sudoers.d/xl1ctl
+  printf '%s ALL=(root) NOPASSWD: /usr/local/bin/xl1ctl\n' "${TARGET_USER}" > "${SUDOERS}.tmp"
+  chmod 440 "${SUDOERS}.tmp"
+  if visudo -c -f "${SUDOERS}.tmp" >/dev/null 2>&1; then
+    mv "${SUDOERS}.tmp" "${SUDOERS}"
+    info "${TARGET_USER} may run 'sudo xl1ctl' without a password"
+  else
+    rm -f "${SUDOERS}.tmp"
+    warn "sudoers snippet failed validation; skipped (you will be asked for a password)"
+  fi
+fi
+
 # ------------------------------------------------------------------ 7. images
 
 log "Loading container images"
@@ -293,6 +313,15 @@ cat <<EOF
     Dashboard   http://${IP}:${DASH_PORT}
                 http://$(hostname).local:${DASH_PORT}
     JSON API    http://${IP}:${DASH_PORT}/api/status
+
+    Operate it with 'xl1ctl':
+
+      xl1ctl status         what is running, chain position, balances
+      xl1ctl addr           which address the node actually signs as
+      xl1ctl logs -f        follow the producer log
+      xl1ctl doctor         diagnose a producer that is not working
+      xl1ctl backup         encrypted backup of /etc/xl1
+      xl1ctl --help         everything else
 
 EOF
 

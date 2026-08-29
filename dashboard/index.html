@@ -115,6 +115,9 @@ function render(d) {
       d.node?.blocksPublished !== undefined && ['Blocks submitted', num(d.node.blocksPublished)],
       d.node?.lastPublishedAt && ['Last submission', esc(d.node.lastPublishedAt)],
       d.node?.errorCount !== undefined && ['Log errors', `<span class="${d.node.errorCount > 0 ? 'warn' : ''}">${num(d.node.errorCount)}</span>`],
+      d.node?.eligibility && ['Eligibility', d.node.eligibility.blocked
+        ? `<span class="bad">${esc(d.node.eligibility.reason)}</span>`
+        : `<span class="ok">no complaint in ${esc(d.node.eligibility.window)}</span>`],
     ])}
     ${d.node?.ok === false ? `<div class="err" style="margin-top:8px">${esc(d.node.error)}</div>` : ''}
     ${d.node?.stale ? `<div class="err" style="margin-top:8px">collector data ${d.node.ageSeconds}s old</div>` : ''}
@@ -156,6 +159,41 @@ function render(d) {
         b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
         b.producer && ['Producer address', addrCell(b.producer)],
       ])}
+    </section>`)
+  }
+
+  // Software and host — the two layers that rot quietly while every other
+  // signal on this page stays green.
+  const rel = d.release ?? {}
+  const osi = d.node?.os
+  if (rel.installed || rel.latest || osi) {
+    const lagCell = rel.lag === 'behind'
+      ? `<span class="warn">${esc(rel.installed)} → ${esc(rel.latest)} available</span>`
+      : rel.lag === 'current' ? `<span class="ok">${esc(rel.installed)} · current</span>`
+      : rel.installed ? `<span class="mono">${esc(rel.installed)}</span>`
+      : '<span class="sub">unknown</span>'
+
+    // apt answers against its last refresh, so the count is only as good as the
+    // lists. Show the age beside it rather than letting a stale zero pass as news.
+    const aptAge = osi?.aptAgeHours
+    const ageCell = aptAge === undefined ? '<span class="sub">unknown</span>'
+      : aptAge > 168 ? `<span class="bad">${Math.round(aptAge / 24)}d — count unreliable</span>`
+      : aptAge > 48 ? `<span class="warn">${Math.round(aptAge / 24)}d</span>`
+      : `<span class="ok">${aptAge < 1 ? '<1' : Math.round(aptAge)}h</span>`
+
+    cards.push(`<section>
+      <h2>Software &amp; host</h2>
+      <div class="big">${esc(rel.installed ?? '—')}</div>
+      <div class="sub">xl1-cli in the running container</div>
+      ${dl([
+        ['xl1-cli', lagCell],
+        rel.ok === false && !rel.disabled && ['Registry', `<span class="warn">${esc(rel.error ?? 'unreachable')}</span>`],
+        osi && ['Host updates', osi.updates > 0 ? `<span class="warn">${num(osi.updates)} pending</span>` : '<span class="ok">none pending</span>'],
+        osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],
+        osi && ['apt lists', ageCell],
+        osi?.rebootRequired && ['Reboot', '<span class="bad">required</span>'],
+      ])}
+      ${!osi ? '<div class="sub" style="margin-top:8px">host package check off or not yet run</div>' : ''}
     </section>`)
   }
 

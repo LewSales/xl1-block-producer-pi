@@ -15,6 +15,20 @@ CURSOR="${STATE_DIR}/.collect-cursor"
 COUNTER="${STATE_DIR}/.blocks-published"
 LOG_LINES="${XL1_LOG_LINES:-40}"
 
+# How far back to scan the log for the node's own reason it cannot produce. Long
+# enough to survive a quiet period, short enough that a resolved problem stops
+# being reported as a current fault.
+ELIGIBILITY_WINDOW="${XL1_ELIGIBILITY_WINDOW:-20m}"
+
+# The slow readers. Each shells out to something far more expensive than a log
+# tail, and each answers a question that changes daily at most, so they run on
+# their own cadence rather than every 30s with the rest of the snapshot.
+CLI_CHECK_INTERVAL="${XL1_CLI_CHECK_INTERVAL:-21600}"   # 6h
+OS_UPDATE_INTERVAL="${XL1_OS_UPDATE_INTERVAL:-21600}"   # 6h when nothing pending
+OS_PENDING_INTERVAL="${XL1_OS_PENDING_INTERVAL:-900}"   # 15m while something is
+CLI_CACHE="${STATE_DIR}/.cli-version"
+OS_CACHE="${STATE_DIR}/.os-updates"
+
 mkdir -p "${STATE_DIR}"
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -28,6 +42,13 @@ json_escape() {
   s=${s//$'\n'/\\n}
   # strip remaining control chars that would make the JSON invalid
   printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037'
+}
+
+# Seconds since a cache file was last written; a huge number if it never was.
+cache_age() {
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null)" || { printf '999999999'; return; }
+  printf '%s' "$(( $(date +%s) - m ))"
 }
 
 COLLECTED_AT="$(now_iso)"
@@ -90,6 +111,109 @@ while IFS= read -r line; do
 done <<< "${TAIL_LOG}"
 LOG_JSON+="]"
 
+# ------------------------------------------------------ why it cannot produce
+#
+# A producer that is authorized but ineligible looks identical to a healthy one
+# from the outside: container up, health probe green, zero errors, zero blocks.
+# The node does say why, in its own words, on stderr — so ask it.
+#
+# Scanned over a window rather than the whole history: a complaint from two days
+# ago that has since been resolved is not a current fault, and reporting it as
+# one is worse than reporting nothing.
+BLOCKED_REASON=""
+ELIG_LOG="$(docker logs --since "${ELIGIBILITY_WINDOW}" "${CONTAINER}" 2>&1 | tail -n 4000 | tr '[:upper:]' '[:lower:]')"
+if [[ -n "${ELIG_LOG}" ]]; then
+  # needle|reason — the protocol's own phrasing on the left, plain English right.
+  while IFS='|' read -r needle reason; do
+    [[ -z "${needle}" ]] && continue
+    if [[ "${ELIG_LOG}" == *"${needle}"* ]]; then BLOCKED_REASON="${reason}"; break; fi
+  done <<'PATTERNS'
+insufficient stake|insufficient stake
+has no balance|no balance
+not in the allowed|not on the allowed-producer list
+not an allowed producer|not on the allowed-producer list
+no-intent|no stake intent declared
+unseasoned-or-understaked|stake too new or too small
+unseasoned|stake not yet seasoned
+insufficient-self-bond|self-bond below the minimum
+PATTERNS
+fi
+
+# ------------------------------------------------- which CLI the node is running
+#
+# `docker exec` costs about a second on a 3 B+, and the answer changes when the
+# image is rebuilt and never in between, so it is cached rather than re-asked
+# every 30 seconds. The dashboard compares this against the published release.
+if (( $(cache_age "${CLI_CACHE}") > CLI_CHECK_INTERVAL )); then
+  V="$(docker exec "${CONTAINER}" xl1 --version 2>/dev/null | tr -d '\r' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+  if [[ -n "${V}" ]]; then
+    printf '%s' "${V}" > "${CLI_CACHE}"
+  else
+    # Back off either way. Retrying a failing exec every 30s achieves nothing
+    # and keeps a container busy that has better things to do.
+    touch "${CLI_CACHE}"
+  fi
+fi
+CLI_INSTALLED="$(cat "${CLI_CACHE}" 2>/dev/null || echo "")"
+
+# ------------------------------------------------------- the layer underneath
+#
+# A host can sit unpatched for months while every node signal reads perfectly
+# normal, and nothing else here looks at it.
+#
+# The staleness figure is not decoration. `apt list --upgradable` answers against
+# the last `apt update`, so a host whose lists have not been refreshed in months
+# reports "0 updates" — confidently, and wrongly. That is a worse failure than
+# not checking at all, because it reads as good news. Reporting how old the lists
+# are is what makes the zero interpretable.
+OS_TOTAL=""; OS_SEC=""; OS_AGE=""; OS_REBOOT="false"
+if (( OS_UPDATE_INTERVAL > 0 )); then
+  OS_PENDING=0
+  if [[ -s "${OS_CACHE}" ]]; then
+    read -r _t _s _a _r < "${OS_CACHE}"
+    [[ "${_t:-0}" != "0" || "${_s:-0}" != "0" || "${_r:-false}" == "true" ]] && OS_PENDING=1
+  fi
+  # Pending means someone may be about to act on it, so look again soon — a host
+  # just patched should say so within minutes, not at the end of a six-hour cache.
+  OS_INTERVAL=$(( OS_PENDING ? OS_PENDING_INTERVAL : OS_UPDATE_INTERVAL ))
+  if (( $(cache_age "${OS_CACHE}") > OS_INTERVAL )); then
+    UPG="$(apt list --upgradable 2>/dev/null | grep -F '[upgradable from:' || true)"
+    T=0; SEC=0
+    while IFS= read -r line; do
+      [[ -z "${line}" ]] && continue
+      T=$(( T + 1 ))
+      # pkg/suite version arch [upgradable from: older] — suite may be a comma list.
+      suite="${line#*/}"; suite="${suite%% *}"
+      # Stock Debian puts security fixes in their own suite. Raspberry Pi OS does
+      # NOT — its packages arrive through plain `stable`, security included — so
+      # this finds nothing on a Pi however many are pending. Kept because it is
+      # right where it applies and costs nothing where it does not, but nothing
+      # downstream may depend on it or it goes permanently silent here.
+      [[ "${suite}" == *-security* ]] && SEC=$(( SEC + 1 ))
+    done <<< "${UPG}"
+
+    # How old the package lists are. apt-daily refreshes these on most Debian
+    # hosts, but "most" is not "this one", so it is measured rather than assumed.
+    AGE=""
+    for pth in /var/lib/apt/periodic/update-success-stamp /var/lib/apt/lists; do
+      if M="$(stat -c %Y "${pth}" 2>/dev/null)"; then
+        AGE="$(awk -v n="$(date +%s)" -v m="${M}" 'BEGIN{printf "%.1f",(n-m)/3600}')"
+        break
+      fi
+    done
+
+    # Written by a kernel or libc upgrade. Absent on a host without
+    # update-notifier-common, which is why absence is false rather than unknown.
+    R="false"; [[ -e /var/run/reboot-required || -e /run/reboot-required ]] && R="true"
+
+    printf '%s %s %s %s\n' "${T}" "${SEC}" "${AGE:--}" "${R}" > "${OS_CACHE}"
+  fi
+  if [[ -s "${OS_CACHE}" ]]; then
+    read -r OS_TOTAL OS_SEC OS_AGE OS_REBOOT < "${OS_CACHE}"
+    [[ "${OS_AGE}" == "-" ]] && OS_AGE=""
+  fi
+fi
+
 {
   printf '{'
   printf '"collectedAt":"%s",' "${COLLECTED_AT}"
@@ -98,6 +222,25 @@ LOG_JSON+="]"
     "$(json_escape "${UPTIME}")" "${RESTARTS}" "$(json_escape "${IMAGE}")" "$(json_escape "${HEALTH}")"
   printf '"blocksPublished":%s,' "${TOTAL}"
   printf '"errorCount":%s,' "${ERRORS:-0}"
+
+  # Absence is a real answer here and is reported as absence, not as a zero or a
+  # false. "We did not look" and "we looked and found nothing" are different
+  # claims, and the dashboard renders them differently.
+  if [[ -n "${BLOCKED_REASON}" ]]; then
+    printf '"eligibility":{"blocked":true,"reason":"%s","window":"%s"},' \
+      "$(json_escape "${BLOCKED_REASON}")" "$(json_escape "${ELIGIBILITY_WINDOW}")"
+  else
+    printf '"eligibility":{"blocked":false,"window":"%s"},' "$(json_escape "${ELIGIBILITY_WINDOW}")"
+  fi
+
+  [[ -n "${CLI_INSTALLED}" ]] && printf '"cliVersion":"%s",' "$(json_escape "${CLI_INSTALLED}")"
+
+  if [[ -n "${OS_TOTAL}" ]]; then
+    printf '"os":{"updates":%s,"securityUpdates":%s,"rebootRequired":%s' \
+      "${OS_TOTAL}" "${OS_SEC}" "${OS_REBOOT}"
+    [[ -n "${OS_AGE}" ]] && printf ',"aptAgeHours":%s' "${OS_AGE}"
+    printf '},'
+  fi
   [[ -n "${LAST_PUBLISHED}" ]] && printf '"lastPublishedAt":"%s",' "${LAST_PUBLISHED}"
   printf '"recentLog":%s' "${LOG_JSON}"
   printf '}\n'

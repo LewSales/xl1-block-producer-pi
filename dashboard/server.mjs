@@ -34,6 +34,12 @@ const LOCAL_POLL_MS = Number(process.env.DASH_LOCAL_POLL_MS ?? 5_000)
 const EXPLORER_URL = (process.env.DASH_EXPLORER_URL ?? `https://explore.xyo.network/xl1/${NETWORK}`).replace(/\/+$/, '')
 const explorerAddress = (a) => (a ? `${EXPLORER_URL}/address/${a}` : undefined)
 
+// Where to look up the newest published CLI, for the "update available"
+// comparison. Set empty to switch version checking off entirely.
+const CLI_REGISTRY = process.env.DASH_CLI_REGISTRY ?? 'https://registry.npmjs.org/@xyo-network/xl1-cli/latest'
+// Four times a day is plenty for something that changes every few weeks.
+const CLI_CHECK_MS = Number(process.env.DASH_CLI_CHECK_MS ?? 21_600_000)
+
 // XL1 balances are keyed by bare lowercase hex — a 0x prefix is rejected by the
 // gateway, and the env examples ship the 0x form, so normalize every address.
 const bareHex = (a) => (a ?? '').trim().replace(/^0x/i, '').toLowerCase()
@@ -74,6 +80,7 @@ function getGateway() {
 
 const state = {
   chain: { ok: false, error: 'not polled yet' },
+  release: { ok: false, error: 'not polled yet' },
   health: { ok: false, error: 'not polled yet' },
   node: { ok: false, error: 'not polled yet' },
   system: { ok: false, error: 'not polled yet' },
@@ -130,6 +137,50 @@ async function pollChain() {
   } catch (error) {
     state.chain = { ok: false, error: error.message?.slice(0, 300), polledAt: new Date().toISOString() }
   }
+}
+
+// -------------------------------------------------------------- release source
+
+/** Newest published xl1-cli, for comparison against what the container runs.
+ *
+ * A node that is up, healthy and four releases behind reads as perfectly fine
+ * on every other signal here. Failure is non-fatal by construction: an
+ * unreachable registry costs the comparison and nothing else.
+ */
+async function pollRelease() {
+  if (!CLI_REGISTRY) { state.release = { ok: false, disabled: true }; return }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const res = await fetch(CLI_REGISTRY, { signal: controller.signal, headers: { accept: 'application/json' } })
+    if (!res.ok) throw new Error(`registry returned ${res.status}`)
+    const body = await res.json()
+    const latest = typeof body?.version === 'string' ? body.version : undefined
+    if (!latest) throw new Error('registry response had no version')
+    state.release = { ok: true, latest, polledAt: new Date().toISOString() }
+  } catch (error) {
+    state.release = {
+      ok: false,
+      error: error.name === 'AbortError' ? 'timeout' : error.message?.slice(0, 200),
+      polledAt: new Date().toISOString(),
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Compare two dotted versions numerically. Undefined on anything unparseable —
+ *  a malformed version must not be reported as "up to date". */
+function versionLag(installed, latest) {
+  if (!installed || !latest) return undefined
+  const parse = (v) => String(v).trim().replace(/^v/, '').split('.').map(Number)
+  const a = parse(installed), b = parse(latest)
+  if (a.some(Number.isNaN) || b.some(Number.isNaN)) return undefined
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (b[i] ?? 0) - (a[i] ?? 0)
+    if (d !== 0) return d > 0 ? 'behind' : 'ahead'
+  }
+  return 'current'
 }
 
 // --------------------------------------------------------------- health source
@@ -275,11 +326,35 @@ function overall() {
   if (state.system.ok && state.system.swap?.usedPercent > 60) problems.push('heavy swap use')
   if (state.chain.ok && state.chain.chainIdMatchesPreset === false) problems.push('chain id differs from preset')
 
+  // A node can be up, healthy and unable to produce a single block. Nothing
+  // else on this page distinguishes that from working.
+  if (state.node.ok && state.node.eligibility?.blocked) {
+    problems.push(`producer ineligible: ${state.node.eligibility.reason}`)
+  }
+
+  const lag = versionLag(state.node?.cliVersion, state.release?.latest)
+  if (lag === 'behind') problems.push(`xl1-cli ${state.node.cliVersion} behind published ${state.release.latest}`)
+
+  const osInfo = state.node?.os
+  if (osInfo) {
+    if (osInfo.securityUpdates > 0) problems.push(`${osInfo.securityUpdates} host security update(s) pending`)
+    if (osInfo.rebootRequired) problems.push('host reboot required')
+    // A zero read off month-old lists is the worst answer this can give, so the
+    // staleness is escalated rather than shown quietly beside the count.
+    if (osInfo.aptAgeHours > 168) problems.push(`apt lists ${Math.round(osInfo.aptAgeHours / 24)}d stale — update count is not trustworthy`)
+  }
+
   const critical = !state.health.ok || (state.node.ok && state.node.container?.running === false)
   return { status: critical ? 'down' : problems.length ? 'degraded' : 'ok', problems }
 }
 
-const snapshot = () => ({ ...overall(), generatedAt: new Date().toISOString(), dashboardStartedAt: state.startedAt, ...state })
+const snapshot = () => ({
+  ...overall(),
+  generatedAt: new Date().toISOString(),
+  dashboardStartedAt: state.startedAt,
+  ...state,
+  release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
+})
 
 // ---------------------------------------------------------------------- server
 
@@ -316,10 +391,11 @@ const server = createServer(async (req, res) => {
 })
 
 // Prime every source before listening so the first page load is never empty.
-await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem()])
+await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease()])
 
 setInterval(pollChain, CHAIN_POLL_MS).unref()
 setInterval(() => { pollHealth(); pollNode(); pollSystem() }, LOCAL_POLL_MS).unref()
+setInterval(pollRelease, CLI_CHECK_MS).unref()
 
 server.listen(PORT, BIND, () => {
   console.log(`xl1-dashboard listening on http://${BIND}:${PORT} (network=${NETWORK}${TOKEN ? ', token required' : ''})`)

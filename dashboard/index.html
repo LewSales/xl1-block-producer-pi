@@ -140,6 +140,10 @@ function render(d) {
 
   // Rewards
   const b = d.chain?.balances ?? {}
+  // Addresses link straight into the explorer — the lookup an operator does most.
+  const addrCell = (x) => x?.url
+    ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.address)}</a>`
+    : `<span class="mono">${esc(x?.address)}</span>`
   if (b.reward || b.producer) {
     cards.push(`<section>
       <h2>Rewards</h2>
@@ -147,10 +151,10 @@ function render(d) {
         <div class="sub">reward address balance</div>` : ''}
       ${dl([
         b.reward?.sinceStart && ['Since dashboard start', `${esc(b.reward.sinceStart.xl1)} XL1`],
-        b.reward && ['Reward address', `<span class="mono">${esc(b.reward.address)}</span>`],
+        b.reward && ['Reward address', addrCell(b.reward)],
         b.reward?.error && ['Reward lookup', `<span class="bad">${esc(b.reward.error)}</span>`],
         b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
-        b.producer && ['Producer address', `<span class="mono">${esc(b.producer.address)}</span>`],
+        b.producer && ['Producer address', addrCell(b.producer)],
       ])}
     </section>`)
   }

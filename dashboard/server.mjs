@@ -28,6 +28,12 @@ const TOKEN = process.env.DASH_TOKEN ?? ''
 const CHAIN_POLL_MS = Number(process.env.DASH_CHAIN_POLL_MS ?? 15_000)
 const LOCAL_POLL_MS = Number(process.env.DASH_LOCAL_POLL_MS ?? 5_000)
 
+// The SDK preset's explorerUrl points at the beta explorer host. The public
+// explorer serves each network under /xl1/<network>, which is where an operator
+// actually goes to look up a block or an address.
+const EXPLORER_URL = (process.env.DASH_EXPLORER_URL ?? `https://explore.xyo.network/xl1/${NETWORK}`).replace(/\/+$/, '')
+const explorerAddress = (a) => (a ? `${EXPLORER_URL}/address/${a}` : undefined)
+
 // XL1 balances are keyed by bare lowercase hex — a 0x prefix is rejected by the
 // gateway, and the env examples ship the 0x form, so normalize every address.
 const bareHex = (a) => (a ?? '').trim().replace(/^0x/i, '').toLowerCase()
@@ -96,9 +102,9 @@ async function pollChain() {
       if (!addr) continue
       try {
         const atto = await viewer.account.balance.accountBalance(addr)
-        balances[key] = { address: addr, atto: String(atto), xl1: formatXl1(atto) }
+        balances[key] = { address: addr, atto: String(atto), xl1: formatXl1(atto), url: explorerAddress(addr) }
       } catch (error) {
-        balances[key] = { address: addr, error: error.message?.slice(0, 200) }
+        balances[key] = { address: addr, error: error.message?.slice(0, 200), url: explorerAddress(addr) }
       }
     }
 
@@ -112,7 +118,7 @@ async function pollChain() {
       ok: true,
       network: NETWORK,
       networkName: network.name,
-      explorerUrl: network.explorerUrl,
+      explorerUrl: EXPLORER_URL,
       chainId: String(chainId),
       chainIdMatchesPreset: String(chainId) === network.chain,
       currentBlock: currentNum,

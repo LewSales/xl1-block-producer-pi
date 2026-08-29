@@ -294,6 +294,16 @@ docker tag xl1:local-arm64 xl1:local
 docker tag xl1-dashboard:local-arm64 xl1-dashboard:local
 info "tagged xl1:local and xl1-dashboard:local"
 
+# Same reasoning as xl1ctl: a local overlay at /etc/xl1/ui holds patches applied
+# on top of the shipped image, and the retag above just discarded them.
+if [[ -f /etc/xl1/ui/Dockerfile ]]; then
+  if docker build -q -t xl1-dashboard:local /etc/xl1/ui >/dev/null 2>&1; then
+    info "re-applied the local dashboard overlay from /etc/xl1/ui"
+  else
+    warn "local dashboard overlay at /etc/xl1/ui failed to build — running the stock image"
+  fi
+fi
+
 # ---------------------------------------------------------------- 8. services
 
 log "systemd units"

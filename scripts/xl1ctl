@@ -256,6 +256,21 @@ cmd_restore() {
 
 # -------------------------------------------------------------------- update
 
+# A local overlay at /etc/xl1/ui carries patches applied on top of the shipped
+# dashboard image. Anything that retags xl1-dashboard:local from a tarball
+# silently discards them — the image name is the same, so nothing looks wrong
+# until a panel quietly reverts to an older build. Re-apply after every retag.
+apply_ui_overlay() {
+  local dir=/etc/xl1/ui
+  [[ -f "${dir}/Dockerfile" ]] || return 0
+  printf '  re-applying local dashboard overlay (%s)…\n' "${dir}"
+  if docker build -q -t xl1-dashboard:local "${dir}" >/dev/null 2>&1; then
+    printf '    overlay re-applied\n'
+  else
+    printf '    %swarning:%s overlay build failed — running the stock image\n' "${YELLOW}" "${RESET}"
+  fi
+}
+
 cmd_update() {
   need_root update
   local dir="${1:-}"
@@ -274,6 +289,8 @@ cmd_update() {
 
   docker image inspect xl1:local-arm64 >/dev/null 2>&1 && docker tag xl1:local-arm64 xl1:local
   docker image inspect xl1-dashboard:local-arm64 >/dev/null 2>&1 && docker tag xl1-dashboard:local-arm64 xl1-dashboard:local
+
+  apply_ui_overlay
 
   systemctl restart xl1-dashboard 2>/dev/null
   systemctl is-active --quiet xl1-producer && systemctl restart xl1-producer

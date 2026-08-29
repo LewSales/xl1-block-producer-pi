@@ -7,7 +7,7 @@
 # to be its own failure mode, and a laptop does it in about 80 seconds.
 #
 #   ./build-images.sh
-#   XL1_CLI_VERSION=5.2.2 ./build-images.sh
+#   XL1_CLI_VERSION=5.2.4 ./build-images.sh      # pin an older one
 #
 # Produces xl1-local-arm64.tar.gz and xl1-dashboard-arm64.tar.gz alongside this
 # script. They are gitignored — they are build artifacts, and each exceeds
@@ -17,7 +17,7 @@ set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${HERE}/.build"
-XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.2.2}"
+XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.0}"
 NODE_VERSION="${NODE_VERSION:-24.14.1}"
 UPSTREAM="${UPSTREAM:-https://github.com/XYOracleNetwork/xl1-docker-images.git}"
 UPSTREAM_REF="${UPSTREAM_REF:-main}"

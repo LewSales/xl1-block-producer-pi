@@ -92,29 +92,44 @@ JSON="$(fetch)"
 if [[ -z "${JSON}" ]] || ! printf '%s' "${JSON}" | jq -e . >/dev/null 2>&1; then
   CONDITIONS="dashboard-unreachable|high|Dashboard API did not answer at ${URL}"
 else
+  # Bind the root before testing anything. A helper that takes `.` as its input
+  # sees the boolean it was piped, not the document — so any message that quoted
+  # another field errored, jq exited non-zero, stderr went to /dev/null, and the
+  # timer reported nothing wrong every sixty seconds. Silence that looks exactly
+  # like good news is the worst failure an alerter has.
   CONDITIONS="$(printf '%s' "${JSON}" | jq -r '
-    def cond(k; p; m): if . then "\(k)|\(p)|\(m)" else empty end;
-
+    . as $s |
     [
-      (.status == "down")            | cond("node-down";        "urgent"; "Producer is DOWN"),
-      (.node.eligibility.blocked // false)
-                                     | cond("ineligible";       "high";   "Producer cannot produce: " + (.node.eligibility.reason // "unknown")),
-      (.health.ok | not)             | cond("health-failing";   "high";   "Health probe /livez is failing"),
-      (.chain.ok | not)              | cond("chain-unreachable";"high";   "Chain gateway unreachable"),
-      ((.node.container.running // true) | not)
-                                     | cond("container-stopped";"urgent"; "Producer container is not running"),
-      (.system.throttle.undervoltageNow // false)
-                                     | cond("undervoltage";     "high";   "Pi is undervolting right now"),
-      (.node.stale // false)         | cond("collector-stale";  "default";"Collector snapshot is stale"),
-      (.release.lag == "behind")     | cond("cli-behind";       "default";"xl1-cli " + (.release.installed // "?") + " behind published " + (.release.latest // "?")),
-      ((.node.os.securityUpdates // 0) > 0)
-                                     | cond("os-security";      "default";((.node.os.securityUpdates|tostring) + " host security update(s) pending")),
-      (.node.os.rebootRequired // false)
-                                     | cond("reboot-required";  "default";"Host reboot required"),
-      ((.system.swap.usedPercent // 0) > 60)
-                                     | cond("swapping";         "default";"Heavy swap use — the Pi is short of RAM")
+      (if $s.status == "down"
+        then "node-down|urgent|Producer is DOWN" else empty end),
+      (if ($s.node.container.running // true) | not
+        then "container-stopped|urgent|Producer container is not running" else empty end),
+      (if $s.node.eligibility.blocked // false
+        then "ineligible|high|Producer cannot produce: " + ($s.node.eligibility.reason // "unknown") else empty end),
+      (if ($s.health.ok // true) | not
+        then "health-failing|high|Health probe /livez is failing" else empty end),
+      (if ($s.chain.ok // true) | not
+        then "chain-unreachable|high|Chain gateway unreachable" else empty end),
+      (if $s.system.throttle.undervoltageNow // false
+        then "undervoltage|high|Pi is undervolting right now" else empty end),
+      (if $s.node.stale // false
+        then "collector-stale|default|Collector snapshot is stale" else empty end),
+      (if $s.release.lag == "behind"
+        then "cli-behind|default|xl1-cli " + ($s.release.installed // "?") + " is behind published " + ($s.release.latest // "?") else empty end),
+      (if ($s.node.os.securityUpdates // 0) > 0
+        then "os-security|default|" + (($s.node.os.securityUpdates|tostring) + " host security update(s) pending") else empty end),
+      (if $s.node.os.rebootRequired // false
+        then "reboot-required|default|Host reboot required" else empty end),
+      (if ($s.system.swap.usedPercent // 0) > 60
+        then "swapping|default|Heavy swap use — the Pi is short of RAM" else empty end)
     ] | .[]
-  ' 2>/dev/null)"
+  ')"
+
+  # jq failing must never read as "all clear". If the filter cannot run, say so
+  # rather than reporting a healthy node.
+  if [[ $? -ne 0 ]]; then
+    CONDITIONS="alerter-broken|high|xl1-alert could not parse the status document"
+  fi
 fi
 
 if [[ "${MODE}" == "--status" ]]; then

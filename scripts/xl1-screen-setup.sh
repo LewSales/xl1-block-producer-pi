@@ -21,6 +21,7 @@
 #   sudo ./xl1-screen-setup.sh --panel mhs35 --lcd-show ~/LCD-show
 #   sudo ./xl1-screen-setup.sh --panel tft35a            # stock overlay, no tarball needed
 #   sudo ./xl1-screen-setup.sh --revert
+#   sudo ./xl1-screen-setup.sh --probe                   # which panel is this?
 #
 # Panels: tft35a (stock) · mhs35 · mhs35b · mhs35ips · mis35 · piscreen (stock)
 
@@ -30,6 +31,7 @@ PANEL=""
 ROTATE=90
 LCD_SHOW=""
 REVERT=0
+PROBE=0
 FONT="${FONT:-Terminus:size=8x16}"
 MARK_BEGIN="# >>> XL1 screen (managed) >>>"
 MARK_END="# <<< XL1 screen (managed) <<<"
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --rotate)   ROTATE="$2"; shift 2 ;;
     --lcd-show) LCD_SHOW="$2"; shift 2 ;;
     --revert)   REVERT=1; shift ;;
+    --probe)    PROBE=1; shift ;;
     -h|--help)  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -90,7 +93,109 @@ if (( REVERT )); then
   exit 0
 fi
 
-[[ -n "${PANEL}" ]] || die "--panel is required. One of: tft35a mhs35 mhs35b mhs35ips mis35 piscreen"
+# --------------------------------------------------------------------- probe
+#
+# Every 3.5" SPI panel in this class looks identical from the outside and shows
+# the same white screen when driven by the wrong controller. The silkscreen is
+# the usual way to tell them apart, and it is often unreadable, missing, or
+# under a heatsink.
+#
+# So ask the panel instead. Overlays can be loaded at runtime, which means each
+# candidate can be tried, drawn on, and unloaded in about ten seconds — rather
+# than an edit-reboot-squint cycle per guess.
+#
+# Nothing here is written to config.txt. A probe leaves the system exactly as it
+# found it; making a choice permanent is a separate, deliberate run.
+if (( PROBE )); then
+  log "Probing for the panel"
+
+  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  CANDIDATES=(tft35a mhs35 mhs35ips mis35 mhs35b piscreen)
+
+  LOADED=""
+  cleanup_probe() {
+    [[ -n "${LOADED}" ]] && dtoverlay -r "${LOADED}" 2>/dev/null || true
+    LOADED=""
+  }
+  trap 'cleanup_probe' EXIT INT TERM
+
+  command -v dtoverlay >/dev/null || die "dtoverlay not found (install libraspberrypi-bin)"
+
+  # The bus first: without it every overlay below binds to nothing and the
+  # probe reports six identical failures for one root cause.
+  if [[ ! -e /dev/spidev0.0 ]]; then
+    info "enabling SPI for this boot"
+    dtparam spi=on 2>/dev/null || warn "dtparam spi=on failed; SPI may already be configured differently"
+    sleep 1
+  fi
+  [[ -e /dev/spidev0.0 ]] && info "SPI bus present: /dev/spidev0.0" \
+                          || warn "no /dev/spidev0.0 — probes are unlikely to bind"
+
+  # Stage every bundled blob so the loop is not interrupted by a missing file.
+  for cand in "${CANDIDATES[@]}"; do
+    [[ -f "${OVERLAYS}/${cand}.dtbo" ]] && continue
+    [[ -f "${HERE}/overlays/${cand}.dtbo" ]] || continue
+    install -m 644 "${HERE}/overlays/${cand}.dtbo" "${OVERLAYS}/${cand}.dtbo"
+    info "staged ${cand}.dtbo"
+  done
+
+  printf '\n    %sWatch the panel.%s Each candidate gets three seconds of moving\n' "${BOLD}" "${RESET}"
+  printf '    static. Static of any kind means that controller is correct —\n'
+  printf '    a wrong one stays blank white.\n'
+
+  FOUND=""
+  for cand in "${CANDIDATES[@]}"; do
+    [[ -f "${OVERLAYS}/${cand}.dtbo" ]] || { info "${cand}: no overlay blob, skipped"; continue; }
+
+    BEFORE="$(ls /dev/fb* 2>/dev/null | tr '\n' ' ' || true)"
+    if ! dtoverlay "${cand}" rotate="${ROTATE}" 2>/dev/null; then
+      printf '    %-10s %soverlay would not load%s\n' "${cand}" "${DIM}" "${RESET}"
+      continue
+    fi
+    LOADED="${cand}"
+    sleep 2
+    AFTER="$(ls /dev/fb* 2>/dev/null | tr '\n' ' ' || true)"
+
+    NEWFB=""
+    for fb in ${AFTER}; do [[ " ${BEFORE} " == *" ${fb} "* ]] || NEWFB="${fb}"; done
+
+    if [[ -z "${NEWFB}" ]]; then
+      # Bound to nothing. Almost always the wrong controller for this hardware.
+      printf '    %-10s %sno framebuffer appeared%s\n' "${cand}" "${DIM}" "${RESET}"
+      cleanup_probe
+      continue
+    fi
+
+    printf '    %-10s → %s  ' "${cand}" "${NEWFB}"
+    # Noise rather than a solid fill: a panel showing white on its own is the
+    # symptom being diagnosed, so the test pattern must be unmistakably not that.
+    timeout 3 dd if=/dev/urandom of="${NEWFB}" bs=64k >/dev/null 2>&1 || true
+
+    read -r -p "did the panel show static? [y/N] " ANS </dev/tty
+    cleanup_probe
+    if [[ "${ANS}" =~ ^[Yy] ]]; then FOUND="${cand}"; break; fi
+  done
+
+  trap - EXIT INT TERM
+  cleanup_probe
+
+  if [[ -n "${FOUND}" ]]; then
+    printf '\n%s✓%s This panel is %s%s%s. Make it permanent with:\n\n' \
+      "${GREEN}" "${RESET}" "${BOLD}" "${FOUND}" "${RESET}"
+    printf '      sudo %s --panel %s --rotate %s\n\n' "${BASH_SOURCE[0]}" "${FOUND}" "${ROTATE}"
+  else
+    printf '\n%s✗%s No candidate lit the panel.\n\n' "${YELLOW}" "${RESET}"
+    printf '    Check in this order — each is more common than a rare controller:\n'
+    printf '      1. The panel is seated on pins 1-26, not shifted down the header\n'
+    printf '      2. /dev/spidev0.0 exists (it %s)\n' "$([[ -e /dev/spidev0.0 ]] && echo does || echo does NOT)"
+    printf '      3. The silkscreen name — an MPI3508 is an HDMI panel and will\n'
+    printf '         never respond to any of these\n\n'
+  fi
+  exit 0
+fi
+
+[[ -n "${PANEL}" ]] || die "--panel is required. One of: tft35a mhs35 mhs35b mhs35ips mis35 piscreen
+    Not sure which? Run:  sudo ${BASH_SOURCE[0]} --probe"
 
 # ------------------------------------------------------------------ overlay
 

@@ -130,6 +130,33 @@ if (( PROBE )); then
 
   command -v dtoverlay >/dev/null || die "dtoverlay not found (install libraspberrypi-bin)"
 
+  # A panel overlay applied at boot owns spi0.0 for the life of this boot, and
+  # every runtime candidate then collides with it — reporting a kernel failure
+  # per candidate, which reads as twelve dead panels rather than one occupied
+  # bus. Editing config.txt does not release it; only a reboot does.
+  OCCUPANT=""
+  for namefile in /sys/class/graphics/fb*/name; do
+    [[ -r "${namefile}" ]] || continue
+    case "$(cat "${namefile}" 2>/dev/null)" in
+      fb_*|*ili9*|*st77*|*hx8*) OCCUPANT="$(cat "${namefile}")" ;;
+    esac
+  done
+  [[ -e /sys/bus/spi/devices/spi0.0/driver ]] && \
+    OCCUPANT="${OCCUPANT:-$(basename "$(readlink -f /sys/bus/spi/devices/spi0.0/driver)")}"
+
+  if [[ -n "${OCCUPANT}" ]]; then
+    die "a panel driver (${OCCUPANT}) is already bound to spi0.0 from boot.
+
+    Every candidate below would collide with it and report a kernel failure,
+    which looks like twelve dead panels instead of one occupied bus.
+
+    Clear it first, then probe from a clean tree:
+
+      sudo ${BASH_SOURCE[0]} --revert
+      sudo reboot
+      sudo ${BASH_SOURCE[0]} --probe"
+  fi
+
   # The bus first: without it every overlay below binds to nothing and the
   # probe reports six identical failures for one root cause.
   if [[ ! -e /dev/spidev0.0 ]]; then

@@ -123,9 +123,14 @@ reports live, submits candidate blocks — and none of them are ever accepted.
 `Published block: …` in the log means "candidate submitted", not "accepted".
 That failure mode looks exactly like success from the logs alone.
 
+The configuration you want is for `XL1_MNEMONIC` to derive, at `accountPath 0`,
+the same address you put in `XL1_REWARD_ADDRESS` — an allowlisted one. Then the
+node signs as the listed address and pays itself.
+
 So confirm which address your mnemonic actually derives before concluding you
-are blocked on an allowlist entry. If you have several seeds, one of them may
-already be listed:
+are blocked on an allowlist entry. If you keep several seeds, it is easy to have
+the listed address in hand and the wrong seed in the env file; one of the others
+may already be listed:
 
 ```bash
 node -e "

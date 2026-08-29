@@ -78,6 +78,38 @@ function getGateway() {
   return gatewayPromise
 }
 
+// ------------------------------------------------------------------- history
+//
+// A ring of recent samples so the page can show movement instead of a single
+// instant — a balance that is climbing reads completely differently from the
+// same number standing still.
+//
+// In memory by deliberate choice. The container is read-only and this is a
+// convenience, not a record: it starts empty after a restart, and the page says
+// so rather than drawing a flat line that looks like nothing is happening.
+const HISTORY_POINTS = Number(process.env.DASH_HISTORY_POINTS ?? 240)
+
+const history = { height: [], reward: [], blocks: [], tempC: [], memPct: [] }
+
+function sample(series, value) {
+  if (value === undefined || value === null || Number.isNaN(Number(value))) return
+  const s = history[series]
+  s.push({ t: Date.now(), v: Number(value) })
+  if (s.length > HISTORY_POINTS) s.shift()
+}
+
+/** Rate of change per hour across a series, or undefined if too little data.
+ *  Uses the real elapsed time rather than the sample count, so a restarted
+ *  dashboard or a stalled poller cannot inflate the figure. */
+function perHour(series) {
+  const s = history[series]
+  if (!s || s.length < 2) return undefined
+  const first = s[0], last = s[s.length - 1]
+  const hours = (last.t - first.t) / 3_600_000
+  if (hours <= 0) return undefined
+  return (last.v - first.v) / hours
+}
+
 const state = {
   chain: { ok: false, error: 'not polled yet' },
   release: { ok: false, error: 'not polled yet' },
@@ -133,6 +165,13 @@ async function pollChain() {
       finalizationLag: currentNum - finalizedNum,
       balances,
       polledAt: new Date().toISOString(),
+    }
+
+    sample('height', currentNum)
+    if (balances.reward?.atto !== undefined) {
+      // atto → XL1 as a float: fine for a trend line, never for a displayed
+      // balance, which stays integer-exact above.
+      sample('reward', Number(BigInt(balances.reward.atto) / 10n ** 12n) / 1e6)
     }
   } catch (error) {
     state.chain = { ok: false, error: error.message?.slice(0, 300), polledAt: new Date().toISOString() }
@@ -223,6 +262,7 @@ async function pollNode() {
       ageSeconds: Math.round(age / 1000),
       ...parsed,
     }
+    sample('blocks', parsed.blocksPublished)
   } catch (error) {
     state.node = {
       ok: false,
@@ -309,6 +349,9 @@ async function pollSystem() {
       disk,
       polledAt: new Date().toISOString(),
     }
+
+    sample('tempC', state.system.cpuTempC)
+    sample('memPct', state.system.memory.usedPercent)
   } catch (error) {
     state.system = { ok: false, error: error.message?.slice(0, 200) }
   }
@@ -348,12 +391,43 @@ function overall() {
   return { status: critical ? 'down' : problems.length ? 'degraded' : 'ok', problems }
 }
 
+/** Figures worth showing that are not a reading of anything — each is a
+ *  relationship between two readings the page would otherwise make the reader
+ *  work out by eye. */
+function derived() {
+  const chainRate = perHour('height')
+  const rewardRate = perHour('reward')
+  const nodeRate = perHour('blocks')
+  const b = state.chain?.balances
+
+  return {
+    // Seconds per block across the observed window. The headline number on this
+    // page is a block height; how fast it moves is what says the chain is alive.
+    secondsPerBlock: chainRate > 0 ? Number((3600 / chainRate).toFixed(2)) : undefined,
+    blocksPerHourChain: chainRate !== undefined ? Math.round(chainRate) : undefined,
+    blocksPerHourNode: nodeRate !== undefined ? Number(nodeRate.toFixed(2)) : undefined,
+    // Extrapolated, and labelled as such on the page: an hour of observation is
+    // not a day of earnings, and presenting it as one would be a lie by rounding.
+    rewardPerHour: rewardRate !== undefined ? Number(rewardRate.toFixed(4)) : undefined,
+    rewardPerDay: rewardRate !== undefined ? Number((rewardRate * 24).toFixed(2)) : undefined,
+    // What share of the chain's blocks this node signed while we watched.
+    sharePercent: (chainRate > 0 && nodeRate !== undefined)
+      ? Number(((nodeRate / chainRate) * 100).toFixed(3)) : undefined,
+    observedSeconds: history.height.length > 1
+      ? Math.round((history.height.at(-1).t - history.height[0].t) / 1000) : 0,
+    samples: history.height.length,
+    rewardEqualsProducer: Boolean(b?.reward && b?.producer && b.reward.address === b.producer.address),
+  }
+}
+
 const snapshot = () => ({
   ...overall(),
   generatedAt: new Date().toISOString(),
   dashboardStartedAt: state.startedAt,
   ...state,
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
+  derived: derived(),
+  history,
 })
 
 // ---------------------------------------------------------------------- server

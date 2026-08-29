@@ -234,6 +234,10 @@ DASHBOARD_SRC="${BUNDLE_DIR}/dashboard.env"
 install_config "${PRODUCER_SRC}"  "${CONF_DIR}/sequence-producer.env" 600
 install_config "${DASHBOARD_SRC}" "${CONF_DIR}/dashboard.env"         644
 
+ALERT_SRC="${BUNDLE_DIR}/alert.env"
+[[ -f "${ALERT_SRC}" ]] || ALERT_SRC="${BUNDLE_DIR}/alert.env.template"
+install_config "${ALERT_SRC}" "${CONF_DIR}/alert.env" 600
+
 # If the credentials arrived on the boot partition, that partition is FAT and
 # readable by anyone who puts the card in a reader. Remove the staged copy once
 # it is safely at /etc/xl1 with mode 0600.
@@ -248,6 +252,9 @@ fi
 
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-collect.sh" /usr/local/bin/xl1-collect.sh
 info "installed /usr/local/bin/xl1-collect.sh"
+
+install -m 755 "${BUNDLE_DIR}/scripts/xl1-alert.sh" /usr/local/bin/xl1-alert.sh
+info "installed /usr/local/bin/xl1-alert.sh"
 
 # Root-owned and not operator-writable: the sudoers grant below would otherwise
 # be a way to escalate by editing the script it exempts.
@@ -295,6 +302,17 @@ systemctl daemon-reload
 systemctl enable xl1-collect.timer >/dev/null
 systemctl enable xl1-dashboard.service >/dev/null
 info "enabled xl1-collect.timer and xl1-dashboard.service"
+
+# The alerter stays disabled until a channel is configured. Enabling it with an
+# empty alert.env would run a timer every 60s that can only ever log that it had
+# nowhere to deliver.
+if grep -qE '^XL1_ALERT_(NTFY_TOPIC|WEBHOOK|EMAIL)=.+$' "${CONF_DIR}/alert.env" 2>/dev/null; then
+  systemctl enable xl1-alert.timer >/dev/null
+  systemctl start xl1-alert.timer
+  info "alert channel configured — enabled xl1-alert.timer"
+else
+  info "xl1-alert.timer installed but NOT enabled (no channel in ${CONF_DIR}/alert.env)"
+fi
 
 # The producer stays disabled until the operator supplies a mnemonic — starting
 # it with the placeholder env would only produce an authentication failure loop.

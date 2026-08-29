@@ -19,6 +19,12 @@ LOG_LINES="${XL1_LOG_LINES:-40}"
 # enough to survive a quiet period, short enough that a resolved problem stops
 # being reported as a current fault.
 ELIGIBILITY_WINDOW="${XL1_ELIGIBILITY_WINDOW:-20m}"
+# Reading twenty minutes of log is far more expensive than the thirty-second
+# slice the rest of this script works from, and eligibility does not change
+# between one cycle and the next. Scanned on its own interval so the snapshot
+# never goes stale waiting for it.
+ELIGIBILITY_INTERVAL="${XL1_ELIGIBILITY_INTERVAL:-120}"
+ELIG_CACHE="${STATE_DIR}/.eligibility"
 
 # The slow readers. Each shells out to something far more expensive than a log
 # tail, and each answers a question that changes daily at most, so they run on
@@ -120,6 +126,7 @@ LOG_JSON+="]"
 # Scanned over a window rather than the whole history: a complaint from two days
 # ago that has since been resolved is not a current fault, and reporting it as
 # one is worse than reporting nothing.
+if (( $(cache_age "${ELIG_CACHE}") > ELIGIBILITY_INTERVAL )); then
 BLOCKED_REASON=""
 ELIG_LOG="$(docker logs --since "${ELIGIBILITY_WINDOW}" "${CONTAINER}" 2>&1 | tail -n 4000 | tr '[:upper:]' '[:lower:]')"
 if [[ -n "${ELIG_LOG}" ]]; then
@@ -130,14 +137,19 @@ if [[ -n "${ELIG_LOG}" ]]; then
   done <<'PATTERNS'
 insufficient stake|insufficient stake
 has no balance|no balance
+add stake to contract|insufficient stake — no intent declared
 not in the allowed|not on the allowed-producer list
 not an allowed producer|not on the allowed-producer list
 no-intent|no stake intent declared
 unseasoned-or-understaked|stake too new or too small
 unseasoned|stake not yet seasoned
 insufficient-self-bond|self-bond below the minimum
+behind-finalized-head|blocks rejected: built too slowly for the chain
 PATTERNS
 fi
+  printf '%s' "${BLOCKED_REASON}" > "${ELIG_CACHE}"
+fi
+BLOCKED_REASON="$(cat "${ELIG_CACHE}" 2>/dev/null || echo "")"
 
 # ------------------------------------------------- which CLI the node is running
 #

@@ -6,6 +6,7 @@
 # Real operator config. Only the .template files belong in git.
 sequence-producer.env
 dashboard.env
+alert.env
 !*.template
 
 # OS noise

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check XL1 producer state every 60s
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=xl1-alert.service
+
+[Install]
+WantedBy=timers.target

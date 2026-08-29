@@ -59,6 +59,30 @@
   footer { padding: 0 20px 28px; color: var(--muted); font-size: 12px; }
   a { color: var(--accent); }
   .err { color: var(--bad); font-size: 12.5px; }
+
+  /* Stat tiles. A dense grid reads faster than a long definition list once
+     there are more than about six figures to take in at a glance. */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(126px, 1fr)); gap: 10px; margin-top: 12px; }
+  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
+  .tile .v { font-size: 19px; font-weight: 640; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .tile .n { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+  /* Sparklines. preserveAspectRatio="none" stretches the box to the card, so
+     the stroke needs non-scaling-stroke or it thins out as the card widens. */
+  .spark { display: block; width: 100%; height: 40px; margin-top: 12px; overflow: visible; }
+  .spark path.line { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+  .spark path.area { fill: color-mix(in srgb, var(--accent) 13%, transparent); stroke: none; }
+  .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
+  .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
+  .wide { grid-column: 1 / -1; }
+  .logfoot { color: var(--muted); font-size: 11px; margin-top: 7px; }
+  .banner {
+    margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
+    border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+    background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--fg);
+  }
+  .banner b { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -87,6 +111,26 @@ const dur = (s) => {
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`
 }
 const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
+const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v, n]) =>
+  `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div>${n ? `<div class="n">${n}</div>` : ''}</div>`).join('')}</div>`
+
+/** A sparkline from a history series. Says "collecting" rather than drawing a
+ *  flat line from one point — an empty chart that looks like a dead one is
+ *  worse than an honest label. */
+const spark = (series, cls = '') => {
+  const pts = (series ?? []).map((p) => Number(p.v)).filter((v) => !Number.isNaN(v))
+  if (pts.length < 2) return `<div class="sub" style="margin-top:10px">collecting — needs a few more samples</div>`
+  const min = Math.min(...pts), max = Math.max(...pts), span = (max - min) || 1
+  const W = 100, H = 40
+  const d = pts.map((v, i) => `${((i / (pts.length - 1)) * W).toFixed(2)},${(H - ((v - min) / span) * H).toFixed(2)}`)
+  const fmt = (v) => Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Number(v.toFixed(2)).toLocaleString()
+  return `<svg class="spark ${cls}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+      <path class="area" d="M0,${H} L${d.join(' L')} L${W},${H} Z"/>
+      <path class="line" d="M${d.join(' L')}"/>
+    </svg>
+    <div class="sparkfoot"><span>${fmt(min)}</span><span>${pts.length} samples</span><span>${fmt(max)}</span></div>`
+}
+
 const bar = (pct, warnAt = 70, badAt = 90) => {
   const p = Math.max(0, Math.min(100, pct ?? 0))
   const cls = p >= badAt ? 'bad' : p >= warnAt ? 'warn' : ''
@@ -99,6 +143,21 @@ function render(d) {
   $('net').textContent = d.chain?.ok ? `${d.chain.networkName} · chain ${d.chain.chainId.slice(0, 10)}…` : 'chain unreachable'
 
   const cards = []
+  const dv = d.derived ?? {}
+
+  // The one thing that explains a healthy node producing nothing. Loud, at the
+  // top, in its own banner — it is the answer to the question everything else
+  // on this page raises but cannot settle.
+  if (d.node?.eligibility?.blocked) {
+    cards.push(`<section class="wide" style="border-color:color-mix(in srgb,var(--bad) 40%,transparent)">
+      <h2>Producer cannot produce</h2>
+      <div class="big bad">${esc(d.node.eligibility.reason)}</div>
+      <div class="sub">the node said so itself, within the last ${esc(d.node.eligibility.window)}</div>
+      <div class="banner">Every other signal here can read perfectly healthy while this is true.
+        The container runs, the health probe passes, the chain is reachable — and no block this node
+        builds will be accepted.</div>
+    </section>`)
+  }
 
   // Producer
   const c = d.node?.container
@@ -135,6 +194,12 @@ function render(d) {
         ['Matches preset', d.chain.chainIdMatchesPreset ? '<span class="ok">yes</span>' : '<span class="bad">NO</span>'],
         ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener">open</a>`],
       ])}
+      ${spark(d.history?.height)}
+      ${tiles([
+        ['Block time', dv.secondsPerBlock ? `${dv.secondsPerBlock}s` : '—', 'observed'],
+        ['Chain rate', dv.blocksPerHourChain !== undefined ? `${num(dv.blocksPerHourChain)}/h` : '—', 'blocks per hour'],
+        ['Watching', dv.observedSeconds ? dur(dv.observedSeconds) : '—', `${num(dv.samples)} samples`],
+      ])}
     </section>`)
   } else {
     cards.push(`<section><h2>Chain</h2><div class="big bad">Unreachable</div>
@@ -158,6 +223,13 @@ function render(d) {
         b.reward?.error && ['Reward lookup', `<span class="bad">${esc(b.reward.error)}</span>`],
         b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
         b.producer && ['Producer address', addrCell(b.producer)],
+        dv.rewardEqualsProducer && ['Signer', '<span class="ok">same as reward address</span>'],
+      ])}
+      ${spark(d.history?.reward, 'ok')}
+      ${tiles([
+        ['Per hour', dv.rewardPerHour !== undefined ? `${num(dv.rewardPerHour)}` : '—', 'XL1 observed'],
+        ['Per day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—', 'extrapolated'],
+        ['Share', dv.sharePercent !== undefined ? `${dv.sharePercent}%` : '—', 'of chain blocks'],
       ])}
     </section>`)
   }
@@ -206,23 +278,29 @@ function render(d) {
       <h2>Raspberry Pi</h2>
       <div class="big ${tempCls}">${s.cpuTempC ?? '—'}°C</div>
       <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)} · load ${s.loadAverage?.join(' ')}</div>
-      ${dl([
-        ['RAM', `${bytes(s.memory.totalBytes - s.memory.availableBytes)} / ${bytes(s.memory.totalBytes)} (${s.memory.usedPercent}%)`],
-      ])}${bar(s.memory.usedPercent)}
-      ${dl([['Swap', `${bytes(s.swap.usedBytes)} / ${bytes(s.swap.totalBytes)} (${s.swap.usedPercent}%)`]])}${bar(s.swap.usedPercent, 40, 70)}
-      ${s.disk ? dl([['Disk', `${bytes(s.disk.totalBytes - s.disk.freeBytes)} / ${bytes(s.disk.totalBytes)} (${s.disk.usedPercent}%)`]]) + bar(s.disk.usedPercent) : ''}
-      ${t ? dl([
-        ['Power', t.undervoltageNow ? '<span class="bad">undervoltage NOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">undervolted since boot</span>' : '<span class="ok">stable</span>'],
-        ['Throttling', t.throttledNow ? '<span class="bad">throttled NOW</span>' : t.throttledSinceBoot ? '<span class="warn">throttled since boot</span>' : '<span class="ok">none</span>'],
-      ]) : ''}
+      ${spark(d.history?.tempC)}
+      ${tiles([
+        ['RAM', `${s.memory.usedPercent}%`, `${bytes(s.memory.totalBytes - s.memory.availableBytes)} of ${bytes(s.memory.totalBytes)}`],
+        ['Swap', `${s.swap.usedPercent}%`, `${bytes(s.swap.usedBytes)} of ${bytes(s.swap.totalBytes)}`],
+        s.disk && ['Disk', `${s.disk.usedPercent}%`, `${bytes(s.disk.freeBytes)} free`],
+        ['Load', `${s.loadAverage?.[0] ?? '—'}`, `${s.cpuCount} cores`],
+        t && ['Power', t.undervoltageNow ? '<span class="bad">LOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">dipped</span>' : '<span class="ok">stable</span>',
+              t.undervoltageNow ? 'undervolting now' : t.undervoltageSinceBoot ? 'since boot' : '5V holding'],
+        t && ['Throttle', t.throttledNow ? '<span class="bad">NOW</span>' : t.throttledSinceBoot ? '<span class="warn">earlier</span>' : '<span class="ok">none</span>',
+              'cpu frequency'],
+      ])}
+      ${bar(s.memory.usedPercent)}
     </section>`)
   }
 
-  // Log tail
+  // Log tail, newest first. The interesting line is always the most recent one,
+  // and a panel that opens scrolled to the oldest line makes the reader scroll
+  // past forty lines of history to reach it.
   if (d.node?.recentLog?.length) {
-    cards.push(`<section style="grid-column:1/-1">
-      <h2>Producer log (last ${d.node.recentLog.length} lines)</h2>
-      <pre class="log">${esc(d.node.recentLog.join('\n'))}</pre>
+    cards.push(`<section class="wide">
+      <h2>Producer log — newest first (${d.node.recentLog.length} lines)</h2>
+      <pre class="log">${esc([...d.node.recentLog].reverse().join('\n'))}</pre>
+      <div class="logfoot">Most recent at the top. Collected ${d.node.ageSeconds ?? '?'}s ago.</div>
     </section>`)
   }
 

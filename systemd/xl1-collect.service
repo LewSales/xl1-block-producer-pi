@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect XL1 producer container status for the dashboard
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xl1-collect.sh
+Nice=10
+IOSchedulingClass=idle

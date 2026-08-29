@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh XL1 producer status snapshot every 30s
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=xl1-collect.service
+
+[Install]
+WantedBy=timers.target

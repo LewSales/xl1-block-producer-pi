@@ -1,0 +1,13 @@
+# Build artifacts — each exceeds GitHub's 100 MB file limit.
+# Reproduce with ./build-images.sh
+*.tar.gz
+.build/
+
+# Real operator config. Only the .template files belong in git.
+sequence-producer.env
+dashboard.env
+!*.template
+
+# OS noise
+.DS_Store
+Thumbs.db

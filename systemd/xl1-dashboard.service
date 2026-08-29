@@ -1,0 +1,28 @@
+[Unit]
+Description=XL1 Producer Dashboard
+After=docker.service xl1-producer.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+EnvironmentFile=/etc/xl1/dashboard.env
+
+ExecStartPre=-/usr/bin/docker rm -f xl1-dashboard
+
+# --network host so the dashboard can reach the producer's loopback health port
+# and read the host's real memory/uptime figures from /proc.
+ExecStart=/usr/bin/docker run --rm --name xl1-dashboard \
+  --env-file /etc/xl1/dashboard.env \
+  --network host \
+  --read-only --tmpfs /tmp \
+  -v /var/lib/xl1:/var/lib/xl1:ro \
+  --memory 256m \
+  --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
+  xl1-dashboard:local
+
+ExecStop=/usr/bin/docker stop -t 15 xl1-dashboard
+
+[Install]
+WantedBy=multi-user.target

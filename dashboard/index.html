@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XL1 Producer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea;
+    --fg: #14171a; --muted: #666e78;
+    --ok: #1a7f47; --warn: #a86500; --bad: #b3261e; --accent: #572aff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1013; --panel: #171a1f; --line: #262b33;
+      --fg: #e8eaed; --muted: #939ba6;
+      --ok: #4ec97f; --warn: #e0a341; --bad: #ef6a60; --accent: #8f74ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  h1 { margin: 0; font-size: 17px; letter-spacing: -0.01em; }
+  .net { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  .pill {
+    padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+  .pill.degraded { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
+  .pill.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 32%, transparent); }
+  main { padding: 20px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); max-width: 1400px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  section h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; align-items: baseline; }
+  dt { color: var(--muted); white-space: nowrap; }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .big { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar > i.warn { background: var(--warn); } .bar > i.bad { background: var(--bad); }
+  ul.problems { margin: 10px 0 0; padding-left: 18px; color: var(--warn); }
+  pre.log {
+    margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+    max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  footer { padding: 0 20px 28px; color: var(--muted); font-size: 12px; }
+  a { color: var(--accent); }
+  .err { color: var(--bad); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>XL1 Block Producer</h1>
+  <span class="net" id="net">—</span>
+  <span class="spacer"></span>
+  <span class="pill" id="overall">connecting…</span>
+</header>
+<main id="grid"></main>
+<footer id="foot">—</footer>
+
+<script>
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const num = (n) => (n === undefined || n === null || Number.isNaN(n)) ? '—' : Number(n).toLocaleString()
+const bytes = (b) => {
+  if (!b && b !== 0) return '—'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = b
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
+}
+const dur = (s) => {
+  if (s === undefined || s === null) return '—'
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60)
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`
+}
+const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
+const bar = (pct, warnAt = 70, badAt = 90) => {
+  const p = Math.max(0, Math.min(100, pct ?? 0))
+  const cls = p >= badAt ? 'bad' : p >= warnAt ? 'warn' : ''
+  return `<div class="bar"><i class="${cls}" style="width:${p}%"></i></div>`
+}
+
+function render(d) {
+  $('overall').textContent = d.status === 'ok' ? 'healthy' : d.status
+  $('overall').className = `pill ${d.status}`
+  $('net').textContent = d.chain?.ok ? `${d.chain.networkName} · chain ${d.chain.chainId.slice(0, 10)}…` : 'chain unreachable'
+
+  const cards = []
+
+  // Producer
+  const c = d.node?.container
+  const healthClass = d.health?.ok ? 'ok' : 'bad'
+  cards.push(`<section>
+    <h2>Producer</h2>
+    <div class="big ${healthClass}">${d.health?.ok ? 'Live' : 'Not responding'}</div>
+    <div class="sub">/livez on ${esc(d.health?.endpoint ?? '')}</div>
+    ${dl([
+      ['Container', c ? `<span class="${c.running ? 'ok' : 'bad'}">${esc(c.state ?? '—')}</span>` : '—'],
+      c && ['Container uptime', esc(c.uptime ?? '—')],
+      c && ['Restarts', `${num(c.restartCount)}${c.restartCount > 3 ? ' <span class="warn">⚠</span>' : ''}`],
+      c && ['Image', `<span class="mono">${esc(c.image ?? '—')}</span>`],
+      d.node?.blocksPublished !== undefined && ['Blocks submitted', num(d.node.blocksPublished)],
+      d.node?.lastPublishedAt && ['Last submission', esc(d.node.lastPublishedAt)],
+      d.node?.errorCount !== undefined && ['Log errors', `<span class="${d.node.errorCount > 0 ? 'warn' : ''}">${num(d.node.errorCount)}</span>`],
+    ])}
+    ${d.node?.ok === false ? `<div class="err" style="margin-top:8px">${esc(d.node.error)}</div>` : ''}
+    ${d.node?.stale ? `<div class="err" style="margin-top:8px">collector data ${d.node.ageSeconds}s old</div>` : ''}
+  </section>`)
+
+  // Chain
+  if (d.chain?.ok) {
+    cards.push(`<section>
+      <h2>Chain</h2>
+      <div class="big">${num(d.chain.currentBlock)}</div>
+      <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
+      ${dl([
+        ['Finalization lag', `${num(d.chain.finalizationLag)} blocks`],
+        ['Chain ID', `<span class="mono">${esc(d.chain.chainId)}</span>`],
+        ['Matches preset', d.chain.chainIdMatchesPreset ? '<span class="ok">yes</span>' : '<span class="bad">NO</span>'],
+        ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener">open</a>`],
+      ])}
+    </section>`)
+  } else {
+    cards.push(`<section><h2>Chain</h2><div class="big bad">Unreachable</div>
+      <div class="err" style="margin-top:8px">${esc(d.chain?.error ?? 'unknown')}</div></section>`)
+  }
+
+  // Rewards
+  const b = d.chain?.balances ?? {}
+  if (b.reward || b.producer) {
+    cards.push(`<section>
+      <h2>Rewards</h2>
+      ${b.reward?.xl1 ? `<div class="big">${esc(b.reward.xl1)} <span style="font-size:14px;color:var(--muted)">XL1</span></div>
+        <div class="sub">reward address balance</div>` : ''}
+      ${dl([
+        b.reward?.sinceStart && ['Since dashboard start', `${esc(b.reward.sinceStart.xl1)} XL1`],
+        b.reward && ['Reward address', `<span class="mono">${esc(b.reward.address)}</span>`],
+        b.reward?.error && ['Reward lookup', `<span class="bad">${esc(b.reward.error)}</span>`],
+        b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
+        b.producer && ['Producer address', `<span class="mono">${esc(b.producer.address)}</span>`],
+      ])}
+    </section>`)
+  }
+
+  // System
+  const s = d.system
+  if (s?.ok) {
+    const t = s.throttle
+    const tempCls = s.cpuTempC >= 75 ? 'bad' : s.cpuTempC >= 65 ? 'warn' : 'ok'
+    cards.push(`<section>
+      <h2>Raspberry Pi</h2>
+      <div class="big ${tempCls}">${s.cpuTempC ?? '—'}°C</div>
+      <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)} · load ${s.loadAverage?.join(' ')}</div>
+      ${dl([
+        ['RAM', `${bytes(s.memory.totalBytes - s.memory.availableBytes)} / ${bytes(s.memory.totalBytes)} (${s.memory.usedPercent}%)`],
+      ])}${bar(s.memory.usedPercent)}
+      ${dl([['Swap', `${bytes(s.swap.usedBytes)} / ${bytes(s.swap.totalBytes)} (${s.swap.usedPercent}%)`]])}${bar(s.swap.usedPercent, 40, 70)}
+      ${s.disk ? dl([['Disk', `${bytes(s.disk.totalBytes - s.disk.freeBytes)} / ${bytes(s.disk.totalBytes)} (${s.disk.usedPercent}%)`]]) + bar(s.disk.usedPercent) : ''}
+      ${t ? dl([
+        ['Power', t.undervoltageNow ? '<span class="bad">undervoltage NOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">undervolted since boot</span>' : '<span class="ok">stable</span>'],
+        ['Throttling', t.throttledNow ? '<span class="bad">throttled NOW</span>' : t.throttledSinceBoot ? '<span class="warn">throttled since boot</span>' : '<span class="ok">none</span>'],
+      ]) : ''}
+    </section>`)
+  }
+
+  // Log tail
+  if (d.node?.recentLog?.length) {
+    cards.push(`<section style="grid-column:1/-1">
+      <h2>Producer log (last ${d.node.recentLog.length} lines)</h2>
+      <pre class="log">${esc(d.node.recentLog.join('\n'))}</pre>
+    </section>`)
+  }
+
+  $('grid').innerHTML = cards.join('')
+  $('foot').innerHTML = (d.problems?.length
+    ? `<ul class="problems">${d.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`
+    : '') + `<div style="margin-top:8px">updated ${new Date(d.generatedAt).toLocaleTimeString()} · dashboard up since ${new Date(d.dashboardStartedAt).toLocaleString()} · <a href="/api/status${location.search}">JSON</a></div>`
+}
+
+async function tick() {
+  try {
+    const res = await fetch(`/api/status${location.search}`, { cache: 'no-store' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    render(await res.json())
+  } catch (e) {
+    $('overall').textContent = 'dashboard unreachable'
+    $('overall').className = 'pill down'
+    $('foot').textContent = String(e)
+  }
+}
+tick()
+setInterval(tick, 5000)
+</script>
+</body>
+</html>

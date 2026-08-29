@@ -1,0 +1,39 @@
+[Unit]
+Description=XL1 Block Producer (Sequence)
+Documentation=https://github.com/XYOracleNetwork/xl1-docker-images
+After=docker.service network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=20
+TimeoutStartSec=180
+TimeoutStopSec=90
+
+EnvironmentFile=/etc/xl1/sequence-producer.env
+
+# A stale container from an unclean shutdown would block --name reuse.
+ExecStartPre=-/usr/bin/docker rm -f xl1-producer
+
+# Health port stays on loopback: only the dashboard consumes it.
+# 1 GB of RAM means the Node heap needs an explicit ceiling, or a GC spike
+# pushes the box into swap on the SD card and the node stalls.
+ExecStart=/usr/bin/docker run --rm --name xl1-producer \
+  --env-file /etc/xl1/sequence-producer.env \
+  -e NODE_OPTIONS=--max-old-space-size=512 \
+  -p 127.0.0.1:9099:9099 \
+  -p 30303:30303/tcp \
+  -p 30303:30303/udp \
+  -v /var/lib/xl1/data:/data \
+  --memory 768m --memory-swap 2g \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+  xl1:local
+
+ExecStop=/usr/bin/docker stop -t 60 xl1-producer
+
+[Install]
+WantedBy=multi-user.target

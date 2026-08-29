@@ -110,7 +110,16 @@ if (( PROBE )); then
   log "Probing for the panel"
 
   HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  CANDIDATES=(tft35a mhs35 mhs35ips mis35 mhs35b piscreen)
+
+  # Bundled blobs first, then every stock overlay the firmware ships for a small
+  # SPI TFT. The stock ones matter more than they look: they are guaranteed to
+  # apply against the running firmware, and they differ from each other mainly
+  # in which GPIOs carry DC and RESET — which is what a white screen is actually
+  # complaining about. A controller held on the wrong reset line never
+  # initialises and stays white, whatever driver claims to have bound to it.
+  CANDIDATES=(mhs35b tft35a mhs35 mhs35ips mis35
+              piscreen piscreen2r pitft35-resistive
+              waveshare35a waveshare35b tft9341 rpi-display)
 
   LOADED=""
   cleanup_probe() {
@@ -148,8 +157,13 @@ if (( PROBE )); then
     [[ -f "${OVERLAYS}/${cand}.dtbo" ]] || { info "${cand}: no overlay blob, skipped"; continue; }
 
     BEFORE="$(ls /dev/fb* 2>/dev/null | tr '\n' ' ' || true)"
-    if ! dtoverlay "${cand}" rotate="${ROTATE}" 2>/dev/null; then
-      printf '    %-10s %soverlay would not load%s\n' "${cand}" "${DIM}" "${RESET}"
+    # An overlay that will not apply is a different fault from one that applies
+    # and lights nothing, so keep the reason rather than flattening both into
+    # "would not load" — four of five reading identically hid that the probe was
+    # really only testing one candidate.
+    if ! ERR="$(dtoverlay "${cand}" rotate="${ROTATE}" 2>&1)"; then
+      printf '    %-18s %sdid not apply%s %s\n' "${cand}" "${DIM}" "${RESET}" \
+        "${DIM}$(printf '%s' "${ERR}" | tr '\n' ' ' | cut -c1-60)${RESET}"
       continue
     fi
     LOADED="${cand}"
@@ -161,12 +175,13 @@ if (( PROBE )); then
 
     if [[ -z "${NEWFB}" ]]; then
       # Bound to nothing. Almost always the wrong controller for this hardware.
-      printf '    %-10s %sno framebuffer appeared%s\n' "${cand}" "${DIM}" "${RESET}"
+      printf '    %-18s %sapplied, but bound no framebuffer%s\n' "${cand}" "${DIM}" "${RESET}"
       cleanup_probe
       continue
     fi
 
-    printf '    %-10s → %s  ' "${cand}" "${NEWFB}"
+    GEOM="$(cat "/sys/class/graphics/$(basename "${NEWFB}")/virtual_size" 2>/dev/null || echo '?')"
+    printf '    %-18s → %s %s(%s)%s  ' "${cand}" "${NEWFB}" "${DIM}" "${GEOM}" "${RESET}"
     # Noise rather than a solid fill: a panel showing white on its own is the
     # symptom being diagnosed, so the test pattern must be unmistakably not that.
     timeout 3 dd if=/dev/urandom of="${NEWFB}" bs=64k >/dev/null 2>&1 || true

@@ -16,6 +16,9 @@ for the differences and why each one exists.
 | `preflight.sh` | Read-only readiness check. **Run this first** — it catches a 32-bit OS before you spend 40 minutes. |
 | `provision.sh` | One-shot, idempotent setup. Run once with `sudo`. |
 | `scripts/xl1ctl` | Day-to-day control: status, start/stop, logs, backup, doctor. |
+| `scripts/xl1-screen` | Console dashboard for a directly attached display. |
+| `scripts/xl1-screen-setup.sh` | Brings up a 3.5" SPI panel on Bookworm and puts the dashboard on it. |
+| `overlays/` | Device-tree blobs for panels the stock firmware does not ship. |
 | `windows/` | Double-clickable `.cmd` launchers that drive the Pi over SSH. |
 | `xl1-local-arm64.tar.gz` | The producer image, cross-built for arm64. |
 | `xl1-dashboard-arm64.tar.gz` | The dashboard image, cross-built for arm64. |
@@ -291,6 +294,56 @@ socket mount still grants full control of the daemon, which is not something to
 hand a network-listening service on a box holding a wallet seed. Instead
 `xl1-collect.sh` runs as root on a 30-second timer and writes a plain JSON file
 that the dashboard reads read-only.
+
+---
+
+## A screen on the Pi
+
+`xl1-screen` draws the dashboard straight to the console — no X, no browser.
+It reads the same `/api/status` the web dashboard serves, so the two never
+disagree. It costs roughly 10 MB; Chromium with an X server would cost 350–450 MB
+on a 1 GB board that is also producing blocks, which is not a trade worth making.
+
+On an HDMI monitor it needs no setup at all:
+
+```bash
+xl1-screen            # draws on whatever TTY you run it from
+```
+
+### 3.5" SPI panel
+
+```bash
+sudo ./scripts/xl1-screen-setup.sh --panel tft35a
+sudo reboot
+```
+
+Panels: `tft35a` (start here — it drives most ILI9486 boards), `mhs35`,
+`mhs35b`, `mhs35ips`, `mis35`. Add `--rotate 270` if it comes up upside down.
+Undo everything with `--revert`, which also gives tty1 its login prompt back.
+
+The layout is built for **60×20 characters**, which is what a 480×320 panel
+gives at an 8×16 console font.
+
+### Why not the vendor's LCD-show
+
+If you have goodtft's `LCD-show`, do not run it here. It was written for
+32-bit Raspbian and does four things that break a Bookworm 64-bit producer:
+
+| What it does | Why it breaks |
+|---|---|
+| Writes `/boot/config.txt` | Bookworm reads `/boot/firmware/config.txt`. The writes land nowhere and the panel silently never appears. |
+| Overwrites `config.txt` from a Debian-11 template | Discards `gpu_mem=16` and your Imager settings. |
+| Installs `xserver-xorg-input-evdev`, writes `xorg.conf.d` | RPi OS Lite has no X server, and `fbturbo` was dropped from Bookworm. |
+| Copies `/etc/inittab` | systemd has ignored that file since Debian 8. |
+
+`xl1-screen-setup.sh` does the Bookworm-correct equivalent: it appends a marked
+block to the real `config.txt` and removes exactly that block on revert, backs up
+both boot files first, stands down `vc4-kms-v3d` (which otherwise keeps the
+console off an `fbtft` panel) and restores it on revert, and never reboots
+without telling you.
+
+The compiled overlay blobs are the one genuinely useful thing in that tarball,
+so those are vendored under `overlays/`.
 
 ---
 

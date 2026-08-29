@@ -254,6 +254,11 @@ info "installed /usr/local/bin/xl1-collect.sh"
 install -o root -g root -m 755 "${BUNDLE_DIR}/scripts/xl1ctl" /usr/local/bin/xl1ctl
 info "installed /usr/local/bin/xl1ctl"
 
+# The console dashboard is installed but not wired to a display: attaching a
+# panel changes boot config and needs a reboot, so it stays an explicit step.
+install -o root -g root -m 755 "${BUNDLE_DIR}/scripts/xl1-screen" /usr/local/bin/xl1-screen
+info "installed /usr/local/bin/xl1-screen (run xl1-screen-setup.sh to put it on a panel)"
+
 # Let the operator drive xl1ctl without retyping a password, so the desktop
 # shortcuts work in one click. Scoped to this one command, nothing else.
 if [[ -n "${TARGET_USER}" ]] && id "${TARGET_USER}" >/dev/null 2>&1; then

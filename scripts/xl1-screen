@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# xl1-screen — full-screen console dashboard for a directly attached display.
+#
+# Draws to whatever TTY it is started on, so it works on the HDMI framebuffer or
+# on a GPIO SPI panel once the console is mapped there. No X, no browser: on a
+# 1 GB Pi that is also producing blocks, Chromium would cost more memory than the
+# producer itself.
+#
+# Reads the same /api/status the web dashboard serves, so the two never disagree.
+#
+#   xl1-screen              # run until Ctrl-C
+#   xl1-screen --once       # render a single frame and exit (for testing)
+#   XL1_SCREEN_INTERVAL=10 xl1-screen
+
+set -uo pipefail
+
+API="${XL1_SCREEN_API:-http://127.0.0.1:8088/api/status}"
+INTERVAL="${XL1_SCREEN_INTERVAL:-5}"
+ONCE=0
+[[ "${1:-}" == "--once" ]] && ONCE=1
+
+# 480x320 at an 8x16 console font is 60x20 cells, so that is the floor the
+# layout has to survive. Wider terminals just get more breathing room.
+MINW=52
+
+esc=$'\033'
+R="${esc}[0m"; B="${esc}[1m"; D="${esc}[2m"
+FG_G="${esc}[32m"; FG_Y="${esc}[33m"; FG_R="${esc}[31m"
+FG_C="${esc}[36m"; FG_W="${esc}[97m"; FG_GR="${esc}[90m"
+ON_G="${esc}[42m${esc}[30m"; ON_Y="${esc}[43m${esc}[30m"; ON_R="${esc}[41m${esc}[97m"
+
+cleanup() { printf '%s[?25h%s[0m\n' "${esc}" "${esc}"; }
+trap cleanup EXIT INT TERM
+
+have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
+
+# Commas every three digits, without relying on locale being set on a console.
+group() { printf '%s' "${1:-}" | sed -e :a -e 's/\(.*[0-9]\)\([0-9]\{3\}\)/\1,\2/;ta'; }
+
+pad() { printf '%-*s' "$2" "$1"; }
+
+# Visible width, ignoring ANSI, so the right border lands in the right column.
+vislen() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g' | wc -m | tr -d ' '; }
+
+line() {  # line <content-with-ansi>
+  local content="$1" vis
+  vis=$(vislen "${content}")
+  printf ' %s%s%s\n' "${content}" "$(printf '%*s' $(( W - vis > 0 ? W - vis : 0 ))'' )" ""
+}
+
+rule() { printf ' %s%s%s\n' "${FG_GR}" "$(printf '─%.0s' $(seq 1 "${W}"))" "${R}"; }
+
+render() {
+  local cols rows
+  cols=$(tput cols 2>/dev/null || echo 60)
+  rows=$(tput lines 2>/dev/null || echo 20)
+  W=$(( cols - 2 )); (( W < MINW )) && W=${MINW}
+
+  local json ok=1
+  json="$(curl -sf --max-time 4 "${API}" 2>/dev/null)" || ok=0
+  [[ -z "${json}" ]] && ok=0
+
+  printf '%s[H%s[2J%s[?25l' "${esc}" "${esc}" "${esc}"
+
+  if (( ok == 0 )); then
+    line "${B}${FG_C}XL1 PRODUCER${R}  ${FG_GR}$(date '+%H:%M:%S')${R}"
+    rule
+    line ""
+    line "  ${ON_R} DASHBOARD UNREACHABLE ${R}"
+    line ""
+    line "  ${D}No answer from${R} ${API}"
+    line ""
+    line "  ${D}Try:${R} systemctl status xl1-dashboard"
+    line "  ${D}    ${R} xl1ctl doctor"
+    return
+  fi
+
+  if (( have_jq )); then
+    eval "$(printf '%s' "${json}" | jq -r '
+      @sh "ST=\(.status)",
+      @sh "CUR=\(.chain.currentBlock // "")",
+      @sh "FIN=\(.chain.finalizedBlock // "")",
+      @sh "LAG=\(.chain.finalizationLag // "")",
+      @sh "REW=\(.chain.balances.reward.xl1 // "")",
+      @sh "DELTA=\(.chain.balances.reward.sinceStart.xl1 // "")",
+      @sh "SUB=\(.node.blocksPublished // "")",
+      @sh "ERRS=\(.node.errorCount // "")",
+      @sh "CST=\(.node.container.state // "")",
+      @sh "HLIVE=\(.health.ok)",
+      @sh "TEMP=\(.system.cpuTempC // "")",
+      @sh "MEM=\(.system.memory.usedPercent // "")",
+      @sh "SWP=\(.system.swap.usedPercent // "")",
+      @sh "UPS=\(.system.uptimeSeconds // 0)",
+      # jq'"'"'s // fires on false as well as null, so a healthy:false throttle
+      # would silently read as "unknown" — which is the one reading this panel
+      # exists to shout about. Test for the object instead.
+      @sh "PWROK=\(if .system.throttle == null then "unknown" else (.system.throttle.healthy | tostring) end)",
+      @sh "UVEVER=\(if .system.throttle == null then "false" else (.system.throttle.undervoltageSinceBoot | tostring) end)",
+      @sh "HOST=\(.system.hostname // "")",
+      @sh "NET=\(.chain.networkName // "")",
+      @sh "CHOK=\(.chain.ok)",
+      @sh "PROB=\(.problems | join(" | "))",
+      @sh "LASTLOG=\(.node.recentLog[-1] // "")"
+    ')"
+  else
+    ST="unknown"; PROB="jq not installed"; CUR=""; REW=""; NET=""
+    CHOK=false; HLIVE=false; TEMP=""; MEM=""; SWP=""; UPS=0; SUB=""; ERRS=""
+    CST=""; HOST=""; LASTLOG=""; DELTA=""; FIN=""; LAG=""; PWROK=unknown; UVEVER=false
+  fi
+
+  # --- header -------------------------------------------------------------
+  local title="${B}${FG_C}XL1 PRODUCER${R}"
+  [[ -n "${HOST}" ]] && title+=" ${FG_GR}${HOST}${R}"
+  [[ -n "${NET}" ]] && title+=" ${D}·${R} ${FG_W}${NET}${R}"
+  local clock="${FG_GR}$(date '+%H:%M:%S')${R}"
+  local tlen; tlen=$(vislen "${title}${clock}")
+  printf ' %s%*s%s\n' "${title}" $(( W - tlen > 0 ? W - tlen : 1 )) "" "${clock}"
+  rule
+
+  # --- status banner ------------------------------------------------------
+  case "${ST}" in
+    ok)       line "  ${ON_G} HEALTHY ${R}   ${D}producing${R}" ;;
+    degraded) line "  ${ON_Y} DEGRADED ${R}  ${FG_Y}${PROB:0:$(( W - 14 ))}${R}" ;;
+    down)     line "  ${ON_R} DOWN ${R}      ${FG_R}${PROB:0:$(( W - 14 ))}${R}" ;;
+    *)        line "  ${ON_Y} ${ST} ${R}" ;;
+  esac
+  line ""
+
+  # --- chain --------------------------------------------------------------
+  if [[ "${CHOK}" == "true" ]]; then
+    local lagc="${FG_G}"; [[ "${LAG:-0}" -gt 5 ]] 2>/dev/null && lagc="${FG_Y}"
+    line "  ${D}BLOCK${R}   ${B}${FG_W}$(pad "$(group "${CUR}")" 12)${R} ${D}final${R} $(pad "$(group "${FIN}")" 10) ${lagc}lag ${LAG}${R}"
+  else
+    line "  ${D}BLOCK${R}   ${FG_R}chain unreachable${R}"
+  fi
+
+  [[ -n "${REW}" ]] && {
+    local dl=""
+    [[ -n "${DELTA}" && "${DELTA}" != "0.0000" ]] && dl=" ${FG_G}+${DELTA}${R}"
+    line "  ${D}REWARD${R}  ${B}${FG_W}${REW}${R} ${D}XL1${R}${dl}"
+  }
+
+  line "  ${D}SUBMIT${R}  $(pad "${SUB:-—}" 12) ${D}errors${R} $( [[ "${ERRS:-0}" -gt 0 ]] 2>/dev/null && printf '%s' "${FG_Y}${ERRS}${R}" || printf '%s' "${ERRS:-0}" )"
+  line ""
+
+  # --- node + system ------------------------------------------------------
+  local hs; [[ "${HLIVE}" == "true" ]] && hs="${FG_G}live${R}" || hs="${FG_R}not responding${R}"
+  line "  ${D}NODE${R}    $(pad "${CST:-—}" 12) ${D}probe${R} ${hs}"
+
+  local tc="${FG_G}"
+  [[ -n "${TEMP}" ]] && { awk "BEGIN{exit !(${TEMP} >= 75)}" && tc="${FG_R}" || { awk "BEGIN{exit !(${TEMP} >= 65)}" && tc="${FG_Y}"; }; }
+  local mc="${FG_G}"; [[ "${MEM:-0}" -ge 85 ]] 2>/dev/null && mc="${FG_R}" || { [[ "${MEM:-0}" -ge 70 ]] 2>/dev/null && mc="${FG_Y}"; }
+  local sc="${FG_G}"; [[ "${SWP:-0}" -ge 60 ]] 2>/dev/null && sc="${FG_R}" || { [[ "${SWP:-0}" -ge 30 ]] 2>/dev/null && sc="${FG_Y}"; }
+
+  local up="${UPS:-0}" upstr
+  upstr="$(( up/86400 ))d $(( up%86400/3600 ))h"
+  line "  ${D}CPU${R} ${tc}${TEMP:-—}°C${R}  ${D}RAM${R} ${mc}${MEM:-—}%${R}  ${D}SWAP${R} ${sc}${SWP:-—}%${R}  ${D}UP${R} ${upstr}"
+
+  local pw
+  case "${PWROK}" in
+    true)  [[ "${UVEVER}" == "true" ]] && pw="${FG_Y}undervolted earlier${R}" || pw="${FG_G}stable${R}" ;;
+    false) pw="${ON_R} UNDERVOLTAGE ${R}" ;;
+    *)     pw="${D}unknown${R}" ;;
+  esac
+  line "  ${D}POWER${R}   ${pw}"
+
+  # --- log tail, if the screen is tall enough -----------------------------
+  if (( rows >= 18 )) && [[ -n "${LASTLOG}" ]]; then
+    line ""
+    rule
+    line "  ${FG_GR}${LASTLOG:0:$(( W - 4 ))}${R}"
+  fi
+}
+
+if (( ONCE )); then
+  render
+  printf '%s[?25h' "${esc}"
+  exit 0
+fi
+
+while true; do
+  render
+  sleep "${INTERVAL}"
+done

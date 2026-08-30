@@ -19,7 +19,7 @@ INTERVAL="${XL1_SCREEN_INTERVAL:-5}"
 # Written by xl1-touch. Absent when nothing is driving touch, in which case the
 # panel behaves exactly as it did before touch existed: page 0, forever.
 PAGE_FILE="${XL1_SCREEN_PAGE_FILE:-/run/xl1-screen/page}"
-PAGES=4
+PAGES=5
 PAGE=0
 ONCE=0
 [[ "${1:-}" == "--once" ]] && ONCE=1
@@ -45,7 +45,70 @@ group() { printf '%s' "${1:-}" | sed -e :a -e 's/\(.*[0-9]\)\([0-9]\{3\}\)/\1,\2
 pad() { printf '%-*s' "$2" "$1"; }
 
 # Visible width, ignoring ANSI, so the right border lands in the right column.
-vislen() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g' | wc -m | tr -d ' '; }
+#
+# Pure bash on purpose. This runs for every line of every frame, and the old
+# sed | wc | tr was three processes a line — roughly sixty forks per redraw, on
+# the one box where spare CPU is exactly what block production is short of.
+# Character counting follows the locale here the same way `wc -m` did, so the
+# borders line up identically.
+vislen() {
+  local s="$1" pre rest
+  while [[ "${s}" == *"${esc}["* ]]; do
+    pre="${s%%"${esc}["*}"; rest="${s#*"${esc}["}"
+    s="${pre}${rest#*m}"
+  done
+  printf '%s' "${#s}"
+}
+
+# ------------------------------------------------------------------ graphics
+#
+# The console font is Terminus, which carries the full Block Elements range, so
+# these render on the panel rather than turning into replacement boxes. Every
+# other glyph on this screen is already box-drawing or geometric shapes.
+
+SPARK_GLYPH=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+
+# A filled proportion bar. Cheaper and easier to read at a glance than a number,
+# which is the whole point of a panel you walk past rather than sit at.
+meter() {  # meter <percent> <width> [colour]
+  local pct="${1:-0}" w="${2:-10}" col="${3:-}" filled i out=""
+  pct="${pct%%.*}"
+  [[ "${pct}" =~ ^[0-9]+$ ]] || pct=0
+  (( pct > 100 )) && pct=100
+  filled=$(( pct * w / 100 ))
+  # Round a non-zero value up to one block. Otherwise a producer that landed
+  # blocks draws exactly the same empty bar as one that landed none, and 1% swap
+  # reads as no swap at all — the two states have to look different.
+  (( filled == 0 && pct > 0 )) && filled=1
+  for (( i = 0; i < w; i++ )); do
+    (( i < filled )) && out+="█" || out+="░"
+  done
+  printf '%s%s%s' "${col}" "${out}" "${R}"
+}
+
+# One awk call scales the whole series; the glyph lookup is an array index, so
+# this costs a single fork no matter how many points it draws. Values may be
+# temperatures, percentages or six-digit block heights, hence the rescale to the
+# observed range rather than to any fixed ceiling.
+sparkline() {  # sparkline <space-separated values> [max points]
+  local raw="${1:-}" want="${2:-40}" idx out=""
+  [[ -z "${raw// /}" ]] && return 0
+  for idx in $(awk -v s="${raw}" -v w="${want}" 'BEGIN{
+      n = split(s, a, " ");
+      if (n == 0) exit;
+      start = (n > w) ? n - w + 1 : 1;
+      lo = a[start]; hi = a[start];
+      for (i = start; i <= n; i++) { if (a[i] < lo) lo = a[i]; if (a[i] > hi) hi = a[i] }
+      rng = hi - lo;
+      # A flat series is a real reading, not an error. Draw it as a flat low
+      # line rather than as nothing, so "steady" and "no data" stay different.
+      for (i = start; i <= n; i++)
+        printf "%d ", (rng == 0) ? 0 : int((a[i] - lo) / rng * 7 + 0.5)
+    }' 2>/dev/null); do
+    out+="${SPARK_GLYPH[${idx}]}"
+  done
+  printf '%s' "${out}"
+}
 
 line() {  # line <content-with-ansi>
   local content="$1" vis
@@ -79,11 +142,55 @@ page_log() {  # page_log <rows>
   fi
 }
 
+# The standings the dashboard grew: who else is producing, and where we sit.
+# The panel is the thing actually visible in the room, so the comparison people
+# care about belongs here and not only in a browser tab nobody has open.
+page_peers() {  # page_peers <rows>
+  local rows="$1" n
+  n=$(( rows - 6 )); (( n < 3 )) && n=3
+  line "  ${B}PRODUCER STANDINGS${R} ${D}${PEERN:-?} producers · ${PEERB:-?} blocks${R}"
+  rule
+  if (( have_jq )) && [[ -n "${JSON:-}" ]]; then
+    local any=0
+    while IFS=$'\t' read -r rank name blocks share self; do
+      [[ -z "${rank}" ]] && continue
+      any=1
+      local bar name_c
+      # Share is a percentage of a small sample, so the bar is scaled to the
+      # leader rather than to 100 — against a fixed 100 every row would be a
+      # stub and the ranking would be impossible to read at a glance.
+      bar="$(meter "$(awk -v a="${share}" -v b="${PEERMAX:-1}" 'BEGIN{printf "%d", (b>0)? a/b*100 : 0}')" 10 "${FG_GR}")"
+      if [[ "${self}" == "1" ]]; then
+        name_c="${B}${FG_W}${name}${R}"
+        bar="$(meter "$(awk -v a="${share}" -v b="${PEERMAX:-1}" 'BEGIN{printf "%d", (b>0)? a/b*100 : 0}')" 10 "${FG_C}")"
+      else
+        name_c="${FG_GR}${name}${R}"
+      fi
+      line "  ${D}${rank}.${R} $(pad "${name_c}" 0)$(printf '%*s' $(( 16 - ${#name} > 0 ? 16 - ${#name} : 1 )) '')${bar} $(printf '%4s' "${blocks}") ${D}${share}%${R}"
+    done < <(printf '%s' "${JSON}" | jq -r '
+      (.peers.top // [])[] |
+      [ (.rank|tostring),
+        (.label // ((.address[0:8]) + "…")),
+        (.blocks|tostring),
+        ((.sharePercent // 0)|tostring),
+        (if .isSelf then "1" else "0" end) ] | @tsv' 2>/dev/null | head -n "${n}")
+    if (( ! any )); then
+      line ""
+      line "  ${D}no producers observed yet — the scan is still filling${R}"
+    fi
+  else
+    line "  ${D}jq not installed; standings need it${R}"
+  fi
+  [[ -n "${PEERRANK}" ]] && { line ""; line "  ${D}this node ranks${R} ${B}${FG_W}#${PEERRANK}${R} ${D}of ${PEERN}${R}"; }
+}
+
 page_chain() {
   line "  ${B}CHAIN & REWARDS${R}"
   rule
   line "  ${D}HEIGHT${R}   ${B}${FG_W}$(group "${CUR}")${R}  ${D}final${R} $(group "${FIN}")  ${D}lag${R} ${LAG:-?}"
   line "  ${D}RATE${R}     ${SPB:-?}s/block  ${D}·${R} ${BPH:-?}/h chain"
+  local sp; sp="$(sparkline "${HHEIGHT}" $(( W - 14 )))"
+  [[ -n "${sp}" ]] && line "  ${D}TREND${R}    ${FG_C}${sp}${R}"
   line ""
   line "  ${D}REWARD${R}   ${B}${FG_G}${REW}${R} XL1"
   [[ -n "${RPD}" ]] && line "  ${D}PER DAY${R}  ~${RPD} XL1 ${D}extrapolated${R}"
@@ -106,8 +213,17 @@ page_system() {
   # clock-down is reported by the throttle flags below, not by this colour.
   local tc="${FG_G}"; [[ "${TEMP%%.*}" -ge 75 ]] 2>/dev/null && tc="${FG_Y}"
   [[ "${TEMP%%.*}" -ge 80 ]] 2>/dev/null && tc="${FG_R}"
+  # Temperature has no fixed ceiling to fill a bar against, so it gets the trend
+  # line instead — the shape is what says whether cooling is keeping up.
   line "  ${D}CPU${R}      ${tc}${TEMP:-?}°C${R}   ${D}load${R} ${LOAD:-?}"
-  line "  ${D}MEMORY${R}   ${MEM:-?}%  ${D}swap${R} ${SWP:-?}%  ${D}disk${R} ${DISK:-?}%"
+  local sp; sp="$(sparkline "${HTEMP}" $(( W - 14 )))"
+  [[ -n "${sp}" ]] && line "  ${D}TEMP${R}     ${tc}${sp}${R}"
+  local mc="${FG_G}"; [[ "${MEM:-0}" -ge 85 ]] 2>/dev/null && mc="${FG_R}" || { [[ "${MEM:-0}" -ge 70 ]] 2>/dev/null && mc="${FG_Y}"; }
+  local sc="${FG_G}"; [[ "${SWP:-0}" -ge 60 ]] 2>/dev/null && sc="${FG_R}" || { [[ "${SWP:-0}" -ge 30 ]] 2>/dev/null && sc="${FG_Y}"; }
+  local dc="${FG_G}"; [[ "${DISK:-0}" -ge 90 ]] 2>/dev/null && dc="${FG_R}" || { [[ "${DISK:-0}" -ge 75 ]] 2>/dev/null && dc="${FG_Y}"; }
+  line "  ${D}MEMORY${R}   $(meter "${MEM:-0}" 12 "${mc}") $(printf '%3s' "${MEM:-?}")%"
+  line "  ${D}SWAP${R}     $(meter "${SWP:-0}" 12 "${sc}") $(printf '%3s' "${SWP:-?}")%"
+  line "  ${D}DISK${R}     $(meter "${DISK:-0}" 12 "${dc}") $(printf '%3s' "${DISK:-?}")%"
   local pw
   case "${PWROK}" in
     true)  [[ "${UVEVER}" == "true" ]] && pw="${FG_Y}undervolted earlier${R}" || pw="${FG_G}stable${R}" ;;
@@ -172,6 +288,7 @@ render() {
   UVEVER=false; HOTNOW=false; HOST=""; NET=""; CHOK=false; LASTLOG=""
   LOGN=0; LASTBLK=""; SINCEBLK=""; SPB=""; BPH=""; SHARE=""; RPD=""; PADDR=""
   ELIG=""; CLIV=""; CLIL=""; OSU=""; OSS=""; DISK=""; LOAD=""; CUPT=""; RESTARTS=""
+  HHEIGHT=""; HTEMP=""; PEERN=""; PEERB=""; PEERRANK=""; PEERMAX="1"
 
   if (( have_jq )) && [[ -n "${json}" ]]; then
     eval "$(printf '%s' "${json}" | jq -r '
@@ -216,7 +333,15 @@ render() {
       @sh "DISK=\(.system.disk.usedPercent // "")",
       @sh "LOAD=\(.system.loadAverage[0] // "")",
       @sh "CUPT=\(.node.container.uptime // "")",
-      @sh "RESTARTS=\(.node.container.restartCount // "")"
+      @sh "RESTARTS=\(.node.container.restartCount // "")",
+      @sh "HHEIGHT=\([.history.height[]?.v] | join(" "))",
+      @sh "HTEMP=\([.history.tempC[]?.v] | join(" "))",
+      @sh "PEERN=\(.peers.producers // "")",
+      @sh "PEERB=\(.peers.scannedBlocks // "")",
+      @sh "PEERRANK=\(.peers.selfRank // "")",
+      # The leader'"'"'s share, so the bars on the standings page scale to the
+      # field instead of to an unreachable 100%.
+      @sh "PEERMAX=\([.peers.top[]?.sharePercent] | max // 1)"
     ' 2>/dev/null)"
   elif (( ! have_jq )); then
     PROB="jq not installed"
@@ -240,7 +365,12 @@ render() {
     done
     dots+=" "
   fi
-  local clock="${dots}${FG_GR}$(date '+%H:%M:%S')${R}"
+  # A frozen panel and a healthy one look identical when every number happens to
+  # be unchanged. This dot alternates on each redraw, so "is it still running"
+  # is answerable from across the room without reading anything.
+  FRAME=$(( (${FRAME:-0} + 1) % 2 ))
+  local beat; (( FRAME )) && beat="${FG_W}●${R}" || beat="${FG_GR}●${R}"
+  local clock="${dots}${beat} ${FG_GR}$(date '+%H:%M:%S')${R}"
   local tlen; tlen=$(vislen "${title}${clock}")
   printf ' %s%*s%s\n' "${title}" $(( W - tlen > 0 ? W - tlen : 1 )) "" "${clock}"
   rule
@@ -251,6 +381,7 @@ render() {
     1) page_log "${rows}"; return ;;
     2) page_chain; return ;;
     3) page_system; return ;;
+    4) page_peers "${rows}"; return ;;
   esac
 
   # --- status banner ------------------------------------------------------
@@ -317,7 +448,7 @@ render() {
   if (( rows >= 18 )); then
     line ""
     if [[ -e "${PAGE_FILE}" ]]; then
-      line "  ${D}tap: next page · hold: back here${R}"
+      line "  ${D}tap: next page · hold: back to overview${R}"
     fi
     # 51 columns including the indent, so it fits the 60 a 480x320 panel gives
     # and needs no shorter variant.

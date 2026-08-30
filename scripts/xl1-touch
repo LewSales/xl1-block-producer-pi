@@ -34,7 +34,7 @@ ABS_X, ABS_Y = 0x00, 0x01
 
 DEVICE = os.environ.get("XL1_TOUCH_DEVICE", "")
 STATE = os.environ.get("XL1_TOUCH_STATE", "/run/xl1-screen/page")
-PAGES = int(os.environ.get("XL1_TOUCH_PAGES", "4"))
+PAGES = int(os.environ.get("XL1_TOUCH_PAGES", "5"))
 LONG_PRESS = float(os.environ.get("XL1_TOUCH_LONG_PRESS", "0.7"))
 # Two events from one physical tap is the usual failure of a resistive panel.
 DEBOUNCE = float(os.environ.get("XL1_TOUCH_DEBOUNCE", "0.25"))

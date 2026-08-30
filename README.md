@@ -227,6 +227,66 @@ One thing worth knowing if you edit it: **balance lookups take bare lowercase
 hex and reject the `0x` form**, even though the upstream env examples write
 reward addresses with `0x`. The dashboard strips the prefix for you.
 
+### Producer standings
+
+A block is a bound witness and its producer is a signer, so the scan that counts
+this node's own blocks already holds every block's signer list. The **Producer
+standings** panel tallies the rest of those addresses at the same time: who else
+is producing, how many blocks each has signed, and where this node ranks.
+
+It is deliberately not a second poller. A leaderboard built from an independent
+pass would drift from the *Share of chain* figure printed beside it, and two
+numbers on one page disagreeing about the same blocks is worse than one number.
+
+Three things about how it counts are worth knowing:
+
+- **Shares divide by blocks actually read**, not by the height range. After an
+  outage those differ, and dividing by the range would report a share the node
+  never had. The sample size is printed under the table for that reason.
+- **The scan never jumps a gap.** It walks forward in chunks of 200 — the
+  gateway's cap — and advances its cursor only over blocks it genuinely read. A
+  range the gateway declines is retried, not booked as empty. Getting this wrong
+  loses blocks from every total with nothing on the page to show it happened.
+- **Totals persist across restarts** in `/var/lib/xl1/dashboard/peers.json`, and
+  the scan resumes from where it stopped rather than re-scanning a fresh window.
+  On a `Restart=always` unit, standings that reset on every bounce would be
+  meaningless.
+
+If some blocks carry more than one signer, the share column can total over 100%.
+The panel says so rather than normalising it away, which would make the number
+tidier and wrong.
+
+`DASH_PEERS_TOP` sets how many rows show; this node is always shown even when it
+ranks below the cut.
+
+#### Naming the other producers
+
+`DASH_PEER_LABELS` maps addresses to names so the table reads as people:
+
+```
+DASH_PEER_LABELS=a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4=Alice,9f3ac210=Bob
+```
+
+An entry may be a full 40-character address or a **prefix of at least eight hex
+characters**. Prefixes are accepted because a prefix is what you actually have —
+every block explorer truncates the address in a table, so requiring all forty
+would mean no labels until someone thinks to send theirs.
+
+The label never replaces the address; it sits beside the shortened hex, which
+stays linked to the explorer. Three ways a label can fail, all of them reported
+on the panel rather than dropped:
+
+- **Ambiguous** — the prefix matches two observed producers. Left unlabelled. A
+  wrong name against a row is worse than no name, because the hex at least
+  invites you to check and a name does not. Ambiguity is re-evaluated as the
+  scan sees more of the chain, so a prefix that is unique today and not tomorrow
+  is caught.
+- **Unmatched** — no producer in the sample starts with it. Said out loud,
+  because a name missing from the table looks identical to a producer who has
+  stopped.
+- **Malformed** — not hex, no name, or a prefix under eight characters. Rejected
+  with the reason.
+
 ---
 
 ## Alerting
@@ -334,14 +394,56 @@ zero updates confidently and wrongly — which reads as good news and is the wor
 answer the check can give. Past a week the age is escalated to a problem in its
 own right.
 
-To upgrade the CLI, rebuild the images on a workstation and reload:
+To upgrade the CLI, rebuild the images on a workstation and reload. The version
+`build-images.sh` pins by default is the one this bundle was built against
+(currently **5.3.1**); pass `XL1_CLI_VERSION` only to build something else:
 
 ```bash
-XL1_CLI_VERSION=5.3.0 ./build-images.sh    # on an amd64 machine, not the Pi
+./build-images.sh                          # on an amd64 machine, not the Pi
+XL1_CLI_VERSION=5.4.0 ./build-images.sh    # to move to a newer published CLI
 ```
 
 Then either cut a release and `sudo xl1ctl update --release` on the Pi, or copy
 the tarballs across and `sudo xl1ctl update /path/to/bundle`.
+
+### Rolling back a bad update
+
+`update` is the only command here that can take a working node off the chain, so
+it is also the only one that needs an undo.
+
+**There is nothing to roll back to on a node that has not updated yet.** A
+rollback target is written by the update that replaces an image, so on a node
+still running what it was provisioned with, `xl1ctl rollback` says so and does
+nothing. This is insurance against a *future* upgrade, not a reason to move off
+a version that works.
+
+Every image the Pi loads is tagged with its own `xl1-cli` version alongside
+`xl1:local`, and the version being replaced is recorded before the retag. Going
+back is a retag and a restart — seconds, no network, no rebuild:
+
+```bash
+xl1ctl versions          # what is here, what is running, what rollback targets
+sudo xl1ctl rollback     # back to whatever the last update replaced
+```
+
+So if the Pi is on 5.3.1 and a later `update` to 5.4.0 stops producing, one
+`sudo xl1ctl rollback` puts 5.3.1 back. Naming a version explicitly
+(`sudo xl1ctl rollback 5.3.1`) is for the case where several updates have
+happened and the automatic target is not the one you want.
+
+The version you just left becomes the new rollback target, so a second
+`rollback` returns you to where you started — which is what bisecting a bad
+release needs, and it means a mistaken rollback is itself one command to undo.
+
+The last three versions are kept, plus whatever is running and whatever rollback
+points at regardless of age (`XL1_KEEP_VERSIONS` to change the count). Docker
+shares layers between them, so the real cost on the card is far below three full
+images.
+
+This matters because the old path was one-way: `docker load` overwrote
+`xl1:local-arm64`, the retag moved `xl1:local`, and ten seconds later no copy
+remained of the image that had been producing fine. Recovery meant downloading an
+older release over the network at exactly the moment the node was already down.
 
 ---
 
@@ -413,6 +515,8 @@ xl1ctl dashboard     # print the dashboard URLs
 sudo xl1ctl restart
 
 sudo xl1ctl update --release     # fetch the latest release, verify it, reload
+sudo xl1ctl rollback             # undo that update, seconds, no network
+xl1ctl versions                  # producer images kept here
 sudo xl1ctl backup               # encrypted copy of /etc/xl1
 ```
 
@@ -478,12 +582,86 @@ consequence of the 3 B+ having 1 GB of RAM and a slower CPU.
 | `pnpm install` + `pnpm xy build` + `build-image.sh` **on the Pi** | Both images cross-built on your workstation, shipped as tarballs | The image build runs `npm install -g @xyo-network/xl1-cli`. On a 1 GB Pi 3 that is slow enough to become its own failure mode. Your laptop does it in ~80 s. |
 | 4 GB swap, default swappiness | 4 GB swap, `vm.swappiness=10` | At the default 60, a 1 GB Pi pages hot objects onto the SD card — that both stalls the node and wears the card. Swap here is an OOM backstop, not working memory. |
 | — | `gpu_mem=16` in `config.txt` | Returns ~48 MB to the system. Meaningful at 1 GB, irrelevant at 4–8 GB. |
+| — | `temp_soft_limit=70` in `config.txt` | A 3 B+ drops from 1.4 GHz to 1.2 GHz at 60 °C by default. 70 is the firmware maximum. See below. |
 | — | `--memory 768m` on the producer, `NODE_OPTIONS=--max-old-space-size=512` | Without an explicit heap ceiling a GC spike pushes the box into swap. |
 | `docker run` by hand in a shell | systemd units | Survives reboots and power cuts, which is the normal failure mode for a Pi. |
 | — | `time-sync.target` dependency | A Pi has no RTC. The producer signs against chain time, so starting before NTP settles produces confusing failures rather than obvious ones. |
 | — | Docker log rotation (`max-size=10m`) | Unbounded logs fill the SD card and take the node down weeks later. |
 | `ufw allow 30303` | Same, plus dashboard restricted to LAN + `tailscale0` | The box holds a producer mnemonic; nothing new is exposed to the open internet. |
 | — | Dashboard + collector | The requested addition. |
+| Note the container's flags by hand, then `docker stop`/`rm`/`run` to upgrade | `sudo xl1ctl update` | The flags are not undocumented here — they live in `xl1-producer.service`. Recreating the container by hand drops the `--memory 768m` and the 512 MB heap cap, which are the two things keeping a 1 GB Pi 3 out of SD-card swap. |
+| Roll back by hand between `xl1:5.2.3` / `xl1:5.2.4` tags | `sudo xl1ctl rollback` | Same idea, kept automatically. See [Rolling back a bad update](#rolling-back-a-bad-update). |
+| Confirm the upgrade by watching the log for `Building block` | Dashboard **Blocks produced**, counted from the chain | That log line is never emitted. Watching for it reports a healthy node as dead; the chain answers the same question correctly. |
+
+### Thermal throttling
+
+Two separate limits clock the CPU down, and only one of them is adjustable.
+
+| Limit | Value | What it does | Adjustable |
+|---|---|---|---|
+| Soft (`temp_soft_limit`) | 60 °C stock, **70 °C after provisioning** | Drops the ARM cores 1.4 GHz → 1.2 GHz until the SoC cools. 3A+/3B+ only. | Yes, up to 70. The firmware ignores anything higher, and there is no value that switches it off. |
+| Hard (`temp_limit`) | 85 °C | Overheat protection: clocks and voltage back to defaults. | No. Values above 85 are clamped. |
+
+So 75 °C or 80 °C are not available as a throttle point on this hardware — 70 °C
+is the ceiling. `provision.sh` writes it, and it applies on the next boot:
+
+```bash
+sudo TEMP_SOFT_LIMIT=70 ./provision.sh     # 70 is already the default
+vcgencmd get_config temp_soft_limit        # confirm after rebooting
+```
+
+Running at the ceiling is worth a heatsink on the SoC. If the dashboard still
+reports **CPU clock reduced for heat** at 70 °C, the fix is airflow, not
+configuration — there is nothing left to raise.
+
+Check which limit is actually firing with the SoC's own flags:
+
+```bash
+vcgencmd get_throttled
+```
+
+Bits 0–3 are *now*; bits 16–19 are *since boot* and are **sticky — they never
+clear until a power cycle**. So `throttled=0x80000` means the soft limit fired
+at some point but nothing is wrong at this moment, and a Pi whose cooling was
+just fixed will keep reporting it until rebooted. The panel's Throttle tile
+reads both limits and distinguishes the two.
+
+| Value | Meaning |
+|---|---|
+| `0x0` | Nothing has throttled since boot. |
+| `0x80000` | Soft limit fired earlier; full clock now. |
+| `0x8` | Clocked down for heat **right now** — check the fan. |
+| `0x50000` | Undervoltage since boot: a power supply problem, not a heat one. |
+
+### Overclocking
+
+Off unless asked for, because it is the one change here that can make a working
+producer unstable — and the instability is not a clean crash but occasional
+silent corruption on the card the wallet seed lives on.
+
+```bash
+sudo ARM_FREQ=1450 OVER_VOLTAGE=4 ./provision.sh
+```
+
+A 3 B+ runs at 1400 MHz and builds a block in roughly seventeen seconds against
+a one-second budget, so clock speed is the last software lever on how often this
+node lands one. `provision.sh` refuses anything below the 1400 stock clock,
+clamps `ARM_FREQ` at 1500 and `OVER_VOLTAGE` at 6, warns if a raised clock is
+asked for without extra voltage (it usually will not boot), and rewrites both
+keys as a block so re-running replaces the previous attempt rather than stacking
+contradictory ones.
+
+**Do not do this before cooling is sorted.** A higher clock is more heat, and a
+Pi that hits the soft limit drops to 1.2 GHz — slower than stock and hotter with
+it. Fix airflow first and confirm with `vcgencmd get_throttled`.
+
+To undo: delete the `arm_freq` and `over_voltage` lines from `config.txt` and
+reboot. If the Pi will not boot at all, do it with the card in another machine —
+nothing else on the card needs touching.
+
+The dashboard and the panel colour CPU temperature amber at 75 °C and red at
+80 °C. Those are headroom warnings about the 85 °C hard limit; an actual
+clock-down is reported separately from the SoC's own throttle flags.
 
 The dashboard deliberately has **no access to the Docker socket**. A read-only
 socket mount still grants full control of the daemon, which is not something to

@@ -101,8 +101,11 @@ page_chain() {
 page_system() {
   line "  ${B}HOST${R}"
   rule
-  local tc="${FG_G}"; [[ "${TEMP%%.*}" -ge 65 ]] 2>/dev/null && tc="${FG_Y}"
-  [[ "${TEMP%%.*}" -ge 75 ]] 2>/dev/null && tc="${FG_R}"
+  # Amber/red track the headroom left, not the throttle itself: the soft limit
+  # provision.sh asks for is 70 °C and the hard limit is 85 °C. An actual
+  # clock-down is reported by the throttle flags below, not by this colour.
+  local tc="${FG_G}"; [[ "${TEMP%%.*}" -ge 75 ]] 2>/dev/null && tc="${FG_Y}"
+  [[ "${TEMP%%.*}" -ge 80 ]] 2>/dev/null && tc="${FG_R}"
   line "  ${D}CPU${R}      ${tc}${TEMP:-?}°C${R}   ${D}load${R} ${LOAD:-?}"
   line "  ${D}MEMORY${R}   ${MEM:-?}%  ${D}swap${R} ${SWP:-?}%  ${D}disk${R} ${DISK:-?}%"
   local pw
@@ -281,7 +284,7 @@ render() {
   line "  ${D}NODE${R}    $(pad "${CST:-—}" 12) ${D}probe${R} ${hs}"
 
   local tc="${FG_G}"
-  [[ -n "${TEMP}" ]] && { awk "BEGIN{exit !(${TEMP} >= 75)}" && tc="${FG_R}" || { awk "BEGIN{exit !(${TEMP} >= 65)}" && tc="${FG_Y}"; }; }
+  [[ -n "${TEMP}" ]] && { awk "BEGIN{exit !(${TEMP} >= 80)}" && tc="${FG_R}" || { awk "BEGIN{exit !(${TEMP} >= 75)}" && tc="${FG_Y}"; }; }
   local mc="${FG_G}"; [[ "${MEM:-0}" -ge 85 ]] 2>/dev/null && mc="${FG_R}" || { [[ "${MEM:-0}" -ge 70 ]] 2>/dev/null && mc="${FG_Y}"; }
   local sc="${FG_G}"; [[ "${SWP:-0}" -ge 60 ]] 2>/dev/null && sc="${FG_R}" || { [[ "${SWP:-0}" -ge 30 ]] 2>/dev/null && sc="${FG_Y}"; }
 

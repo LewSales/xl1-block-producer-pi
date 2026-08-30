@@ -381,6 +381,31 @@ something is wrong.
 Tunable in `dashboard.env`: `DASH_TREND_RETAIN_DAYS`, `DASH_TREND_EVERY_MS`,
 `DASH_TREND_FILE`.
 
+### The journal does not survive a reboot until you make it
+
+Raspberry Pi OS ships `40-rpi-volatile-storage.conf` in
+`/usr/lib/systemd/journald.conf.d/` (from `raspberrypi-sys-mods`) setting
+`Storage=volatile`. The journal lives on tmpfs and every log is gone at the next
+boot. For a media box that is a reasonable way to spare the SD card. For a block
+producer it means the one thing you want after a regression — the logs from
+before it started — is the one thing you cannot have.
+
+It hides well. `/var/log/journal` exists, `systemd-journal-flush.service`
+reports success, and `journalctl` answers normally; it is just answering from
+`/run`. Two commands tell you the truth:
+
+```bash
+journalctl --list-boots                          # one row = volatile
+journalctl --header | grep 'File path'           # /run/... = volatile
+```
+
+`provision.sh` installs `systemd/journald-99-xl1-persistent.conf` to override
+it, capped at 200 MB and two weeks so the SD-card concern behind the vendor's
+default is still respected. The `99-` matters: drop-ins merge by filename across
+every directory and the last name wins, so a `10-` file loses to the vendor's
+`40-` silently. `systemd-analyze cat-config systemd/journald.conf` shows the
+merged result and is the only way to see which line won.
+
 ---
 
 ## Keeping it current

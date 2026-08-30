@@ -512,6 +512,33 @@ systemctl enable xl1-collect.timer >/dev/null
 systemctl enable xl1-dashboard.service >/dev/null
 info "enabled xl1-collect.timer and xl1-dashboard.service"
 
+# Persistent journal.
+#
+# Raspberry Pi OS forces Storage=volatile from
+# /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf, so the journal
+# lives on tmpfs and every log is gone at the next boot. That is a defensible
+# default for a media box and a bad one for a block producer: a share
+# regression on 2026-08-30 could not be traced to its onset because the reboot
+# in between had erased the only logs covering it.
+#
+# Drop-ins merge by filename across all directories and the last name wins,
+# which is why this one is 99- and not 10-.
+log "persistent journal"
+install -d -m 755 /etc/systemd/journald.conf.d
+install -m 644 "${BUNDLE_DIR}/systemd/journald-99-xl1-persistent.conf" \
+  /etc/systemd/journald.conf.d/99-xl1-persistent.conf
+# An earlier hand-staged copy sorted before 40- and lost silently. Leaving it
+# would be harmless but confusing to the next person reading cat-config.
+rm -f /etc/systemd/journald.conf.d/10-xl1-persistent.conf
+install -d -g systemd-journal -m 2755 /var/log/journal
+systemctl restart systemd-journald
+if journalctl --header 2>/dev/null | grep -q "^File path: /var/log/journal"; then
+  info "journal persists across reboots (capped at 200M, 2 weeks)"
+else
+  warn "journal is still volatile — something else is overriding Storage.
+      check: systemd-analyze cat-config systemd/journald.conf"
+fi
+
 if [[ -n "${CPU_GOVERNOR}" ]]; then
   # --now so the governor takes effect during this run rather than at the next
   # reboot; the unit exists to survive reboots, not to defer the first one.

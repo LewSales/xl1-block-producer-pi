@@ -67,9 +67,12 @@ if ! docker inspect "${CONTAINER}" >/dev/null 2>&1; then
   exit 0
 fi
 
-read -r STATE RUNNING STARTED RESTARTS IMAGE HEALTH < <(
+# .Config.Image is the tag the container was started from and does not change
+# when that tag is repointed at a new build. .Image is the resolved image ID,
+# which is what actually says whether this is the same software as last time.
+read -r STATE RUNNING STARTED RESTARTS IMAGE HEALTH IMAGE_ID < <(
   docker inspect "${CONTAINER}" --format \
-    '{{.State.Status}} {{.State.Running}} {{.State.StartedAt}} {{.RestartCount}} {{.Config.Image}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
+    '{{.State.Status}} {{.State.Running}} {{.State.StartedAt}} {{.RestartCount}} {{.Config.Image}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.Image}}'
 )
 
 UPTIME="unknown"
@@ -167,17 +170,27 @@ BLOCKED_KEY=""; BLOCKED_REASON=""
 # `docker exec` costs about a second on a 3 B+, and the answer changes when the
 # image is rebuilt and never in between, so it is cached rather than re-asked
 # every 30 seconds. The dashboard compares this against the published release.
-if (( $(cache_age "${CLI_CACHE}") > CLI_CHECK_INTERVAL )); then
+#
+# Keyed on the image ID, not on elapsed time. A version cache that outlives the
+# container it describes reports the old version after an upgrade and keeps
+# doing so for hours — the operator is shown a number that was true this morning
+# and has no way to tell. A new image ID invalidates it immediately; the time
+# interval only covers a re-read that failed.
+CLI_CACHED_ID=""; CLI_INSTALLED=""
+[[ -s "${CLI_CACHE}" ]] && IFS=$'\t' read -r CLI_CACHED_ID CLI_INSTALLED < "${CLI_CACHE}"
+
+if [[ "${CLI_CACHED_ID}" != "${IMAGE_ID}" ]] || (( $(cache_age "${CLI_CACHE}") > CLI_CHECK_INTERVAL )); then
   V="$(docker exec "${CONTAINER}" xl1 --version 2>/dev/null | tr -d '\r' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
   if [[ -n "${V}" ]]; then
-    printf '%s' "${V}" > "${CLI_CACHE}"
+    printf '%s\t%s\n' "${IMAGE_ID}" "${V}" > "${CLI_CACHE}"
+    CLI_INSTALLED="${V}"
   else
-    # Back off either way. Retrying a failing exec every 30s achieves nothing
-    # and keeps a container busy that has better things to do.
+    # Back off on a failing exec — retrying every 30s achieves nothing. The
+    # previous answer is kept, since a stale version beats no version, but the
+    # image ID is not stamped so a later cycle will try again.
     touch "${CLI_CACHE}"
   fi
 fi
-CLI_INSTALLED="$(cat "${CLI_CACHE}" 2>/dev/null || echo "")"
 
 # ------------------------------------------------------- the layer underneath
 #

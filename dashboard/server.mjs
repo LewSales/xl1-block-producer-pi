@@ -362,6 +362,7 @@ async function pollChain() {
     await scanProduction(viewer, currentNum)
 
     sample('height', currentNum)
+    sample('blocks', production.counted)
     if (balances.reward?.atto !== undefined) {
       // atto → XL1 as a float: fine for a trend line, never for a displayed
       // balance, which stays integer-exact above.
@@ -465,7 +466,6 @@ async function pollNode() {
       state.node.eligibilityNote = `not enforced on ${NETWORK}`
     }
 
-    sample('blocks', parsed.blocksPublished)
   } catch (error) {
     state.node = {
       ok: false,
@@ -653,6 +653,8 @@ function overall() {
  *  relationship between two readings the page would otherwise make the reader
  *  work out by eye. */
 function derived() {
+  const observedSeconds = history.height.length > 1
+    ? Math.round((history.height.at(-1).t - history.height[0].t) / 1000) : 0
   const chainRate = perHour('height')
   const rewardRate = perHour('reward')
   const nodeRate = perHour('blocks')
@@ -667,12 +669,14 @@ function derived() {
     // Extrapolated, and labelled as such on the page: an hour of observation is
     // not a day of earnings, and presenting it as one would be a lie by rounding.
     rewardPerHour: rewardRate !== undefined ? Number(rewardRate.toFixed(4)) : undefined,
-    rewardPerDay: rewardRate !== undefined ? Number((rewardRate * 24).toFixed(2)) : undefined,
+    // A rate measured over minutes says nothing about a day. 15 minutes is the
+    // floor at which the number stops being an artefact of when you looked.
+    rewardPerDay: (rewardRate !== undefined && observedSeconds >= 900)
+      ? Number((rewardRate * 24).toFixed(2)) : undefined,
     // What share of the chain's blocks this node signed while we watched.
     sharePercent: (chainRate > 0 && nodeRate !== undefined)
       ? Number(((nodeRate / chainRate) * 100).toFixed(3)) : undefined,
-    observedSeconds: history.height.length > 1
-      ? Math.round((history.height.at(-1).t - history.height[0].t) / 1000) : 0,
+    observedSeconds,
     samples: history.height.length,
     rewardEqualsProducer: Boolean(b?.reward && b?.producer && b.reward.address === b.producer.address),
 

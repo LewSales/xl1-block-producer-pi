@@ -279,8 +279,9 @@ function render(d) {
       ${spark(d.history?.reward, 'ok')}
       ${tiles([
         ['Per hour', dv.rewardPerHour !== undefined ? `${num(dv.rewardPerHour)}` : '—', 'XL1 observed'],
-        ['Per day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—', 'extrapolated'],
-        ['Share', dv.sharePercent !== undefined ? `${dv.sharePercent}%` : '—', 'of chain blocks'],
+        ['Per day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—',
+          dv.rewardPerDay !== undefined ? 'extrapolated' : `needs ${Math.max(0, 15 - Math.round((dv.observedSeconds ?? 0) / 60))}m more`],
+        ['Blocks/hr', dv.blocksPerHourNode !== undefined ? `${num(dv.blocksPerHourNode)}` : '—', 'produced by this node'],
       ])}
     </section>`)
   }

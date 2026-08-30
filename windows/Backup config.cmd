@@ -1,5 +1,6 @@
 @echo off
 setlocal
+if not exist "%~dp0_config.cmd" copy /Y "%~dp0_config.cmd.template" "%~dp0_config.cmd" >nul
 call "%~dp0_config.cmd"
 title XL1 - Encrypted backup
 echo.

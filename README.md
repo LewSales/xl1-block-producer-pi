@@ -410,6 +410,12 @@ card is not a backup. `windows/Fetch backup to this PC.cmd` does both steps.
 
 ### Driving it from Windows
 
+The launchers read `windows/_config.cmd`, which is created from
+`_config.cmd.template` the first time you run one. It holds your Pi's address
+and login, so it is deliberately **not** tracked — edit it freely and `git pull`
+will not fight you for it.
+
+
 `windows/` holds double-clickable launchers that SSH in and run one command
 each — preflight, provision, start/stop, live logs, dashboard, backup. Edit
 `windows/_config.cmd` if the Pi is not at `xl1pi.local`. Provisioning grants

@@ -65,10 +65,14 @@ pnpm install --frozen-lockfile
 pnpm xy compile
 [[ -f dist/node/entrypoint.mjs ]] || die "entrypoint did not compile"
 
+# The label is what makes rollback cheap. Without it, asking an image which
+# xl1-cli it carries means starting a container just to run `xl1 --version` —
+# about ten seconds on a Pi 3, during which the producer is already stopped.
 docker build --platform "${PLATFORM}" \
   -f docker/Dockerfile \
   --build-arg "NODE_VERSION=${NODE_VERSION}" \
   --build-arg "XL1_CLI_VERSION=${XL1_CLI_VERSION}" \
+  --label "org.xyo.xl1-cli.version=${XL1_CLI_VERSION}" \
   -t "xl1:local-${TARGET_ARCH}" .
 
 popd >/dev/null

@@ -11,6 +11,8 @@
 #   xl1ctl restore FILE        restore from one
 #   xl1ctl update --release    download the latest release and reload
 #   xl1ctl update              reload images from tarballs already on disk
+#   xl1ctl versions            producer images kept on this Pi
+#   xl1ctl rollback [VERSION]  put the previous image back and restart
 #   xl1ctl doctor              diagnose a producer that is not working
 
 set -uo pipefail
@@ -31,6 +33,69 @@ row()  { printf '  %-22s %s\n' "$1" "$2"; }
 need_root() { [[ ${EUID} -eq 0 ]] || die "this needs root — try: sudo xl1ctl $*"; }
 
 dash_port() { grep -oP '^DASH_PORT=\K.*' "${DASH_ENV}" 2>/dev/null || echo 8088; }
+
+# ------------------------------------------------------------------- versions
+#
+# `update` is the one command here that can take a working node off the chain,
+# and it used to be one-way: the load overwrote xl1:local-arm64 and the retag
+# moved xl1:local, so ten seconds later there was no copy left of the image that
+# had been producing fine. Recovery meant downloading an older release over the
+# network at precisely the moment the node was already down.
+#
+# So every image update touches is also tagged with its own version, and the
+# version being replaced is recorded. Rolling back is then a retag and a
+# restart — seconds, no network, no rebuild.
+
+PRODUCER_VERSION_LABEL=org.xyo.xl1-cli.version
+ROLLBACK_FILE="${STATE_DIR}/rollback"
+# Each kept version is a few hundred MB unpacked on an SD card, so the history
+# is bounded. Shared layers mean the real cost is well under that.
+KEEP_VERSIONS="${XL1_KEEP_VERSIONS:-3}"
+
+# Which xl1-cli does this image carry? The label build-images.sh stamps answers
+# instantly; the fallback starts a container, which costs about ten seconds on a
+# Pi 3 and is only needed for images built before the label existed.
+image_version() {
+  local ref="$1" v
+  docker image inspect "${ref}" >/dev/null 2>&1 || return 1
+  v="$(docker image inspect -f "{{index .Config.Labels \"${PRODUCER_VERSION_LABEL}\"}}" "${ref}" 2>/dev/null)"
+  if [[ -z "${v}" || "${v}" == "<no value>" ]]; then
+    v="$(docker run --rm --entrypoint xl1 "${ref}" --version 2>/dev/null \
+      | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+  fi
+  [[ -n "${v}" ]] || return 1
+  printf '%s' "${v}"
+}
+
+# Version-tagged producer images, newest first. Sorted -V, not lexically, so
+# 5.10.0 does not rank below 5.9.0 the first time a minor reaches double digits.
+producer_versions() {
+  docker images xl1 --format '{{.Tag}}' 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vr
+}
+
+# Keep the newest few, plus — regardless of age — whatever is running and
+# whatever rollback points at. Removing a tag never removes an image that is
+# still tagged something else, so this cannot delete xl1:local out from under a
+# running producer.
+prune_versions() {
+  local keep_a="${1:-}" keep_b="${2:-}" n=0 v
+  while read -r v; do
+    [[ -z "${v}" ]] && continue
+    n=$(( n + 1 ))
+    (( n <= KEEP_VERSIONS )) && continue
+    [[ "${v}" == "${keep_a}" || "${v}" == "${keep_b}" ]] && continue
+    docker rmi "xl1:${v}" >/dev/null 2>&1 \
+      && printf '  %spruned xl1:%s%s\n' "${DIM}" "${v}" "${RESET}"
+  done < <(producer_versions)
+}
+
+read_rollback_target() {
+  [[ -r "${ROLLBACK_FILE}" ]] || return 1
+  local t; t="$(tr -d '[:space:]' < "${ROLLBACK_FILE}")"
+  [[ -n "${t}" ]] || return 1
+  printf '%s' "${t}"
+}
 
 # --------------------------------------------------------------------- status
 
@@ -345,6 +410,19 @@ cmd_update() {
     Download them:  xl1ctl update --release
     Or point at a bundle:  xl1ctl update /path/to/xl1-pi"
 
+  # Name the outgoing image before the load and retag below make it anonymous.
+  # xl1:local still points at it right now; after the retag, nothing does.
+  local prev_ver=""
+  if prev_ver="$(image_version xl1:local)"; then
+    docker tag xl1:local "xl1:${prev_ver}" >/dev/null 2>&1 \
+      && printf '  keeping the running image as %sxl1:%s%s in case this goes badly\n' \
+           "${BOLD}" "${prev_ver}" "${RESET}"
+  else
+    prev_ver=""
+    printf '  %sno existing xl1:local to keep — nothing to roll back to after this%s\n' \
+      "${DIM}" "${RESET}"
+  fi
+
   # Every step below used to discard its status and fall through to an
   # unconditional success line, so a corrupt tarball, a full card, or a tag that
   # did not match reported "✓ images reloaded" while the old image kept running.
@@ -375,6 +453,22 @@ cmd_update() {
     fi
   done
 
+  # Tag what just landed, so the *next* update has a named thing to fall back
+  # to and `xl1ctl versions` can list what this Pi actually holds.
+  local new_ver=""
+  new_ver="$(image_version xl1:local)" || new_ver=""
+  [[ -n "${new_ver}" ]] && docker tag xl1:local "xl1:${new_ver}" >/dev/null 2>&1
+
+  # Only record a target when the update changed something. Re-running update on
+  # the version already installed must not leave rollback pointing at itself —
+  # that would turn the recovery path into a no-op at the worst moment.
+  if [[ -n "${prev_ver}" && "${prev_ver}" != "${new_ver}" ]]; then
+    mkdir -p "${STATE_DIR}"
+    printf '%s\n' "${prev_ver}" > "${ROLLBACK_FILE}"
+  fi
+
+  prune_versions "${new_ver}" "${prev_ver}"
+
   apply_ui_overlay
 
   systemctl restart xl1-dashboard || printf '  %swarning:%s dashboard did not restart — check: journalctl -u xl1-dashboard -n 50\n' "${YELLOW}" "${RESET}"
@@ -386,11 +480,96 @@ cmd_update() {
   # Say what actually happened rather than asserting success. The version the
   # node now runs is the only claim worth making here.
   local now=""
-  now="$(docker run --rm --entrypoint xl1 xl1:local --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+  now="$(image_version xl1:local)" || now=""
   printf '\n%s✓%s %s image(s) loaded, %s retagged, services restarted\n' \
     "${GREEN}" "${RESET}" "${loaded}" "${retagged}"
   [[ -n "${now}" ]] && printf '  xl1-cli now: %s%s%s\n' "${BOLD}" "${now}" "${RESET}"
+  if [[ -n "${prev_ver}" && "${prev_ver}" != "${new_ver}" ]]; then
+    printf '  if this one misbehaves: %ssudo xl1ctl rollback%s (back to %s)\n' \
+      "${BOLD}" "${RESET}" "${prev_ver}"
+  fi
   printf '\n'
+}
+
+# ------------------------------------------------------------------ rollback
+
+cmd_rollback() {
+  need_root rollback
+
+  local target="${1:-}"
+  if [[ -z "${target}" ]]; then
+    target="$(read_rollback_target)" || die "no recorded rollback target.
+    One is recorded by the update that replaces an image. Choose by hand:
+      xl1ctl versions
+      sudo xl1ctl rollback 5.3.0"
+  fi
+
+  docker image inspect "xl1:${target}" >/dev/null 2>&1 || die "xl1:${target} is not on this Pi.
+    Here: $(producer_versions | tr '\n' ' ' | sed 's/ *$//')
+    Or fetch it:  sudo xl1ctl update --release <release-tag>"
+
+  local current=""; current="$(image_version xl1:local)" || current=""
+  if [[ -n "${current}" && "${current}" == "${target}" ]]; then
+    printf '\n%s✓%s already running %s — nothing to do\n\n' "${GREEN}" "${RESET}" "${target}"
+    return 0
+  fi
+
+  printf '  %s → %s\n' "${current:-unknown}" "${target}"
+  docker tag "xl1:${target}" xl1:local \
+    || die "could not retag xl1:local — nothing was stopped, the node is still on ${current:-the old image}"
+
+  # Swap rather than clear: the version just left is the obvious thing to roll
+  # forward to, so a second rollback returns you to where you started. That is
+  # what someone bisecting a bad release expects, and it means a mistaken
+  # rollback is itself one command to undo.
+  if [[ -n "${current}" ]]; then
+    mkdir -p "${STATE_DIR}"
+    printf '%s\n' "${current}" > "${ROLLBACK_FILE}"
+  fi
+
+  if systemctl is-active --quiet xl1-producer; then
+    systemctl restart xl1-producer \
+      || die "xl1:local now points at ${target}, but the producer did not restart — check: xl1ctl doctor"
+  else
+    printf '  %sproducer was not running; started nothing%s\n' "${DIM}" "${RESET}"
+  fi
+
+  # The image answers for itself, the same way update does. A rollback that
+  # reported success while the tag had not moved would be the worst outcome
+  # here, because it is believed at the moment nobody wants to look further.
+  local now=""; now="$(image_version xl1:local)" || now=""
+  printf '\n%s✓%s producer image is now %s%s%s\n' \
+    "${GREEN}" "${RESET}" "${BOLD}" "${now:-${target}}" "${RESET}"
+  printf '  Confirm it produces again:  xl1ctl status\n\n'
+}
+
+# ------------------------------------------------------------------ versions
+
+cmd_versions() {
+  head_ "Producer images on this Pi"
+
+  local current=""; current="$(image_version xl1:local)" || current=""
+  local target=""; target="$(read_rollback_target)" || target=""
+
+  local any=0 v mark note
+  while read -r v; do
+    [[ -z "${v}" ]] && continue
+    any=1
+    mark=' '; note=""
+    if [[ "${v}" == "${current}" ]]; then mark="${GREEN}●${RESET}"; note="running now"
+    elif [[ "${v}" == "${target}" ]]; then note="rollback target"
+    fi
+    printf '  %s %-12s %s%s%s\n' "${mark}" "${v}" "${DIM}" "${note}" "${RESET}"
+  done < <(producer_versions)
+
+  if (( ! any )); then
+    printf '  %snone tagged yet — the next update starts recording them%s\n' "${DIM}" "${RESET}"
+  fi
+
+  printf '\n'
+  if [[ -n "${target}" && "${target}" != "${current}" ]]; then
+    printf '  Roll back:  %ssudo xl1ctl rollback%s\n\n' "${BOLD}" "${RESET}"
+  fi
 }
 
 # -------------------------------------------------------------------- doctor
@@ -460,6 +639,9 @@ ${BOLD}xl1ctl${RESET} — operate the XL1 block producer
   ${BOLD}update${RESET} --release [TAG]
                         download that release (default latest), verify, reload
   ${BOLD}update${RESET} [DIR]        reload images from tarballs already on disk
+  ${BOLD}versions${RESET}            producer images kept here, and which is running
+  ${BOLD}rollback${RESET} [VERSION]  retag xl1:local to the previous image and restart
+                        (no argument = the version the last update replaced)
   ${BOLD}doctor${RESET}              diagnose a producer that is not working
 
 EOF
@@ -477,6 +659,8 @@ case "${1:-status}" in
   backup)    shift; cmd_backup "$@" ;;
   restore)   shift; cmd_restore "$@" ;;
   update)    shift; cmd_update "$@" ;;
+  versions|images) shift; cmd_versions "$@" ;;
+  rollback)  shift; cmd_rollback "$@" ;;
   doctor)    shift; cmd_doctor "$@" ;;
   -h|--help|help) usage ;;
   *) printf '%sunknown command:%s %s\n\n' "${RED}" "${RESET}" "$1"; usage; exit 1 ;;

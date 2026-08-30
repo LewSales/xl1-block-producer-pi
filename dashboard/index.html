@@ -63,6 +63,13 @@
   table.board tr + tr td { border-top: 1px solid var(--line); }
   table.board tr.gap td { border-top: 2px dashed var(--line); }
   .peer-name { font-weight: 600; margin-right: 4px; }
+  /* Four columns stretched across a 1280px card put the name and its numbers at
+     opposite edges, which is a lot of eye travel to compare two rows. */
+  table.board { max-width: 760px; }
+  .peer-bar { height: 7px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 60px; }
+  .peer-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-peers) 70%, transparent); }
+  table.board tr.self .peer-bar > i { background: var(--accent); }
+  table.board td.barcell { width: 40%; padding-left: 14px; }
   pre.log {
     margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
@@ -271,79 +278,6 @@ function render(d) {
       <div class="err" style="margin-top:8px">${esc(d.chain?.error ?? 'unknown')}</div></section>`)
   }
 
-  // Producer standings — who else is signing blocks, and where we sit.
-  //
-  // Counted from the same scan that produces "Blocks produced" above, so the
-  // two can never disagree. The denominator is blocks actually read, which is
-  // why the sample size is printed rather than assumed from the height range.
-  const pb = d.peers
-  if (pb && pb.producers > 0) {
-    const short = (a) => `${String(a).slice(0, 6)}…${String(a).slice(-4)}`
-    // A named producer shows its name with the hex kept alongside, not replaced.
-    // The address is the identity; the label is a convenience, and dropping the
-    // hex would leave nothing to check a suspicious row against.
-    const nameCell = (r) => {
-      const name = r.label ?? (r.isSelf ? 'this node' : undefined)
-      const hex = r.url
-        ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.address)}">${esc(short(r.address))}</a>`
-        : `<span class="mono" title="${esc(r.address)}">${esc(short(r.address))}</span>`
-      return name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex
-    }
-
-    const rows = [...(pb.top ?? [])]
-    // Our own row matters more than the cut-off. If we rank below the visible
-    // top, show us anyway under a break rather than leaving the operator to
-    // conclude their node is not producing at all.
-    const shown = new Set(rows.map((r) => r.address))
-    const outside = pb.self && !shown.has(pb.self.address) ? pb.self : undefined
-
-    const tr_ = (r, cls = '') => `<tr class="${cls}${r.isSelf ? ' self' : ''}">
-      <td>${num(r.rank)}</td>
-      <td>${nameCell(r)}</td>
-      <td>${num(r.blocks)}</td>
-      <td>${r.sharePercent !== undefined ? `${r.sharePercent}%` : '—'}</td>
-    </tr>`
-
-    const leader = rows[0]
-    const mine = pb.self
-    // The comparison an operator actually wants: not the raw count, but how far
-    // off the top this node is. Same-rank-1 says so instead of printing "0
-    // behind", which reads like a deficit.
-    const gapLine = (!mine || !leader) ? ''
-      : mine.rank === 1
-        ? `<div class="sub">leading by ${num(leader.blocks - (rows[1]?.blocks ?? leader.blocks))} block(s)</div>`
-        : `<div class="sub">${num(leader.blocks - mine.blocks)} block(s) behind the leader</div>`
-
-    cards.push(`<section class="wide" style="--c: var(--c-peers)">
-      <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
-      ${mine
-        ? `<div class="big">#${num(mine.rank)} <span style="font-size:14px;color:var(--muted)">of ${num(pb.producers)}</span></div>
-           ${gapLine}`
-        : `<div class="big sub" style="font-size:16px">not seen yet</div>
-           <div class="sub">this node has not signed a block in the ${num(pb.scannedBlocks)} scanned</div>`}
-      ${pb.error ? `<div class="err" style="margin-top:8px">${esc(pb.error)}</div>` : ''}
-      <div class="board-wrap">
-        <table class="board">
-          <thead><tr><th>#</th><th>Producer</th><th>Blocks</th><th>Share</th></tr></thead>
-          <tbody>
-            ${rows.map((r) => tr_(r)).join('')}
-            ${outside ? tr_(outside, 'gap ') : ''}
-          </tbody>
-        </table>
-      </div>
-      <div class="sub" style="margin-top:8px">
-        ${num(pb.scannedBlocks)} blocks sampled${pb.scannedFrom !== undefined ? ` (#${num(pb.scannedFrom)}–#${num(pb.scannedTo)})` : ''}${pb.since ? ` · since ${new Date(pb.since).toLocaleDateString()}` : ''}.
-        Totals persist across restarts.
-      </div>
-      ${pb.multiSigner ? `<div class="sub">Some blocks carry more than one signer, so the share column can total over 100%.</div>` : ''}
-      ${(pb.labels?.rejected ?? []).map((x) => `<div class="sub warn">DASH_PEER_LABELS: ${esc(x)}</div>`).join('')}
-      ${(pb.labels?.ambiguous ?? []).map((x) => `<div class="sub warn">Label “${esc(x.name)}” (${esc(x.key)}) ${
-        x.clash ? `collides with “${esc(x.clash)}” on the same address` : `matches ${num(x.matches)} producers — left unlabelled rather than guessed`}</div>`).join('')}
-      ${(pb.labels?.unmatched ?? []).map((x) => `<div class="sub">Label “${esc(x.name)}” (${esc(x.key)}) matches no producer in this sample yet.</div>`).join('')}
-      ${dv.productionBehind ? `<div class="sub warn">${num(dv.productionBehind)} block(s) still to catch up on.</div>` : ''}
-    </section>`)
-  }
-
   // Rewards
   const b = d.chain?.balances ?? {}
   // Addresses link straight into the explorer — the lookup an operator does most.
@@ -486,6 +420,84 @@ function render(d) {
               : 'full clock'],
       ])}
       ${bar(s.memory.usedPercent)}
+    </section>`)
+  }
+
+  // Producer standings — who else is signing blocks, and where we sit.
+  //
+  // Counted from the same scan that produces "Blocks produced" above, so the
+  // two can never disagree. The denominator is blocks actually read, which is
+  // why the sample size is printed rather than assumed from the height range.
+  const pb = d.peers
+  if (pb && pb.producers > 0) {
+    const short = (a) => `${String(a).slice(0, 6)}…${String(a).slice(-4)}`
+    // A named producer shows its name with the hex kept alongside, not replaced.
+    // The address is the identity; the label is a convenience, and dropping the
+    // hex would leave nothing to check a suspicious row against.
+    const nameCell = (r) => {
+      const name = r.label ?? (r.isSelf ? 'this node' : undefined)
+      const hex = r.url
+        ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.address)}">${esc(short(r.address))}</a>`
+        : `<span class="mono" title="${esc(r.address)}">${esc(short(r.address))}</span>`
+      return name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex
+    }
+
+    const rows = [...(pb.top ?? [])]
+    // Our own row matters more than the cut-off. If we rank below the visible
+    // top, show us anyway under a break rather than leaving the operator to
+    // conclude their node is not producing at all.
+    const shown = new Set(rows.map((r) => r.address))
+    const outside = pb.self && !shown.has(pb.self.address) ? pb.self : undefined
+
+    // Bars scale to the leader, not to 100. With six producers splitting a
+    // chain, every bar against a fixed 100 would be a stub and the ranking —
+    // the thing this table exists to show — would be invisible.
+    const lead = Math.max(...rows.map((r) => r.sharePercent ?? 0), (pb.self?.sharePercent ?? 0), 0.0001)
+    const tr_ = (r, cls = '') => `<tr class="${cls}${r.isSelf ? ' self' : ''}">
+      <td>${num(r.rank)}</td>
+      <td>${nameCell(r)}</td>
+      <td class="barcell"><div class="peer-bar"><i style="width:${Math.max(r.sharePercent ? 2 : 0, ((r.sharePercent ?? 0) / lead) * 100)}%"></i></div></td>
+      <td>${num(r.blocks)}</td>
+      <td>${r.sharePercent !== undefined ? `${r.sharePercent}%` : '—'}</td>
+    </tr>`
+
+    const leader = rows[0]
+    const mine = pb.self
+    // The comparison an operator actually wants: not the raw count, but how far
+    // off the top this node is. Same-rank-1 says so instead of printing "0
+    // behind", which reads like a deficit.
+    const gapLine = (!mine || !leader) ? ''
+      : mine.rank === 1
+        ? `<div class="sub">leading by ${num(leader.blocks - (rows[1]?.blocks ?? leader.blocks))} block(s)</div>`
+        : `<div class="sub">${num(leader.blocks - mine.blocks)} block(s) behind the leader</div>`
+
+    cards.push(`<section class="wide" style="--c: var(--c-peers)">
+      <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
+      ${mine
+        ? `<div class="big">#${num(mine.rank)} <span style="font-size:14px;color:var(--muted)">of ${num(pb.producers)}</span></div>
+           ${gapLine}`
+        : `<div class="big sub" style="font-size:16px">not seen yet</div>
+           <div class="sub">this node has not signed a block in the ${num(pb.scannedBlocks)} scanned</div>`}
+      ${pb.error ? `<div class="err" style="margin-top:8px">${esc(pb.error)}</div>` : ''}
+      <div class="board-wrap">
+        <table class="board">
+          <thead><tr><th>#</th><th>Producer</th><th></th><th>Blocks</th><th>Share</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => tr_(r)).join('')}
+            ${outside ? tr_(outside, 'gap ') : ''}
+          </tbody>
+        </table>
+      </div>
+      <div class="sub" style="margin-top:8px">
+        ${num(pb.scannedBlocks)} blocks sampled${pb.scannedFrom !== undefined ? ` (#${num(pb.scannedFrom)}–#${num(pb.scannedTo)})` : ''}${pb.since ? ` · since ${new Date(pb.since).toLocaleDateString()}` : ''}.
+        Totals persist across restarts.
+      </div>
+      ${pb.multiSigner ? `<div class="sub">Some blocks carry more than one signer, so the share column can total over 100%.</div>` : ''}
+      ${(pb.labels?.rejected ?? []).map((x) => `<div class="sub warn">DASH_PEER_LABELS: ${esc(x)}</div>`).join('')}
+      ${(pb.labels?.ambiguous ?? []).map((x) => `<div class="sub warn">Label “${esc(x.name)}” (${esc(x.key)}) ${
+        x.clash ? `collides with “${esc(x.clash)}” on the same address` : `matches ${num(x.matches)} producers — left unlabelled rather than guessed`}</div>`).join('')}
+      ${(pb.labels?.unmatched ?? []).map((x) => `<div class="sub">Label “${esc(x.name)}” (${esc(x.key)}) matches no producer in this sample yet.</div>`).join('')}
+      ${dv.productionBehind ? `<div class="sub warn">${num(dv.productionBehind)} block(s) still to catch up on.</div>` : ''}
     </section>`)
   }
 

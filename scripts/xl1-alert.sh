@@ -26,6 +26,12 @@ STATE="${XL1_ALERT_STATE:-/var/lib/xl1/.alert-state}"
 COOLDOWN="${XL1_ALERT_COOLDOWN:-21600}"     # re-nag an ongoing problem after 6h
 NODE_NAME="${XL1_ALERT_NAME:-$(hostname)}"
 
+# A URL that must be pinged regularly, watched by something that is not this
+# machine. Everything else here can only report problems it is alive to observe;
+# this is the one that covers the Pi losing power, corrupting its card, or
+# hanging — where the signal is the absence of a signal.
+DEADMAN_URL="${XL1_ALERT_DEADMAN_URL:-}"
+
 NTFY_TOPIC="${XL1_ALERT_NTFY_TOPIC:-}"
 NTFY_SERVER="${XL1_ALERT_NTFY_SERVER:-https://ntfy.sh}"
 WEBHOOK="${XL1_ALERT_WEBHOOK:-}"
@@ -152,9 +158,38 @@ if [[ "${MODE}" == "--status" ]]; then
   exit 0
 fi
 
+# --------------------------------------------------------------- dead man
+#
+# Pinged after the conditions are known, so a run that got as far as reading the
+# status document is what counts as alive — not merely a timer that fired.
+#
+# The /fail variant turns an outage into an immediate alarm rather than waiting
+# out the service's grace period; without it a hard failure would be reported no
+# sooner than a silent death, which wastes the one thing this adds.
+deadman() {
+  [[ -n "${DEADMAN_URL}" ]] || return 0
+  local suffix="${1:-}"
+  curl -fsS --max-time 15 --retry 2 -o /dev/null "${DEADMAN_URL}${suffix}" 2>/dev/null \
+    || echo "xl1-alert: dead-man ping to ${DEADMAN_URL}${suffix} failed" >&2
+}
+
 if [[ "${MODE}" == "--test" ]]; then
   send default "XL1 ${NODE_NAME}: test" "If you are reading this, the channel works."
+  if [[ -n "${DEADMAN_URL}" ]]; then
+    deadman && echo "dead-man ping sent to ${DEADMAN_URL}"
+  else
+    echo "dead-man: not configured (XL1_ALERT_DEADMAN_URL is empty)"
+  fi
   exit 0
+fi
+
+if (( READABLE )); then
+  # A node that is DOWN is a definite failure, not a missed check-in.
+  if printf '%s' "${CONDITIONS}" | grep -qE '^(node-down|container-stopped)\|'; then
+    deadman /fail
+  else
+    deadman
+  fi
 fi
 
 # --------------------------------------------------------------- transitions

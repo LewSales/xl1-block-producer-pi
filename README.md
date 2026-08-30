@@ -401,10 +401,19 @@ journalctl --header | grep 'File path'           # /run/... = volatile
 
 `provision.sh` installs `systemd/journald-99-xl1-persistent.conf` to override
 it, capped at 200 MB and two weeks so the SD-card concern behind the vendor's
-default is still respected. The `99-` matters: drop-ins merge by filename across
-every directory and the last name wins, so a `10-` file loses to the vendor's
-`40-` silently. `systemd-analyze cat-config systemd/journald.conf` shows the
-merged result and is the only way to see which line won.
+default is still respected.
+
+Two things make this awkward to get right, and both fail quietly:
+
+- **The `99-` matters.** Drop-ins merge by filename across every directory and
+  the last name wins, so a `10-` file loses to the vendor's `40-`.
+  `systemd-analyze cat-config systemd/journald.conf` shows the merged result and
+  is the only way to see which line won.
+- **Restarting journald is not enough.** It keeps writing to `/run` until
+  something asks it to migrate, and that request is a one-shot at boot
+  (`systemd-journal-flush.service`, long since exited). So `journalctl --flush`
+  has to follow the restart — otherwise the config reads correctly and nothing
+  about the behaviour changes.
 
 ---
 

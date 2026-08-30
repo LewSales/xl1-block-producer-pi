@@ -532,6 +532,13 @@ install -m 644 "${BUNDLE_DIR}/systemd/journald-99-xl1-persistent.conf" \
 rm -f /etc/systemd/journald.conf.d/10-xl1-persistent.conf
 install -d -g systemd-journal -m 2755 /var/log/journal
 systemctl restart systemd-journald
+# A restart is not enough. journald keeps writing to /run until something asks
+# it to migrate, and the flush is normally a one-shot at boot
+# (systemd-journal-flush.service, already active/exited by the time we get
+# here). Without this the config reads correctly and the behaviour does not
+# change, which is the most confusing failure of the two.
+journalctl --flush
+sleep 1
 if journalctl --header 2>/dev/null | grep -q "^File path: /var/log/journal"; then
   info "journal persists across reboots (capped at 200M, 2 weeks)"
 else

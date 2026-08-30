@@ -67,6 +67,26 @@ fi
 if node --test "${HERE}/dashboard.test.mjs"; then ok "dashboard tests passed"; else bad "dashboard tests failed"; fi
 (( STUBBED )) && rm -rf "${ROOT}/dashboard/node_modules"
 
+step "Panel resilience"
+# The panel crashed on a leftover page number with the API down: no fetch had
+# run, jq got an empty document, `eval ""` set nothing, and `set -u` aborted on
+# the first variable. A console is the worst place to hide a stack trace.
+PANELDIR="$(mktemp -d)"
+echo 2 > "${PANELDIR}/page"
+if PANELOUT="$(XL1_SCREEN_API=http://127.0.0.1:9/nope XL1_SCREEN_PAGE_FILE="${PANELDIR}/page" \
+     COLUMNS=60 LINES=20 timeout 8 bash "${ROOT}/scripts/xl1-screen" --once 2>&1)"; then :; fi
+if grep -qi 'unbound variable' <<< "${PANELOUT}"; then
+  bad "panel aborts when asked to draw a page before any data was fetched"
+else
+  ok "panel degrades when it has no data"
+fi
+if grep -qi 'DASHBOARD UNREACHABLE' <<< "${PANELOUT}"; then
+  ok "panel says so rather than drawing an empty frame"
+else
+  bad "panel did not report the API being unreachable"
+fi
+rm -rf "${PANELDIR}"
+
 step "Collector behaviour"
 if bash "${HERE}/collect.test.sh"; then ok "collector tests passed"; else bad "collector tests failed"; fi
 

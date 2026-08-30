@@ -126,7 +126,8 @@ page_system() {
   [[ -n "${OSU}" ]] && line "  ${D}HOST PKGS${R} ${OSU} pending${OSS:+, ${FG_Y}${OSS} security${R}}"
 }
 
-OK=1
+OK=0
+JSON=""
 fetch() {
   local json
   json="$(curl -sf --max-time 4 "${API}" 2>/dev/null)" || { OK=0; return; }
@@ -159,7 +160,17 @@ render() {
     return
   fi
 
-  if (( have_jq )); then
+  # Every variable gets a value before jq is asked for one. Previously a failed
+  # jq left `eval ""` and the first use of ${HOST} aborted the whole script —
+  # which is exactly what a panel is worst placed to recover from, since nobody
+  # is watching a console for a stack trace.
+  ST="unknown"; PROB=""; CUR=""; FIN=""; LAG=""; REW=""; DELTA=""; SUB=""; ERRS=""
+  CST=""; HLIVE=false; TEMP=""; MEM=""; SWP=""; UPS=0; PWROK=unknown
+  UVEVER=false; HOTNOW=false; HOST=""; NET=""; CHOK=false; LASTLOG=""
+  LOGN=0; LASTBLK=""; SINCEBLK=""; SPB=""; BPH=""; SHARE=""; RPD=""; PADDR=""
+  ELIG=""; CLIV=""; CLIL=""; OSU=""; OSS=""; DISK=""; LOAD=""; CUPT=""; RESTARTS=""
+
+  if (( have_jq )) && [[ -n "${json}" ]]; then
     eval "$(printf '%s' "${json}" | jq -r '
       @sh "ST=\(.status)",
       @sh "CUR=\(.chain.currentBlock // "")",
@@ -203,14 +214,14 @@ render() {
       @sh "LOAD=\(.system.loadAverage[0] // "")",
       @sh "CUPT=\(.node.container.uptime // "")",
       @sh "RESTARTS=\(.node.container.restartCount // "")"
-    ')"
-  else
-    ST="unknown"; PROB="jq not installed"; CUR=""; REW=""; NET=""
-    CHOK=false; HLIVE=false; TEMP=""; MEM=""; SWP=""; UPS=0; SUB=""; ERRS=""
-    CST=""; HOST=""; LASTLOG=""; DELTA=""; FIN=""; LAG=""; PWROK=unknown; UVEVER=false; HOTNOW=false
-    LOGN=0; LASTBLK=""; SINCEBLK=""; SPB=""; BPH=""; SHARE=""; RPD=""; PADDR=""
-    ELIG=""; CLIV=""; CLIL=""; OSU=""; OSS=""; DISK=""; LOAD=""; CUPT=""; RESTARTS=""
+    ' 2>/dev/null)"
+  elif (( ! have_jq )); then
+    PROB="jq not installed"
   fi
+
+  # A jq that ran but produced nothing leaves ST at its default. Say so on the
+  # panel rather than drawing a frame full of dashes.
+  [[ "${ST}" == "unknown" && -n "${json}" ]] && PROB="${PROB:-could not parse the status document}"
 
   # --- header -------------------------------------------------------------
   local title="${B}${FG_C}XL1 PRODUCER${R}"
@@ -332,7 +343,14 @@ fi
 # Two clocks. Data refreshes on INTERVAL; the page is checked ten times a second
 # so a tap redraws immediately instead of whenever the next poll happens to land.
 # A redraw from a page change costs nothing — the data is already in hand.
-LAST_FETCH=0
+# Adopt the page that is already selected rather than assuming 0: the touch
+# daemon's choice outlives a restart of this script, and treating it as a change
+# used to trigger a render before anything had been fetched.
+PAGE="$(read_page)"
+fetch
+render
+
+LAST_FETCH=${SECONDS}
 while true; do
   now=${SECONDS}
   if (( now - LAST_FETCH >= INTERVAL )); then

@@ -17,6 +17,14 @@ BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR=/var/lib/xl1
 CONF_DIR=/etc/xl1
 SWAP_SIZE="${SWAP_SIZE:-4G}"
+# Temperature at which the 3 B+ drops the ARM cores from 1.4 GHz to 1.2 GHz.
+# Firmware default is 60, firmware maximum is 70 — anything higher is ignored.
+TEMP_SOFT_LIMIT="${TEMP_SOFT_LIMIT:-70}"
+# Overclocking is opt-in and off unless asked for. Empty means "do not touch
+# config.txt", which is the only safe default for a box that holds a wallet seed
+# and is expected to run unattended for months.
+ARM_FREQ="${ARM_FREQ:-}"
+OVER_VOLTAGE="${OVER_VOLTAGE:-}"
 DASH_PORT="${DASH_PORT:-8088}"
 INSTALL_TAILSCALE="${INSTALL_TAILSCALE:-1}"
 
@@ -110,6 +118,121 @@ if [[ -f "${BOOT_CONFIG}" ]]; then
   fi
 else
   warn "no config.txt found; skipping GPU split"
+fi
+
+# --------------------------------------------------- 2b. thermal soft limit
+
+# A 3 B+ clocks itself down from 1.4 GHz to 1.2 GHz at 60 °C and stays there
+# until it cools. For a producer in a case that is most of the day, and the
+# dashboard reports it as "CPU clock reduced for heat".
+#
+# `temp_soft_limit` moves that point. It is a 3A+/3B+ key only, it defaults to
+# 60, and the firmware clamps it at 70 — 75 or 80 are not available, and there
+# is no value that switches the soft limit off. The separate 85 °C hard limit
+# (`temp_limit`) is overheat protection and is not raisable at all.
+#
+# 70 is the ceiling, so it is what we ask for; it is worth having a heatsink on
+# the SoC before running there.
+if [[ -f "${BOOT_CONFIG}" ]]; then
+  if (( TEMP_SOFT_LIMIT > 70 )); then
+    warn "TEMP_SOFT_LIMIT=${TEMP_SOFT_LIMIT} exceeds the firmware maximum; using 70"
+    TEMP_SOFT_LIMIT=70
+  fi
+  case "${MODEL}" in
+    *"Pi 3 Model A Plus"*|*"Pi 3 Model B Plus"*|*"Pi 3 Model A+"*|*"Pi 3 Model B+"*)
+      if grep -qE "^\\s*temp_soft_limit=${TEMP_SOFT_LIMIT}\\s*$" "${BOOT_CONFIG}"; then
+        info "temp_soft_limit already ${TEMP_SOFT_LIMIT}"
+      else
+        sed -i -E '/^\s*temp_soft_limit=/d' "${BOOT_CONFIG}"
+        printf '\n# XL1: hold turbo clock until %s C instead of the stock 60 C\ntemp_soft_limit=%s\n' \
+          "${TEMP_SOFT_LIMIT}" "${TEMP_SOFT_LIMIT}" >> "${BOOT_CONFIG}"
+        info "temp_soft_limit=${TEMP_SOFT_LIMIT} written to ${BOOT_CONFIG} (takes effect on next boot)"
+        REBOOT_WANTED=1
+      fi
+      ;;
+    *) info "temp_soft_limit is a 3A+/3B+ key; not applicable to this model" ;;
+  esac
+fi
+
+# ------------------------------------------------------------ 2c. clock speed
+
+# Off unless asked for:  sudo ARM_FREQ=1450 OVER_VOLTAGE=4 ./provision.sh
+#
+# A 3 B+ runs at 1400 MHz and builds a block in roughly seventeen seconds
+# against a one-second budget, so clock speed is the one software lever left on
+# how often this node lands a block. It is also the one change here that can
+# make a working producer unstable.
+#
+# What that instability looks like matters: not a clean crash, but occasional
+# silent corruption on the SD card the wallet seed lives on. So this refuses
+# anything it cannot argue for, and every line it writes can be deleted from
+# config.txt to undo it.
+#
+# Do not touch this without real cooling. Raising the clock raises the heat, and
+# a Pi that hits the soft limit is clocked back to 1.2 GHz — slower than stock
+# and hotter with it. Fix airflow first; the dashboard's Throttle tile says
+# whether that worked.
+if [[ -n "${ARM_FREQ}${OVER_VOLTAGE}" ]]; then
+  if [[ ! -f "${BOOT_CONFIG}" ]]; then
+    warn "no config.txt found; skipping clock settings"
+  else
+    case "${MODEL}" in
+      *"Pi 3 Model A Plus"*|*"Pi 3 Model B Plus"*|*"Pi 3 Model A+"*|*"Pi 3 Model B+"*)
+        OC_OK=1
+
+        if [[ -n "${ARM_FREQ}" ]]; then
+          if [[ ! "${ARM_FREQ}" =~ ^[0-9]+$ ]]; then
+            warn "ARM_FREQ=${ARM_FREQ} is not a number; skipping clock settings"; OC_OK=0
+          elif (( ARM_FREQ < 1400 )); then
+            # Almost certainly a typo. Underclocking is a legitimate thing to
+            # want, but not something to do to a producer by accident.
+            warn "ARM_FREQ=${ARM_FREQ} is below the 1400 MHz stock clock — refusing.
+    That would make this node slower, not faster. Remove the arm_freq line from
+    ${BOOT_CONFIG} by hand if an underclock is genuinely what you want."
+            OC_OK=0
+          elif (( ARM_FREQ > 1500 )); then
+            warn "ARM_FREQ=${ARM_FREQ} is beyond what a 3 B+ holds reliably; clamping to 1500"
+            ARM_FREQ=1500
+          fi
+        fi
+
+        if [[ -n "${OVER_VOLTAGE}" ]]; then
+          if [[ ! "${OVER_VOLTAGE}" =~ ^[0-9]+$ ]]; then
+            warn "OVER_VOLTAGE=${OVER_VOLTAGE} is not a number; skipping clock settings"; OC_OK=0
+          elif (( OVER_VOLTAGE > 6 )); then
+            # The firmware accepts 8, but past 6 the extra heat buys almost no
+            # extra stable clock on this SoC and sets the warranty bit.
+            warn "OVER_VOLTAGE=${OVER_VOLTAGE} is higher than is sensible here; clamping to 6"
+            OVER_VOLTAGE=6
+          fi
+        fi
+
+        # A 3 B+ rarely holds anything above stock on stock voltage. Saying so
+        # is more useful than letting it boot-loop and be discovered later.
+        if (( OC_OK )) && [[ -n "${ARM_FREQ}" && "${ARM_FREQ}" != "1400" && -z "${OVER_VOLTAGE}" ]]; then
+          warn "ARM_FREQ=${ARM_FREQ} with no OVER_VOLTAGE — this often will not boot.
+    Try OVER_VOLTAGE=2 (or 4) alongside it if the Pi hangs on the next start."
+        fi
+
+        if (( OC_OK )); then
+          # Rewritten as a block so re-running with different values replaces
+          # the previous attempt rather than stacking contradictory keys.
+          sed -i -E '/^\s*#\s*XL1: clock\b/d; /^\s*arm_freq=/d; /^\s*over_voltage=/d' "${BOOT_CONFIG}"
+          {
+            printf '\n# XL1: clock — delete these two lines to return to stock\n'
+            [[ -n "${ARM_FREQ}" ]]     && printf 'arm_freq=%s\n' "${ARM_FREQ}"
+            [[ -n "${OVER_VOLTAGE}" ]] && printf 'over_voltage=%s\n' "${OVER_VOLTAGE}"
+          } >> "${BOOT_CONFIG}"
+          info "clock settings written to ${BOOT_CONFIG}: arm_freq=${ARM_FREQ:-stock} over_voltage=${OVER_VOLTAGE:-stock}"
+          warn "overclock applies on the next boot. If the Pi does not come back:
+    put the card in another machine and delete the arm_freq/over_voltage lines
+    from config.txt. Nothing else on the card needs touching."
+          REBOOT_WANTED=1
+        fi
+        ;;
+      *) info "clock settings here are 3A+/3B+ values; not applying them to this model" ;;
+    esac
+  fi
 fi
 
 # ------------------------------------------------------- 3. packages & Docker
@@ -340,6 +463,17 @@ docker tag xl1:local-arm64 xl1:local
 docker tag xl1-dashboard:local-arm64 xl1-dashboard:local
 info "tagged xl1:local and xl1-dashboard:local"
 
+# Also tag the producer by its own version, so `xl1ctl versions` has something
+# to show on a fresh install and the first update has a named image to fall back
+# to. The label is stamped at build time; older bundles have none, and this
+# quietly does nothing rather than starting a container to find out.
+PROVISIONED_VERSION="$(docker image inspect \
+  -f '{{index .Config.Labels "org.xyo.xl1-cli.version"}}' xl1:local 2>/dev/null || true)"
+if [[ -n "${PROVISIONED_VERSION}" && "${PROVISIONED_VERSION}" != "<no value>" ]]; then
+  docker tag xl1:local "xl1:${PROVISIONED_VERSION}"
+  info "tagged xl1:${PROVISIONED_VERSION} (rollback point)"
+fi
+
 # Same reasoning as xl1ctl: a local overlay at /etc/xl1/ui holds patches applied
 # on top of the shipped image, and the retag above just discarded them.
 if [[ -f /etc/xl1/ui/Dockerfile ]]; then
@@ -426,7 +560,8 @@ fi
 
 if [[ -n "${REBOOT_WANTED:-}" ]]; then
   cat <<EOF
-    A reboot is needed for the GPU memory split to take effect:
+    A reboot is needed for the config.txt changes (GPU memory split,
+    thermal soft limit) to take effect:
 
       sudo reboot
 

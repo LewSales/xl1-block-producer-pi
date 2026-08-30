@@ -111,6 +111,7 @@ page_system() {
     false) pw="${ON_R} UNDERVOLTAGE ${R}" ;;
     *)     pw="${D}unknown${R}" ;;
   esac
+  [[ "${HOTNOW}" == "true" ]] && pw="${ON_Y} CLOCKED DOWN FOR HEAT ${R}"
   line "  ${D}POWER${R}    ${pw}"
   line "  ${D}UPTIME${R}   $(( UPS / 86400 ))d $(( UPS % 86400 / 3600 ))h"
   line ""
@@ -179,6 +180,7 @@ render() {
       # exists to shout about. Test for the object instead.
       @sh "PWROK=\(if .system.throttle == null then "unknown" else (.system.throttle.healthy | tostring) end)",
       @sh "UVEVER=\(if .system.throttle == null then "false" else (.system.throttle.undervoltageSinceBoot | tostring) end)",
+      @sh "HOTNOW=\(if .system.throttle == null then "false" else (.system.throttle.softTempLimitNow | tostring) end)",
       @sh "HOST=\(.system.hostname // "")",
       @sh "NET=\(.chain.networkName // "")",
       @sh "CHOK=\(.chain.ok)",
@@ -205,7 +207,7 @@ render() {
   else
     ST="unknown"; PROB="jq not installed"; CUR=""; REW=""; NET=""
     CHOK=false; HLIVE=false; TEMP=""; MEM=""; SWP=""; UPS=0; SUB=""; ERRS=""
-    CST=""; HOST=""; LASTLOG=""; DELTA=""; FIN=""; LAG=""; PWROK=unknown; UVEVER=false
+    CST=""; HOST=""; LASTLOG=""; DELTA=""; FIN=""; LAG=""; PWROK=unknown; UVEVER=false; HOTNOW=false
     LOGN=0; LASTBLK=""; SINCEBLK=""; SPB=""; BPH=""; SHARE=""; RPD=""; PADDR=""
     ELIG=""; CLIV=""; CLIL=""; OSU=""; OSS=""; DISK=""; LOAD=""; CUPT=""; RESTARTS=""
   fi
@@ -282,6 +284,7 @@ render() {
     false) pw="${ON_R} UNDERVOLTAGE ${R}" ;;
     *)     pw="${D}unknown${R}" ;;
   esac
+  [[ "${HOTNOW}" == "true" ]] && pw="${ON_Y} CLOCKED DOWN, HOT ${R}"
   line "  ${D}POWER${R}   ${pw}"
 
   # --- log tail, if the screen is tall enough -----------------------------

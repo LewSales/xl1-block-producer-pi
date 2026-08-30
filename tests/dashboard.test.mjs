@@ -182,3 +182,21 @@ test('the last block links into the explorer, and absence is stated', () => {
   assert.equal(none.lastBlock, undefined)
   assert.equal(none.lastBlockUrl, undefined, 'no block means no link, not a link to nothing')
 })
+
+test('thermal clock reduction is not called healthy', () => {
+  // 0x80008 — bit 3 soft temp limit now, bit 19 since boot. Read off a live
+  // Pi 3 B+ at 66C, where the ARM clock drops 1.4GHz -> 1.2GHz. Calling that
+  // "stable" hides the reason blocks build slowly.
+  const t = m.decodeThrottle('0x80008')
+  assert.equal(t.softTempLimitNow, true)
+  assert.equal(t.softTempLimitSinceBoot, true)
+  assert.equal(t.undervoltageNow, false, 'this is heat, not power — different fix')
+  assert.equal(t.healthy, false, 'a CPU being clocked down is not healthy')
+
+  baselineHealthyState()
+  m.state.system = { ok: true, throttle: t, swap: { usedPercent: 0 } }
+  m.state.node = { ok: true, stale: false, container: { running: true } }
+  const p = m.overall().problems.join(' | ')
+  assert.match(p, /heat/i, 'the message must point at cooling, not at a power supply')
+  assert.doesNotMatch(p, /undervolt/i)
+})

@@ -433,7 +433,11 @@ function decodeThrottle(hex) {
     frequencyCappedSinceBoot: flag(17),
     throttledSinceBoot: flag(18),
     softTempLimitSinceBoot: flag(19),
-    healthy: !flag(0) && !flag(2),
+    // Bit 3 means the ARM clock is being reduced for heat right now — on a
+    // 3 B+ that is 1.4 GHz down to 1.2 GHz. Excluding it called a CPU that is
+    // actively running slow "stable", which is precisely the reading an
+    // operator wondering why blocks build slowly needs to see.
+    healthy: !flag(0) && !flag(2) && !flag(3),
   }
 }
 
@@ -522,7 +526,15 @@ function overall() {
   if (!state.node.ok) problems.push(`collector not reporting: ${state.node.error ?? 'unknown'}`)
   if (state.node.ok && state.node.stale) problems.push('collector data stale')
   if (!state.chain.ok) problems.push('chain unreachable')
-  if (state.system.ok && state.system.throttle && !state.system.throttle.healthy) problems.push('Pi undervoltage/throttling')
+  if (state.system.ok && state.system.throttle) {
+    const t = state.system.throttle
+    if (t.undervoltageNow) problems.push('Pi undervolting right now')
+    if (t.throttledNow) problems.push('Pi hard-throttled right now')
+    // Named separately from undervoltage: it is a different cause with a
+    // different fix, and lumping them under one message sends people to buy a
+    // power supply for a cooling problem.
+    if (t.softTempLimitNow) problems.push('CPU clock reduced for heat — add cooling')
+  }
   if (state.system.ok && state.system.swap?.usedPercent > 60) problems.push('heavy swap use')
   if (state.chain.ok && state.chain.chainIdMatchesPreset === false) problems.push('chain id differs from preset')
 

@@ -6,7 +6,7 @@
 //   node    — producer container state, written by the host collector timer
 //   system  — Pi vitals from /proc and /sys (temp, throttle, RAM, swap, disk)
 
-import { readFile, appendFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, appendFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createServer } from 'node:http'
 import { statfs } from 'node:fs'
@@ -61,7 +61,11 @@ const LOCAL_POLL_MS = envNum('DASH_LOCAL_POLL_MS', 5_000, 1000)
 // actually goes to look up a block or an address.
 const EXPLORER_URL = envStr('DASH_EXPLORER_URL', `https://explore.xyo.network/xl1/${NETWORK}`).replace(/\/+$/, '')
 const explorerAddress = (a) => (a ? `${EXPLORER_URL}/address/${a}` : undefined)
-const explorerBlock = (n) => (Number.isFinite(Number(n)) ? `${EXPLORER_URL}/block/${n}` : undefined)
+// /block/number/<n>, not /block/<n>. The explorer routes blocks by hash as well
+// as by height, so the height lookup is a distinct path — and the short form
+// resolves to nothing rather than erroring, which is why every "Last produced"
+// link opened a blank page instead of looking obviously broken.
+const explorerBlock = (n) => (Number.isFinite(Number(n)) ? `${EXPLORER_URL}/block/number/${n}` : undefined)
 
 // Where to look up the newest published CLI, for the "update available"
 // comparison. Set empty to switch version checking off entirely.
@@ -173,7 +177,16 @@ async function persistTrend() {
     t: Date.now(),
     height: state.chain?.currentBlock,
     reward: history.reward.at(-1)?.v,
+    // The collector's figure is grep -c 'published block' over the container
+    // log — a string the producer never emits, so it is 0 forever and every
+    // day in the chart read "0 blocks". Same defect c1fc673 fixed for the
+    // headline count; this store was still reading the old source.
+    //
+    // Written under a new key on purpose. Rows already on disk carry blocks:0,
+    // and diffing a real cumulative count against those zeros would post the
+    // entire running total as a single day's production on the changeover day.
     blocks: state.node?.blocksPublished,
+    cblocks: production.counted,
     tempC: state.system?.cpuTempC,
   }
   if (row.height === undefined && row.reward === undefined) return
@@ -218,16 +231,22 @@ function trendDaily() {
   const byDay = new Map()
   for (const r of trend) {
     const day = new Date(r.t).toISOString().slice(0, 10)
-    const cur = byDay.get(day)
-    if (!cur) byDay.set(day, { day, firstBlocks: r.blocks, lastBlocks: r.blocks, firstReward: r.reward, lastReward: r.reward })
-    else {
-      if (r.blocks !== undefined) { cur.firstBlocks ??= r.blocks; cur.lastBlocks = r.blocks }
-      if (r.reward !== undefined) { cur.firstReward ??= r.reward; cur.lastReward = r.reward }
-    }
+    let cur = byDay.get(day)
+    if (!cur) { cur = { day }; byDay.set(day, cur) }
+    // Each series tracked separately so a key that only appears partway through
+    // the day is diffed against its own first reading, never against the other
+    // key's. The two counters mean different things and must not be mixed.
+    if (r.cblocks !== undefined) { cur.firstC ??= r.cblocks; cur.lastC = r.cblocks }
+    if (r.blocks !== undefined) { cur.firstBlocks ??= r.blocks; cur.lastBlocks = r.blocks }
+    if (r.reward !== undefined) { cur.firstReward ??= r.reward; cur.lastReward = r.reward }
   }
   return [...byDay.values()].map((d) => ({
     day: d.day,
-    blocks: (d.lastBlocks ?? 0) - (d.firstBlocks ?? 0),
+    // Prefer the chain-derived counter wherever the day has one; fall back to
+    // the collector's only for days recorded before it existed.
+    blocks: d.lastC !== undefined
+      ? Math.max(0, d.lastC - (d.firstC ?? d.lastC))
+      : (d.lastBlocks ?? 0) - (d.firstBlocks ?? 0),
     // A restart resets nothing here (both are chain-side or cumulative), but a
     // negative would mean the counter was reset — report 0 rather than nonsense.
     earned: Math.max(0, Number(((d.lastReward ?? 0) - (d.firstReward ?? 0)).toFixed(4))),
@@ -276,40 +295,300 @@ let baselineBalance // first balance we saw, to show earned-since-start
 // A block is a BoundWitness and its producer is a signer, so the chain itself
 // answers the question. This agrees with the block explorer by construction,
 // which the log grep never could.
-const production = { counted: 0, lastBlock: undefined, scannedFrom: undefined, error: undefined }
-let productionCursor
+const production = {
+  counted: 0,
+  lastBlock: undefined,
+  scannedFrom: undefined,
+  scannedTo: undefined,
+  // Blocks actually read, which is the only honest denominator for a share.
+  // A range the gateway refused is not a range with no blocks in it, and
+  // (scannedTo - scannedFrom) would quietly count those as ours-that-weren't.
+  scanned: 0,
+  multiSigner: false,
+  error: undefined,
+  // Highest block already read. Lives here rather than in a module-local so the
+  // scan's entire state is one object — inspectable, resettable, persistable.
+  cursor: undefined,
+}
+
+// ------------------------------------------------------------ peer producers
+//
+// The scan below already holds every block's signer list in order to find our
+// own. Tallying the other addresses at the same time costs one Map write per
+// signer and answers a question the page could not otherwise ask: who else is
+// producing, and how do we compare.
+//
+// Deliberately not a second poller. A leaderboard built from an independent
+// pass would drift from the "Share of chain" figure printed beside it, and two
+// numbers on one page that disagree about the same blocks are worse than one
+// number — that lesson is already written into how blocks came to be counted
+// from the chain instead of from the log.
+
+const PEERS_FILE = envStr('DASH_PEERS_FILE', '/var/lib/xl1/dashboard/peers.json')
+const PEERS_EVERY_MS = envNum('DASH_PEERS_EVERY_MS', 300_000, 30_000)
+const PEERS_TOP = envNum('DASH_PEERS_TOP', 12, 1)
+// How many blocks one poll may spend dragging the cursor forward. The gateway
+// caps a read at 200, so this is a budget of calls, and it exists because a
+// dashboard that was down overnight must catch up over several polls rather
+// than issuing hundreds of requests in one.
+const PEERS_CATCHUP = envNum('DASH_PRODUCTION_CATCHUP', 1000, 200)
+
+// Names for addresses, so the standings read as producers rather than hex.
+//
+//   DASH_PEER_LABELS=a1b2c3d4e5f6...=Alice,9f3ac210=Bob
+//
+// Prefixes are accepted because a prefix is what a block explorer actually
+// gives you — every one of them truncates the address in a table, and demanding
+// all forty characters would mean no label at all until someone thinks to send
+// their full address. Eight hex characters is 32 bits, so within a producer set
+// this size a collision is not a practical concern.
+//
+// But a prefix that does match two observed addresses is refused rather than
+// guessed at. A leaderboard with the wrong name against a row is worse than one
+// with no names on it: the hex at least invites you to check, and a name does
+// not.
+const PEER_LABEL_MIN = 8
+
+function parsePeerLabels(raw) {
+  const entries = []
+  const rejected = []
+  for (const part of String(raw ?? '').split(',')) {
+    const item = part.trim()
+    if (!item) continue
+    const eq = item.indexOf('=')
+    if (eq < 1) { rejected.push(`${item} — expected address=name`); continue }
+    const key = item.slice(0, eq).trim().replace(/^0x/i, '').toLowerCase()
+    const name = item.slice(eq + 1).trim()
+    if (!name) { rejected.push(`${item} — no name given`); continue }
+    if (!/^[0-9a-f]+$/.test(key)) { rejected.push(`${item} — "${key}" is not hex`); continue }
+    if (key.length > 40) { rejected.push(`${item} — "${key}" is longer than an address`); continue }
+    if (key.length < PEER_LABEL_MIN) {
+      rejected.push(`${item} — needs at least ${PEER_LABEL_MIN} hex characters to be unambiguous`)
+      continue
+    }
+    entries.push({ key, name, full: key.length === 40 })
+  }
+  // Exact addresses resolve before prefixes, so a full address always beats a
+  // prefix that happens to cover it.
+  entries.sort((a, b) => Number(b.full) - Number(a.full))
+  return { entries, rejected }
+}
+
+const PEER_LABELS = parsePeerLabels(process.env.DASH_PEER_LABELS)
+
+/** Resolve labels against the addresses actually observed. Deliberately not done
+ *  at parse time: whether a prefix is ambiguous is a property of the address
+ *  set, and that set grows as the scan sees more of the chain. A prefix that is
+ *  unique today can stop being unique tomorrow, and this notices. */
+function resolveLabels(addresses) {
+  const byAddress = new Map()
+  const ambiguous = []
+  const unmatched = []
+
+  for (const { key, name, full } of PEER_LABELS.entries) {
+    const hits = full ? addresses.filter((a) => a === key) : addresses.filter((a) => a.startsWith(key))
+    if (hits.length === 0) { unmatched.push({ name, key }); continue }
+    if (hits.length > 1) { ambiguous.push({ name, key, matches: hits.length }); continue }
+    // Two names claiming one address is a config mistake. Keep the first and
+    // say so rather than letting the last line of the variable win silently.
+    if (byAddress.has(hits[0])) { ambiguous.push({ name, key, matches: 1, clash: byAddress.get(hits[0]) }); continue }
+    byAddress.set(hits[0], name)
+  }
+  return { byAddress, ambiguous, unmatched }
+}
+
+/** address (bare lowercase hex) → blocks signed, across every range we have
+ *  ever scanned. Survives restarts via PEERS_FILE; without that the standings
+ *  would reset to zero every time the container bounced, which on a Restart=
+ *  always unit is often enough to make the record meaningless. */
+const peers = new Map()
+let peersSince
+let peersError
+let peersLastWrite = 0
+
+async function loadPeers() {
+  try {
+    const doc = JSON.parse(await readFile(PEERS_FILE, 'utf8'))
+    for (const [addr, n] of Object.entries(doc.counts ?? {})) {
+      if (typeof n === 'number' && Number.isFinite(n) && n > 0) peers.set(addr, n)
+    }
+    production.scannedFrom = doc.scannedFrom
+    production.scannedTo = doc.scannedTo
+    production.scanned = Number(doc.scanned) || 0
+    production.multiSigner = Boolean(doc.multiSigner)
+    peersSince = doc.since
+    // Resume where the last run stopped rather than re-scanning a fresh window.
+    // Re-scanning would double-count every block in the overlap, inflating both
+    // our total and everyone else's by however long the dashboard was down.
+    if (Number.isFinite(Number(doc.scannedTo))) production.cursor = Number(doc.scannedTo)
+    const self = PRODUCER_ADDRESS || REWARD_ADDRESS
+    if (self) production.counted = peers.get(self) ?? 0
+    peersError = undefined
+  } catch (error) {
+    peersError = error.code === 'ENOENT' ? undefined : error.message?.slice(0, 160)
+  }
+}
+
+async function persistPeers(force = false) {
+  if (!force && Date.now() - peersLastWrite < PEERS_EVERY_MS) return
+  if (peers.size === 0) return
+
+  peersSince ??= new Date().toISOString()
+  const doc = {
+    v: 1,
+    since: peersSince,
+    updatedAt: new Date().toISOString(),
+    scannedFrom: production.scannedFrom,
+    scannedTo: production.scannedTo,
+    scanned: production.scanned,
+    multiSigner: production.multiSigner,
+    counts: Object.fromEntries([...peers.entries()].sort((a, b) => b[1] - a[1])),
+  }
+
+  try {
+    // Written whole, then renamed. A partial write here is not a lost sample
+    // like the trend store — it is a corrupt standings file that fails to parse
+    // on the next boot and silently resets every total to zero.
+    await writeFile(`${PEERS_FILE}.tmp`, JSON.stringify(doc))
+    await rename(`${PEERS_FILE}.tmp`, PEERS_FILE)
+    peersLastWrite = Date.now()
+    peersError = undefined
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      try {
+        await mkdir(dirname(PEERS_FILE), { recursive: true })
+        peersError = undefined
+      } catch {
+        peersError = `${dirname(PEERS_FILE)} does not exist and cannot be created`
+          + ' — xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)'
+      }
+      return
+    }
+    peersError = error.code === 'EACCES' || error.code === 'EROFS'
+      ? `${dirname(PEERS_FILE)} is mounted read-only — update xl1-dashboard.service and daemon-reload`
+      : error.message?.slice(0, 160)
+  }
+}
 
 /** Scan only what is new. The first pass looks back a window; afterwards it
- *  reads the handful of blocks that appeared since, so the cost does not grow
- *  with uptime. */
+ *  reads the blocks that appeared since, so the cost does not grow with uptime.
+ *  Walks forward in chunks and advances the cursor only over blocks it actually
+ *  read — an earlier version asked for the newest 200 and then jumped the
+ *  cursor to the head, which after any real outage booked the skipped middle as
+ *  scanned and lost those blocks from every total for good. */
 async function scanProduction(viewer, currentNum) {
-  const addr = PRODUCER_ADDRESS || REWARD_ADDRESS
-  if (!addr || !Number.isFinite(currentNum)) return
+  const self = PRODUCER_ADDRESS || REWARD_ADDRESS
+  if (!Number.isFinite(currentNum)) return
 
   const WINDOW = Number(envNum('DASH_PRODUCTION_WINDOW', 120, 10))
-  const from = productionCursor === undefined ? Math.max(0, currentNum - WINDOW + 1) : productionCursor + 1
-  if (currentNum < from) return
+  let from = production.cursor === undefined
+    ? Math.max(0, currentNum - WINDOW + 1)
+    : production.cursor + 1
+  if (from > currentNum) return
 
-  const limit = Math.min(currentNum - from + 1, 200)
+  production.scannedFrom ??= from
+  peersSince ??= new Date().toISOString()
+  let budget = PEERS_CATCHUP
+
   try {
-    // Newest-first, per the SDK's documented direction.
-    const blocks = await viewer.block.blocksByNumber(currentNum, limit)
-    for (const entry of blocks ?? []) {
-      const bw = Array.isArray(entry) ? entry[0] : entry
-      const n = Number(bw?.block)
-      if (!Number.isFinite(n) || n < from) continue
-      const signers = (bw?.addresses ?? []).map((a) => String(a).replace(/^0x/i, '').toLowerCase())
-      if (signers.includes(addr)) {
-        production.counted += 1
-        if (production.lastBlock === undefined || n > production.lastBlock) production.lastBlock = n
+    while (from <= currentNum && budget > 0) {
+      // blocksByNumber reads newest-first from a chosen top, which is what
+      // makes a range in the middle reachable at all.
+      const top = Math.min(currentNum, from + 199)
+      const limit = top - from + 1
+      const blocks = await viewer.block.blocksByNumber(top, limit)
+
+      if (!blocks?.length) {
+        // An empty answer is far more likely to be the gateway declining than a
+        // genuinely empty range. Advancing past it would mark those blocks
+        // scanned forever, so stop and retry the same range next poll.
+        production.error = `gateway returned no blocks for ${from}-${top}`
+        break
       }
+
+      for (const entry of blocks) {
+        const bw = Array.isArray(entry) ? entry[0] : entry
+        const n = Number(bw?.block)
+        if (!Number.isFinite(n) || n < from || n > top) continue
+
+        const signers = new Set((bw?.addresses ?? [])
+          .map((a) => String(a).replace(/^0x/i, '').toLowerCase())
+          .filter(Boolean))
+        if (signers.size === 0) continue
+        if (signers.size > 1) production.multiSigner = true
+
+        production.scanned += 1
+        for (const addr of signers) peers.set(addr, (peers.get(addr) ?? 0) + 1)
+
+        // Our own figure comes out of the same pass, over the same definition
+        // of "produced", so the headline and the table can never disagree.
+        if (self && signers.has(self)) {
+          production.counted += 1
+          if (production.lastBlock === undefined || n > production.lastBlock) production.lastBlock = n
+        }
+      }
+
+      production.cursor = top
+      production.scannedTo = top
+      from = top + 1
+      budget -= limit
+      if (!production.error) production.error = undefined
     }
-    production.scannedFrom ??= from
-    production.error = undefined
-    productionCursor = currentNum
+    if (from > currentNum) production.error = undefined
+    production.behind = Math.max(0, currentNum - (production.scannedTo ?? currentNum))
   } catch (error) {
     // Leave the cursor alone so the same range is retried rather than skipped.
     production.error = error.message?.slice(0, 160)
+  }
+}
+
+/** The standings, newest tally first. Shares divide by blocks actually read,
+ *  never by the height range, so an outage shrinks the sample rather than
+ *  silently deflating everyone's percentage. */
+function peerBoard() {
+  const self = PRODUCER_ADDRESS || REWARD_ADDRESS
+  const scanned = production.scanned || 0
+  const { byAddress: labels, ambiguous, unmatched } = resolveLabels([...peers.keys()])
+
+  const rows = [...peers.entries()]
+    .map(([address, blocks]) => ({
+      address,
+      blocks,
+      sharePercent: scanned > 0 ? Number(((blocks / scanned) * 100).toFixed(2)) : undefined,
+      isSelf: Boolean(self) && address === self,
+      label: labels.get(address),
+      url: explorerAddress(address),
+    }))
+    // Ties broken by address so the order does not jitter between polls.
+    .sort((a, b) => b.blocks - a.blocks || a.address.localeCompare(b.address))
+
+  rows.forEach((r, i) => { r.rank = i + 1 })
+  const mine = rows.find((r) => r.isSelf)
+
+  return {
+    producers: rows.length,
+    scannedBlocks: scanned,
+    scannedFrom: production.scannedFrom,
+    scannedTo: production.scannedTo,
+    since: peersSince,
+    // Shares sum past 100% when blocks carry more than one signer. Said out
+    // loud rather than normalised away, because the page would otherwise look
+    // arithmetically broken to anyone who added the column up.
+    multiSigner: production.multiSigner,
+    selfRank: mine?.rank,
+    self: mine,
+    top: rows.slice(0, PEERS_TOP),
+    // Labels that could not be applied. Surfaced rather than dropped: a name
+    // silently missing from the table looks identical to a producer who has
+    // stopped, and the operator would go looking at the wrong thing.
+    labels: {
+      applied: labels.size,
+      configured: PEER_LABELS.entries.length,
+      ambiguous,
+      unmatched,
+      rejected: PEER_LABELS.rejected,
+    },
+    error: peersError,
   }
 }
 
@@ -695,13 +974,16 @@ function derived() {
     producedObserved: production.counted,
     producedSince: production.scannedFrom,
     productionError: production.error,
-    // Share of the chain's blocks this node signed over the observed range.
-    producedSharePercent: (production.scannedFrom !== undefined && state.chain?.currentBlock !== undefined)
-      ? (() => {
-          const span = state.chain.currentBlock - production.scannedFrom + 1
-          return span > 0 ? Number(((production.counted / span) * 100).toFixed(2)) : undefined
-        })()
+    // Share of the chain's blocks this node signed. The denominator is blocks
+    // actually read, not the height range: after an outage those differ, and
+    // dividing by the range would report a share the node never had.
+    producedSharePercent: production.scanned > 0
+      ? Number(((production.counted / production.scanned) * 100).toFixed(2))
       : undefined,
+    producedScanned: production.scanned,
+    // Blocks the scan has not caught up on yet. Nonzero here is why a share may
+    // look stale, and an operator should be able to see that rather than guess.
+    productionBehind: production.behind,
   }
 }
 
@@ -712,6 +994,7 @@ const snapshot = () => ({
   ...state,
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   derived: derived(),
+  peers: peerBoard(),
   history,
   trend: { daily: trendDaily(), points: trend.length, retainDays: TREND_RETAIN_DAYS, error: trendError },
 })
@@ -754,7 +1037,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend }
+export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, peers, production }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -772,6 +1055,10 @@ if (isMain) {
 
   // Prime every source before listening so the first page load is never empty.
   await loadTrend()
+  // Before pollChain: the first scan reads the resumed cursor, and starting it
+  // from a fresh window instead would re-count every block in the overlap.
+  await loadPeers()
+  if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
   await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
 
@@ -783,6 +1070,7 @@ if (isMain) {
   // Checked often, written rarely — persistTrend decides for itself whether
   // enough time has passed, so the cadence lives in one place.
   setInterval(guard(persistTrend, 'persistTrend'), 60_000).unref()
+  setInterval(guard(persistPeers, 'persistPeers'), 60_000).unref()
   setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')() }, LOCAL_POLL_MS).unref()
   setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
 
@@ -796,7 +1084,12 @@ if (isMain) {
       // by polling — so it never returned and every stop burned the full
       // 15s docker timeout before SIGKILL.
       server.closeAllConnections?.()
-      server.close(() => process.exit(0))
+      // Flush first: a restart is exactly when the last few minutes of tallying
+      // would otherwise be dropped, and deploys are frequent enough for that to
+      // add up to a visibly wrong record.
+      persistPeers(true).catch(() => {}).finally(() => {
+        server.close(() => process.exit(0))
+      })
       setTimeout(() => process.exit(0), 3000).unref()
     })
   }

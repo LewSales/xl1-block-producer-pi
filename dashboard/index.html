@@ -51,6 +51,18 @@
   .bar > i { display: block; height: 100%; background: var(--accent); }
   .bar > i.warn { background: var(--warn); } .bar > i.bad { background: var(--bad); }
   ul.problems { margin: 10px 0 0; padding-left: 18px; color: var(--warn); }
+  /* Standings. A wide table on a 480px phone must scroll inside its own box
+     rather than stretching the page sideways. */
+  .board-wrap { overflow-x: auto; margin-top: 4px; }
+  table.board { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.board th { text-align: right; font-weight: 600; color: var(--muted); padding: 4px 6px; white-space: nowrap; }
+  table.board th:nth-child(2) { text-align: left; }
+  table.board td { padding: 4px 6px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.board td:nth-child(2) { text-align: left; }
+  table.board tr.self { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 650; }
+  table.board tr + tr td { border-top: 1px solid var(--line); }
+  table.board tr.gap td { border-top: 2px dashed var(--line); }
+  .peer-name { font-weight: 600; margin-right: 4px; }
   pre.log {
     margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
@@ -83,11 +95,13 @@
   :root {
     --c-producer: #2f7ae5; --c-chain: #7a4ddb; --c-rewards: #1a7f47;
     --c-software: #b4690e; --c-trend: #0d7c8f; --c-pi: #c0392b; --c-log: #5b6472;
+    --c-peers: #8a5a2b;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --c-producer: #6aa8ff; --c-chain: #a98bff; --c-rewards: #4ec97f;
       --c-software: #e0a341; --c-trend: #48c3d6; --c-pi: #ff8a7a; --c-log: #9aa4b2;
+      --c-peers: #d7a06a;
     }
   }
   section { position: relative; overflow: hidden; }
@@ -257,6 +271,79 @@ function render(d) {
       <div class="err" style="margin-top:8px">${esc(d.chain?.error ?? 'unknown')}</div></section>`)
   }
 
+  // Producer standings — who else is signing blocks, and where we sit.
+  //
+  // Counted from the same scan that produces "Blocks produced" above, so the
+  // two can never disagree. The denominator is blocks actually read, which is
+  // why the sample size is printed rather than assumed from the height range.
+  const pb = d.peers
+  if (pb && pb.producers > 0) {
+    const short = (a) => `${String(a).slice(0, 6)}…${String(a).slice(-4)}`
+    // A named producer shows its name with the hex kept alongside, not replaced.
+    // The address is the identity; the label is a convenience, and dropping the
+    // hex would leave nothing to check a suspicious row against.
+    const nameCell = (r) => {
+      const name = r.label ?? (r.isSelf ? 'this node' : undefined)
+      const hex = r.url
+        ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.address)}">${esc(short(r.address))}</a>`
+        : `<span class="mono" title="${esc(r.address)}">${esc(short(r.address))}</span>`
+      return name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex
+    }
+
+    const rows = [...(pb.top ?? [])]
+    // Our own row matters more than the cut-off. If we rank below the visible
+    // top, show us anyway under a break rather than leaving the operator to
+    // conclude their node is not producing at all.
+    const shown = new Set(rows.map((r) => r.address))
+    const outside = pb.self && !shown.has(pb.self.address) ? pb.self : undefined
+
+    const tr_ = (r, cls = '') => `<tr class="${cls}${r.isSelf ? ' self' : ''}">
+      <td>${num(r.rank)}</td>
+      <td>${nameCell(r)}</td>
+      <td>${num(r.blocks)}</td>
+      <td>${r.sharePercent !== undefined ? `${r.sharePercent}%` : '—'}</td>
+    </tr>`
+
+    const leader = rows[0]
+    const mine = pb.self
+    // The comparison an operator actually wants: not the raw count, but how far
+    // off the top this node is. Same-rank-1 says so instead of printing "0
+    // behind", which reads like a deficit.
+    const gapLine = (!mine || !leader) ? ''
+      : mine.rank === 1
+        ? `<div class="sub">leading by ${num(leader.blocks - (rows[1]?.blocks ?? leader.blocks))} block(s)</div>`
+        : `<div class="sub">${num(leader.blocks - mine.blocks)} block(s) behind the leader</div>`
+
+    cards.push(`<section class="wide" style="--c: var(--c-peers)">
+      <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
+      ${mine
+        ? `<div class="big">#${num(mine.rank)} <span style="font-size:14px;color:var(--muted)">of ${num(pb.producers)}</span></div>
+           ${gapLine}`
+        : `<div class="big sub" style="font-size:16px">not seen yet</div>
+           <div class="sub">this node has not signed a block in the ${num(pb.scannedBlocks)} scanned</div>`}
+      ${pb.error ? `<div class="err" style="margin-top:8px">${esc(pb.error)}</div>` : ''}
+      <div class="board-wrap">
+        <table class="board">
+          <thead><tr><th>#</th><th>Producer</th><th>Blocks</th><th>Share</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => tr_(r)).join('')}
+            ${outside ? tr_(outside, 'gap ') : ''}
+          </tbody>
+        </table>
+      </div>
+      <div class="sub" style="margin-top:8px">
+        ${num(pb.scannedBlocks)} blocks sampled${pb.scannedFrom !== undefined ? ` (#${num(pb.scannedFrom)}–#${num(pb.scannedTo)})` : ''}${pb.since ? ` · since ${new Date(pb.since).toLocaleDateString()}` : ''}.
+        Totals persist across restarts.
+      </div>
+      ${pb.multiSigner ? `<div class="sub">Some blocks carry more than one signer, so the share column can total over 100%.</div>` : ''}
+      ${(pb.labels?.rejected ?? []).map((x) => `<div class="sub warn">DASH_PEER_LABELS: ${esc(x)}</div>`).join('')}
+      ${(pb.labels?.ambiguous ?? []).map((x) => `<div class="sub warn">Label “${esc(x.name)}” (${esc(x.key)}) ${
+        x.clash ? `collides with “${esc(x.clash)}” on the same address` : `matches ${num(x.matches)} producers — left unlabelled rather than guessed`}</div>`).join('')}
+      ${(pb.labels?.unmatched ?? []).map((x) => `<div class="sub">Label “${esc(x.name)}” (${esc(x.key)}) matches no producer in this sample yet.</div>`).join('')}
+      ${dv.productionBehind ? `<div class="sub warn">${num(dv.productionBehind)} block(s) still to catch up on.</div>` : ''}
+    </section>`)
+  }
+
   // Rewards
   const b = d.chain?.balances ?? {}
   // Addresses link straight into the explorer — the lookup an operator does most.
@@ -365,7 +452,10 @@ function render(d) {
   const s = d.system
   if (s?.ok) {
     const t = s.throttle
-    const tempCls = s.cpuTempC >= 75 ? 'bad' : s.cpuTempC >= 65 ? 'warn' : 'ok'
+    // Headroom, not throttle state. The soft limit is raised to 70 °C at
+    // provision time and the hard limit is 85 °C, so 65 °C was amber for a
+    // machine that was working exactly as configured.
+    const tempCls = s.cpuTempC >= 80 ? 'bad' : s.cpuTempC >= 75 ? 'warn' : 'ok'
     cards.push(`<section style="--c: var(--c-pi)">
       <h2><span class="ico" aria-hidden="true">${s.platform === 'windows' ? '🖥️' : '🍓'}</span>${s.platform === 'windows' ? 'Host' : 'Raspberry Pi'}</h2>
       <div class="big ${tempCls}">${s.cpuTempC ?? '—'}°C</div>
@@ -380,8 +470,20 @@ function render(d) {
           : ['Load', `${s.loadAverage?.[0] ?? '—'}`, `${s.cpuCount} cores`],
         t && ['Power', t.undervoltageNow ? '<span class="bad">LOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">dipped</span>' : '<span class="ok">stable</span>',
               t.undervoltageNow ? 'undervolting now' : t.undervoltageSinceBoot ? 'since boot' : '5V holding'],
-        t && ['Throttle', t.throttledNow ? '<span class="bad">NOW</span>' : t.throttledSinceBoot ? '<span class="warn">earlier</span>' : '<span class="ok">none</span>',
-              'cpu frequency'],
+        // Both limits, not just the hard one. Reading bits 2/18 alone showed
+        // "none" in green on a Pi whose soft limit had been clocking it from
+        // 1.4 GHz to 1.2 GHz — the gentler limit is the one a 3 B+ actually
+        // hits, so the tile was silent about the only throttling that happens.
+        t && ['Throttle',
+              t.throttledNow ? '<span class="bad">HARD</span>'
+              : t.softTempLimitNow ? '<span class="bad">HEAT</span>'
+              : (t.throttledSinceBoot || t.softTempLimitSinceBoot) ? '<span class="warn">earlier</span>'
+              : '<span class="ok">none</span>',
+              t.throttledNow ? '85°C limit reached'
+              : t.softTempLimitNow ? 'clocked down to 1.2 GHz'
+              : t.throttledSinceBoot ? '85°C limit, since boot'
+              : t.softTempLimitSinceBoot ? 'heat, since boot'
+              : 'full clock'],
       ])}
       ${bar(s.memory.usedPercent)}
     </section>`)

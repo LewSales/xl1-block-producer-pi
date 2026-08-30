@@ -9,7 +9,8 @@
 #   xl1ctl dashboard           print the dashboard URLs
 #   xl1ctl backup [FILE]       encrypted backup of /etc/xl1 (contains the seed)
 #   xl1ctl restore FILE        restore from one
-#   xl1ctl update              reload images from tarballs and restart
+#   xl1ctl update --release    download the latest release and reload
+#   xl1ctl update              reload images from tarballs already on disk
 #   xl1ctl doctor              diagnose a producer that is not working
 
 set -uo pipefail
@@ -271,15 +272,56 @@ apply_ui_overlay() {
   fi
 }
 
+# Fetching the tarballs by hand is the step that keeps going wrong: the bundle
+# directory is root-owned, so a plain curl into it fails with a permission error
+# and leaves the previous images in place — after which `update` cheerfully
+# reloads exactly what was already running and reports success.
 cmd_update() {
   need_root update
+
+  if [[ "${1:-}" == "--release" ]]; then
+    local tag="${2:-latest}" repo="${XL1_RELEASE_REPO:-LewSales/xl1-block-producer-pi}"
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local base="https://github.com/${repo}/releases"
+    [[ "${tag}" == "latest" ]] && base="${base}/latest/download" || base="${base}/download/${tag}"
+
+    printf '  fetching %s from %s…\n' "${tag}" "${repo}"
+    for t in xl1-local-arm64 xl1-dashboard-arm64; do
+      printf '    %s… ' "${t}.tar.gz"
+      if curl -fsSL --retry 2 -o "${tmp}/${t}.tar.gz" "${base}/${t}.tar.gz"; then
+        printf '%s\n' "$(du -h "${tmp}/${t}.tar.gz" | cut -f1)"
+      else
+        printf '%sfailed%s\n' "${RED}" "${RESET}"
+        die "could not download ${t}.tar.gz from ${base}"
+      fi
+    done
+
+    # A truncated download loads as a corrupt image, so check before touching
+    # anything that is currently working.
+    if curl -fsSL -o "${tmp}/SHA256SUMS" "${base}/SHA256SUMS" 2>/dev/null; then
+      if (cd "${tmp}" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+        printf '  checksums verified\n'
+      else
+        die "checksum mismatch — refusing to load. Re-run, or download by hand and inspect."
+      fi
+    else
+      printf '  %sno SHA256SUMS published for %s; skipping verification%s\n' "${DIM}" "${tag}" "${RESET}"
+    fi
+
+    set -- "${tmp}"
+  fi
+
   local dir="${1:-}"
   if [[ -z "${dir}" ]]; then
     for c in "${HOME:-/root}/xl1-pi" /boot/firmware/xl1-pi /opt/xl1-pi "$(pwd)"; do
       [[ -f "${c}/xl1-local-arm64.tar.gz" ]] && { dir="${c}"; break; }
     done
   fi
-  [[ -n "${dir}" ]] || die "could not find the image tarballs — pass the bundle directory: xl1ctl update /path/to/xl1-pi"
+  [[ -n "${dir}" ]] || die "could not find the image tarballs.
+    Download them:  xl1ctl update --release
+    Or point at a bundle:  xl1ctl update /path/to/xl1-pi"
 
   for t in xl1-local-arm64 xl1-dashboard-arm64; do
     [[ -f "${dir}/${t}.tar.gz" ]] || { printf '  %sskipping%s %s (not present)\n' "${DIM}" "${RESET}" "${t}"; continue; }
@@ -361,7 +403,9 @@ ${BOLD}xl1ctl${RESET} — operate the XL1 block producer
   ${BOLD}dashboard${RESET}           dashboard URLs
   ${BOLD}backup${RESET} [FILE]       encrypted backup of /etc/xl1 (holds the seed)
   ${BOLD}restore${RESET} FILE        restore from a backup
-  ${BOLD}update${RESET} [DIR]        reload images from tarballs, restart
+  ${BOLD}update${RESET} --release [TAG]
+                        download that release (default latest), verify, reload
+  ${BOLD}update${RESET} [DIR]        reload images from tarballs already on disk
   ${BOLD}doctor${RESET}              diagnose a producer that is not working
 
 EOF

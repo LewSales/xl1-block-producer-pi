@@ -586,13 +586,13 @@ consequence of the 3 B+ having 1 GB of RAM and a slower CPU.
 | 4 GB swap, default swappiness | 4 GB swap, `vm.swappiness=10` | At the default 60, a 1 GB Pi pages hot objects onto the SD card — that both stalls the node and wears the card. Swap here is an OOM backstop, not working memory. |
 | — | `gpu_mem=16` in `config.txt` | Returns ~48 MB to the system. Meaningful at 1 GB, irrelevant at 4–8 GB. |
 | — | `temp_soft_limit=70` in `config.txt` | A 3 B+ drops from 1.4 GHz to 1.2 GHz at 60 °C by default. 70 is the firmware maximum. See below. |
-| — | `--memory 768m` on the producer, `NODE_OPTIONS=--max-old-space-size=512` | Without an explicit heap ceiling a GC spike pushes the box into swap. |
+| — | `NODE_OPTIONS=--max-old-space-size=512` on the producer, plus `--memory` flags | Without an explicit heap ceiling a GC spike pushes the box into swap. The heap cap is enforced by Node and works; the Docker `--memory` flags are **silently ignored** on stock Raspberry Pi OS — see [Memory limits are not enforced](#memory-limits-are-not-enforced-by-default). |
 | `docker run` by hand in a shell | systemd units | Survives reboots and power cuts, which is the normal failure mode for a Pi. |
 | — | `time-sync.target` dependency | A Pi has no RTC. The producer signs against chain time, so starting before NTP settles produces confusing failures rather than obvious ones. |
 | — | Docker log rotation (`max-size=10m`) | Unbounded logs fill the SD card and take the node down weeks later. |
 | `ufw allow 30303` | Same, plus dashboard restricted to LAN + `tailscale0` | The box holds a producer mnemonic; nothing new is exposed to the open internet. |
 | — | Dashboard + collector | The requested addition. |
-| Note the container's flags by hand, then `docker stop`/`rm`/`run` to upgrade | `sudo xl1ctl update` | The flags are not undocumented here — they live in `xl1-producer.service`. Recreating the container by hand drops the `--memory 768m` and the 512 MB heap cap, which are the two things keeping a 1 GB Pi 3 out of SD-card swap. |
+| Note the container's flags by hand, then `docker stop`/`rm`/`run` to upgrade | `sudo xl1ctl update` | The flags are not undocumented here — they live in `xl1-producer.service`. Recreating the container by hand drops the 512 MB heap cap, which is what keeps a 1 GB Pi 3 out of SD-card swap. (The `--memory` flag it also drops is inert on stock Raspberry Pi OS anyway.) |
 | Roll back by hand between `xl1:5.2.3` / `xl1:5.2.4` tags | `sudo xl1ctl rollback` | Same idea, kept automatically. See [Rolling back a bad update](#rolling-back-a-bad-update). |
 | Confirm the upgrade by watching the log for `Building block` | Dashboard **Blocks produced**, counted from the chain | That log line is never emitted. Watching for it reports a healthy node as dead; the chain answers the same question correctly. |
 
@@ -635,6 +635,46 @@ reads both limits and distinguishes the two.
 | `0x80000` | Soft limit fired earlier; full clock now. |
 | `0x8` | Clocked down for heat **right now** — check the fan. |
 | `0x50000` | Undervoltage since boot: a power supply problem, not a heat one. |
+
+### Memory limits are not enforced by default
+
+`xl1-producer.service` passes `--memory 768m --memory-swap 2g`, and
+`xl1-dashboard.service` passes `--memory 256m`. **On stock Raspberry Pi OS none
+of those do anything.** The memory cgroup controller is off unless it is asked
+for on the kernel command line, so Docker accepts the flags and discards them:
+
+```bash
+docker inspect xl1-producer --format '{{.HostConfig.Memory}}'   # 0, not 805306368
+grep -c '^memory' /proc/cgroups                                 # 0 — no controller
+docker stats --no-stream xl1-producer                           # mem reads 0B / 0B
+```
+
+Two consequences worth being clear about:
+
+- **The heap ceiling still works.** `NODE_OPTIONS=--max-old-space-size=512` is
+  enforced by Node itself, not by a cgroup, so the protection that actually
+  matters on a 1 GB box — stopping a GC spike from paging onto the SD card — is
+  in force regardless. In practice the producer sits around 210 MB against that
+  512 MB ceiling, so it is not the binding constraint either.
+- **The container ceiling does not.** Nothing stops a runaway process taking the
+  whole Pi down instead of just its own container, and `docker stats` cannot
+  report per-container memory.
+
+To enable enforcement, append to `/boot/firmware/config.txt`'s cmdline (that is
+`/boot/firmware/cmdline.txt`, all on one line) and **reboot**:
+
+```
+cgroup_enable=memory cgroup_memory=1
+```
+
+Then `grep -c '^memory' /proc/cgroups` returns 1 and the limits bite. Do this
+when you can watch the node: it activates a 768 MB cap that has never been live,
+and a container that exceeds it is killed rather than slowed. The cost of
+enabling it is roughly 1% of RAM in kernel accounting structures.
+
+This is left off by default because an unenforced flag that looks enforced is
+the more dangerous of the two states only if you believe it — hence this
+section.
 
 ### It does not sleep — but it does idle down
 

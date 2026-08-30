@@ -22,6 +22,12 @@ ExecStartPre=-/usr/bin/docker rm -f xl1-producer
 # Health port stays on loopback: only the dashboard consumes it.
 # 1 GB of RAM means the Node heap needs an explicit ceiling, or a GC spike
 # pushes the box into swap on the SD card and the node stalls.
+#
+# NODE_OPTIONS is enforced by Node and does its job. --memory does NOT: stock
+# Raspberry Pi OS ships without the memory cgroup controller, so Docker accepts
+# the flag and discards it (docker inspect reports Memory=0). Kept anyway — it
+# costs nothing and becomes real the moment cgroup_enable=memory is added to the
+# kernel cmdline. See "Memory limits are not enforced by default" in README.md.
 ExecStart=/usr/bin/docker run --rm --name xl1-producer \
   --env-file /etc/xl1/sequence-producer.env \
   -e NODE_OPTIONS=--max-old-space-size=512 \

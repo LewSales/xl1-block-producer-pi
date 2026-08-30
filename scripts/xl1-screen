@@ -173,9 +173,17 @@ render() {
 
   # This panel is the version people photograph and post. Say whose it is on the
   # screen itself, not only in a repo nobody following the photo will open.
-  if (( rows >= 20 )); then
+  #
+  # A 480x320 panel at 8x16 is exactly 20 rows, so anything gated above that
+  # never appears on the display this was written for. Two variants so it still
+  # fits when the log tail has taken the space.
+  if (( rows >= 18 )); then
     line ""
-    line "  ${D}by Lando Williams · unofficial · not affiliated with XYO${R}"
+    if (( W >= 56 )); then
+      line "  ${D}by Lando Williams · unofficial · not affiliated with XYO${R}"
+    else
+      line "  ${D}by Lando Williams · not XYO${R}"
+    fi
   fi
 }
 

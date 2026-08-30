@@ -133,6 +133,15 @@ else
         then "chain-unreachable|high|Chain gateway unreachable" else empty end),
       (if $s.system.throttle.undervoltageNow // false
         then "undervoltage|high|Pi is undervolting right now" else empty end),
+      (if $s.system.throttle.throttledNow // false
+        then "overheating|high|SoC hit the 85C hard limit — clocks and voltage forced to defaults" else empty end),
+      # The gentle limit, and the one a 3 B+ in a case actually hits. It costs
+      # about 17% of clock silently: nothing fails, nothing restarts, blocks
+      # just take longer to build and land less often. Worth a notification
+      # because the usual cause is a fan that stopped or an intake that clogged,
+      # and neither announces itself.
+      (if $s.system.throttle.softTempLimitNow // false
+        then "thermal-throttle|default|CPU clocked down for heat (1.4 → 1.2 GHz) — check the fan and airflow" else empty end),
       (if $s.node.stale // false
         then "collector-stale|default|Collector snapshot is stale" else empty end),
       (if $s.release.lag == "behind"

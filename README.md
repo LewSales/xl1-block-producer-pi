@@ -526,9 +526,15 @@ overlay owns `spi0.0` for the life of the boot, so every candidate would collide
 and report a kernel failure, which looks like a dozen dead panels rather than
 one occupied bus. `--revert`, then reboot, then probe.
 
-Panels: `tft35a` (drives most ILI9486 boards), `mhs35`, `mhs35b`, `mhs35ips`,
-`mis35`, plus whichever of `piscreen`, `piscreen2r` and `pitft35-resistive` your
-firmware ships. Add `--rotate 270` if it comes up upside down. Undo everything
+Panels: start with the **stock** overlays — `piscreen`, `piscreen2r`,
+`pitft35-resistive` — then the bundled vendor blobs `tft35a`, `mhs35`, `mhs35b`,
+`mhs35ips`, `mis35`.
+
+> On a Trixie image the vendor blobs are rejected by the kernel outright
+> (`Failed to apply overlay`). They cannot drive anything, so a probe that tries
+> them first burns its early candidates on ones that never had a chance. A 3.5"
+> ILI9486 board that no vendor overlay would touch here runs correctly on the
+> stock **`piscreen`**. Add `--rotate 270` if it comes up upside down. Undo everything
 with `--revert`, which also gives tty1 its login prompt back.
 
 **A white screen means the controller was never spoken to** — backlight on, no

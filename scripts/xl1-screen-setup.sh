@@ -125,9 +125,17 @@ if (( PROBE )); then
   # in which GPIOs carry DC and RESET — which is what a white screen is actually
   # complaining about. A controller held on the wrong reset line never
   # initialises and stays white, whatever driver claims to have bound to it.
-  CANDIDATES=(mhs35b tft35a mhs35 mhs35ips mis35
-              piscreen piscreen2r pitft35-resistive
-              waveshare35a waveshare35b tft9341 rpi-display)
+  # Stock overlays first, and it is not a tie-break.
+  #
+  # On a Trixie image the bundled vendor blobs — tft35a, mhs35, mhs35ips, mis35 —
+  # are rejected by the kernel outright: "Failed to apply overlay". They cannot
+  # light any panel, so leading with them means the first candidates tried are
+  # the ones that never had a chance, and whichever vendor blob happens to load
+  # looks like a winner by default. That is how a real ILI9486 board driven fine
+  # by the stock `piscreen` overlay was mistaken for mhs35b.
+  CANDIDATES=(piscreen piscreen2r pitft35-resistive rpi-display
+              waveshare35a waveshare35b tft9341
+              mhs35b tft35a mhs35 mhs35ips mis35)
 
   LOADED=""
   cleanup_probe() {

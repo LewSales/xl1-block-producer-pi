@@ -338,6 +338,43 @@ the tarballs across and `sudo xl1ctl update /path/to/bundle`.
 
 ---
 
+## Moving the producer to another machine
+
+A Pi 3 B+ builds a block in roughly seventeen seconds against a one-second
+budget. The chain finalizes past each candidate before it is submitted, which
+the log reports as `behind-finalized-head`, and no setting changes it. If your
+node is healthy, staked, allowlisted and still landing nothing, this is why.
+
+**To a Pi 4 or 5** — no rebuild. The arm64 images already run there; copy the
+bundle across and `sudo ./provision.sh`.
+
+**To an x86 machine** — the images are arm64 only. `build-images.sh` hardcodes
+`linux/arm64` and `provision.sh` refuses any other architecture, so both need
+adjusting first. Worth it for a permanent home; overkill to test a hypothesis.
+
+> **Never run two producers on one mnemonic.** Stop and disable the old unit
+> *before* starting the new host:
+>
+> ```bash
+> sudo systemctl disable --now xl1-producer     # on the old machine, first
+> ```
+
+Move the credentials with the tool rather than by hand, so the file modes and
+ownership come across intact:
+
+```bash
+sudo xl1ctl backup ~/xl1-backup.tar.gz.enc     # old machine
+# copy it across, then on the new one:
+sudo xl1ctl restore ~/xl1-backup.tar.gz.enc
+sudo xl1ctl addr                               # same signing address? then it worked
+```
+
+The old Pi still earns its keep as the monitoring host — it runs the dashboard
+and alerter comfortably, and putting the watcher on a different machine from the
+producer is what makes the dead man's switch meaningful.
+
+---
+
 ## Operating notes
 
 **Being allowlisted is separate from running.** A producer that is not on the

@@ -316,10 +316,12 @@ render() {
     if [[ -e "${PAGE_FILE}" ]]; then
       line "  ${D}tap: next page · hold: back here${R}"
     fi
-    if (( W >= 56 )); then
-      line "  ${D}by Lando Williams · unofficial · not affiliated with XYO${R}"
+    # 51 columns including the indent, so it fits the 60 a 480x320 panel gives
+    # and needs no shorter variant.
+    if (( W >= 51 )); then
+      line "  ${D}by LewSales · unofficial · not affiliated with XYO${R}"
     else
-      line "  ${D}by Lando Williams · not XYO${R}"
+      line "  ${D}LewSales · not XYO${R}"
     fi
   fi
 }

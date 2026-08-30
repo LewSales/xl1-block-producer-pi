@@ -89,7 +89,11 @@ printf '    xl1 %s\n' "${BUILT_VERSION}"
 
 # The dashboard image only proves itself by running. A 100 MB tarball that ships
 # a server.mjs which throws on startup is caught here or by an operator.
-DASH_ID="$(docker run -d --rm --platform linux/arm64 -e DASH_BIND=127.0.0.1 -p 18088:8088 xl1-dashboard:local-arm64 2>/dev/null || true)"
+# No DASH_BIND override: binding loopback *inside* the container makes the
+# published port unreachable, so the smoke test failed on a perfectly good
+# image — a check that cries wolf is worse than no check, because the next
+# failure gets waved through.
+DASH_ID="$(docker run -d --rm --platform linux/arm64 -p 127.0.0.1:18088:8088 xl1-dashboard:local-arm64 2>/dev/null || true)"
 if [[ -n "${DASH_ID}" ]]; then
   for _ in $(seq 1 30); do
     curl -fsS --max-time 2 http://127.0.0.1:18088/healthz >/dev/null 2>&1 && break

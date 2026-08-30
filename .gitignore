@@ -4,10 +4,13 @@
 .build/
 
 # Real operator config. Only the .template files belong in git.
-sequence-producer.env
-dashboard.env
-alert.env
-!*.template
+#
+# Matched by shape, not by name. The named list missed producer.env and
+# sequence-api.env — both holding a mnemonic — because a list can only cover the
+# files that existed when it was written, and the next one is always the one
+# nobody remembers to add.
+*.env
+!*.env.template
 
 # OS noise
 .DS_Store

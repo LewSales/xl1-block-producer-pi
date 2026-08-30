@@ -89,8 +89,19 @@ JSON="$(fetch)"
 # only from a host that is up enough to run this, so it means the dashboard
 # died, not the Pi. A dead Pi cannot report anything, which is what a dead-man
 # switch is for and this deliberately is not.
-if [[ -z "${JSON}" ]] || ! printf '%s' "${JSON}" | jq -e . >/dev/null 2>&1; then
-  CONDITIONS="dashboard-unreachable|high|Dashboard API did not answer at ${URL}"
+READABLE=1
+# Valid JSON is not the same as *our* JSON. Every predicate below defaults with
+# `// false`, so a 200 carrying an unexpected shape — a renamed field, an error
+# object — evaluates to "nothing is wrong", forever. Require the one field whose
+# vocabulary we control.
+if [[ -z "${JSON}" ]] || ! printf '%s' "${JSON}" \
+     | jq -e '.status == "ok" or .status == "degraded" or .status == "down"' >/dev/null 2>&1; then
+  READABLE=0
+  if [[ -z "${JSON}" ]]; then
+    CONDITIONS="dashboard-unreachable|high|Dashboard API did not answer at ${URL}"
+  else
+    CONDITIONS="alerter-broken|high|Status document from ${URL} is not in the expected shape"
+  fi
 else
   # Bind the root before testing anything. A helper that takes `.` as its input
   # sees the boolean it was piped, not the document — so any message that quoted
@@ -128,12 +139,16 @@ else
   # jq failing must never read as "all clear". If the filter cannot run, say so
   # rather than reporting a healthy node.
   if [[ $? -ne 0 ]]; then
+    READABLE=0
     CONDITIONS="alerter-broken|high|xl1-alert could not parse the status document"
   fi
 fi
 
 if [[ "${MODE}" == "--status" ]]; then
-  if [[ -z "${CONDITIONS}" ]]; then echo "nothing firing"; else printf '%s\n' "${CONDITIONS}"; fi
+  # "Could not look" and "looked, found nothing" are different answers.
+  if (( ! READABLE )); then printf 'COULD NOT READ STATUS\n%s\n' "${CONDITIONS}"
+  elif [[ -z "${CONDITIONS}" ]]; then echo "nothing firing"
+  else printf '%s\n' "${CONDITIONS}"; fi
   exit 0
 fi
 
@@ -167,10 +182,25 @@ done <<< "${CONDITIONS}"
 
 # Recovery is worth as much as the alarm: an operator who was told something
 # broke and never told it healed keeps checking by hand.
-while IFS=$'\t' read -r key _; do
-  [[ -z "${key}" ]] && continue
-  printf '%s' "${CONDITIONS}" | grep -q "^${key}|" || \
-    send default "XL1 ${NODE_NAME}: recovered — ${key}" "Cleared $(date -Is)."
-done < "${STATE}"
+#
+# But only when we could actually see. When the fetch fails, CONDITIONS holds a
+# single synthetic entry, so every real condition looks absent — and the pass
+# below cheerfully reported the ineligibility resolved and the security updates
+# gone, seconds after the dashboard container died. Not seeing a problem is not
+# the same as the problem being fixed. Carry the old state forward untouched.
+if (( READABLE )); then
+  while IFS=$'\t' read -r key _; do
+    [[ -z "${key}" ]] && continue
+    printf '%s' "${CONDITIONS}" | grep -q "^${key}|" || \
+      send default "XL1 ${NODE_NAME}: recovered — ${key}" "Cleared $(date -Is)."
+  done < "${STATE}"
+else
+  while IFS=$'\t' read -r key ts; do
+    [[ -z "${key}" ]] && continue
+    grep -q "^${key}	" <<< "${NEW_STATE}" || NEW_STATE+="${key}	${ts}"$'\n'
+  done < "${STATE}"
+fi
 
-printf '%s' "${NEW_STATE}" > "${STATE}"
+# Atomically: a SIGKILL partway through this write leaves a truncated state
+# file, after which every condition looks new and re-fires at full priority.
+printf '%s' "${NEW_STATE}" > "${STATE}.tmp" && mv "${STATE}.tmp" "${STATE}"

@@ -89,6 +89,14 @@ if (( REVERT )); then
   rm -f /etc/systemd/system/xl1-screen.service
   systemctl daemon-reload
   info "removed xl1-screen.service"
+  # Setup disabled getty@tty1 to take the console. Reverting without putting it
+  # back leaves tty1 with neither a dashboard nor a login prompt — while the
+  # closing message promises the login prompt is restored.
+  if systemctl enable --now getty@tty1.service >/dev/null 2>&1; then
+    info "re-enabled getty@tty1 (login prompt restored)"
+  else
+    warn "could not re-enable getty@tty1 — run: sudo systemctl enable --now getty@tty1"
+  fi
   printf '\n%s✓%s reverted. Reboot to return the console to HDMI.\n\n' "${GREEN}" "${RESET}"
   exit 0
 fi
@@ -348,7 +356,11 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
+# `disable` without `--now`: a reboot is required for the overlay anyway, and
+# `--now` sends SIGTERM to whatever owns tty1 — which may be the very session
+# running this script, killing it before the service below is enabled and
+# leaving the Pi with no console and no dashboard.
+systemctl disable getty@tty1.service >/dev/null 2>&1 || true
 systemctl enable xl1-screen.service >/dev/null
 info "xl1-screen.service enabled on tty1"
 

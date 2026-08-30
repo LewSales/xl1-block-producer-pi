@@ -214,14 +214,29 @@ chmod 755 "${STATE_DIR}"
 # The producer runs as uid 1000 (`node`) inside the image and owns /data.
 chown -R 1000:1000 "${STATE_DIR}/data"
 
+# Returns 0 only when it actually installed the file. Callers must not infer
+# "the destination has my content" from "this ran without error" — the whole
+# point of the function is that it sometimes declines.
 install_config() {
   local src="$1" dest="$2" mode="$3"
   if [[ -f "${dest}" ]]; then
     info "$(basename "${dest}") already exists — left untouched"
-  else
-    install -m "${mode}" "${src}" "${dest}"
-    info "installed $(basename "${dest}") (mode ${mode})"
+    if ! cmp -s "${src}" "${dest}"; then
+      warn "$(basename "${src}") in the bundle DIFFERS from the installed
+    $(basename "${dest}") and was NOT applied. Edit ${dest} directly, or remove
+    it first if you intend the bundle copy to replace it."
+    fi
+    return 1
   fi
+  install -m "${mode}" "${src}" "${dest}"
+  info "installed $(basename "${dest}") (mode ${mode})"
+}
+
+# A mnemonic that is present but empty is not a mnemonic. `.+` matches the two
+# quote characters of XL1_MNEMONIC="", which was enough to arm the shred below
+# and to convince the service gate that credentials existed.
+has_mnemonic() {
+  grep -qE '^XL1_MNEMONIC=["'"'"']*[A-Za-z]' "$1" 2>/dev/null
 }
 
 # A real env file shipped alongside this script wins over the blank template, so
@@ -231,18 +246,28 @@ PRODUCER_SRC="${BUNDLE_DIR}/sequence-producer.env"
 DASHBOARD_SRC="${BUNDLE_DIR}/dashboard.env"
 [[ -f "${DASHBOARD_SRC}" ]] || DASHBOARD_SRC="${BUNDLE_DIR}/dashboard.env.template"
 
-install_config "${PRODUCER_SRC}"  "${CONF_DIR}/sequence-producer.env" 600
-install_config "${DASHBOARD_SRC}" "${CONF_DIR}/dashboard.env"         644
+PRODUCER_INSTALLED=0
+if install_config "${PRODUCER_SRC}" "${CONF_DIR}/sequence-producer.env" 600; then
+  PRODUCER_INSTALLED=1
+fi
+install_config "${DASHBOARD_SRC}" "${CONF_DIR}/dashboard.env" 644 || true
 
 ALERT_SRC="${BUNDLE_DIR}/alert.env"
 [[ -f "${ALERT_SRC}" ]] || ALERT_SRC="${BUNDLE_DIR}/alert.env.template"
-install_config "${ALERT_SRC}" "${CONF_DIR}/alert.env" 600
+install_config "${ALERT_SRC}" "${CONF_DIR}/alert.env" 600 || true
 
 # If the credentials arrived on the boot partition, that partition is FAT and
 # readable by anyone who puts the card in a reader. Remove the staged copy once
 # it is safely at /etc/xl1 with mode 0600.
-if [[ "${PRODUCER_SRC}" == "${BUNDLE_DIR}/sequence-producer.env" ]] \
-   && grep -qE '^XL1_MNEMONIC=.+$' "${CONF_DIR}/sequence-producer.env"; then
+#
+# Gated on this run having actually installed the file. Previously it checked
+# only that the DESTINATION held a mnemonic — so re-provisioning with a new seed
+# in the bundle shredded that new seed, because the old installed config
+# satisfied the test. The new phrase was destroyed having never been copied
+# anywhere, by the code path whose warning claims it is "safely at /etc/xl1".
+if (( PRODUCER_INSTALLED )) \
+   && [[ "${PRODUCER_SRC}" == "${BUNDLE_DIR}/sequence-producer.env" ]] \
+   && has_mnemonic "${CONF_DIR}/sequence-producer.env"; then
   shred -u "${PRODUCER_SRC}" 2>/dev/null || rm -f "${PRODUCER_SRC}"
   warn "removed the staged copy of sequence-producer.env from the bundle directory.
     Note that shred cannot reliably erase FAT/SD storage — if that bundle sat on
@@ -270,11 +295,27 @@ info "installed /usr/local/bin/xl1-screen (run xl1-screen-setup.sh to put it on 
 # shortcuts work in one click. Scoped to this one command, nothing else.
 if [[ -n "${TARGET_USER}" ]] && id "${TARGET_USER}" >/dev/null 2>&1; then
   SUDOERS=/etc/sudoers.d/xl1ctl
-  printf '%s ALL=(root) NOPASSWD: /usr/local/bin/xl1ctl\n' "${TARGET_USER}" > "${SUDOERS}.tmp"
+  # Scoped to the read-only and service-control verbs, NOT to the bare binary.
+  #
+  # A blanket grant on /usr/local/bin/xl1ctl covers every argument, and xl1ctl
+  # takes paths: `sudo xl1ctl update /home/anyone/dir` would docker-load an
+  # arbitrary image, retag it xl1:local and restart the producer with the
+  # mnemonic mounted in — passwordless root plus seed exfiltration. `backup
+  # /any/path` writes a root-owned file wherever it is pointed.
+  #
+  # The verbs that take a path (update, backup, restore) are deliberately absent
+  # and still prompt for a password.
+  {
+    for verb in status addr logs health doctor start stop restart dashboard; do
+      printf '%s ALL=(root) NOPASSWD: /usr/local/bin/xl1ctl %s, /usr/local/bin/xl1ctl %s *\n' \
+        "${TARGET_USER}" "${verb}" "${verb}"
+    done
+  } > "${SUDOERS}.tmp"
   chmod 440 "${SUDOERS}.tmp"
   if visudo -c -f "${SUDOERS}.tmp" >/dev/null 2>&1; then
     mv "${SUDOERS}.tmp" "${SUDOERS}"
-    info "${TARGET_USER} may run 'sudo xl1ctl' without a password"
+    info "${TARGET_USER} may run the read-only and service-control xl1ctl verbs without a password"
+    info "(update/backup/restore still prompt — they take paths and run as root)"
   else
     rm -f "${SUDOERS}.tmp"
     warn "sudoers snippet failed validation; skipped (you will be asked for a password)"
@@ -326,7 +367,7 @@ fi
 
 # The producer stays disabled until the operator supplies a mnemonic — starting
 # it with the placeholder env would only produce an authentication failure loop.
-if grep -qE '^XL1_MNEMONIC=.+$' "${CONF_DIR}/sequence-producer.env" 2>/dev/null; then
+if has_mnemonic "${CONF_DIR}/sequence-producer.env"; then
   systemctl enable xl1-producer.service >/dev/null
   info "credentials present — enabled xl1-producer.service"
   PRODUCER_READY=1

@@ -16,29 +16,55 @@ import { DefaultNetworks, GatewayBuilder, NetworkDataLakeUrls } from '@xyo-netwo
 
 const statfsAsync = promisify(statfs)
 
-const NETWORK = process.env.XL1_NETWORK ?? 'sequence'
-const PORT = Number(process.env.DASH_PORT ?? 8088)
-const BIND = process.env.DASH_BIND ?? '0.0.0.0'
-const HEALTH_URL = process.env.XL1_HEALTH_URL ?? 'http://127.0.0.1:9099'
-const STATUS_FILE = process.env.XL1_STATUS_FILE ?? '/var/lib/xl1/producer-status.json'
+// `??` falls back only on undefined, but an env file line reading `FOO=` gives
+// an empty string — which Docker's --env-file passes through, and which then
+// wins over every default. Shipping `DASH_EXPLORER_URL=` in a template was
+// enough to turn every explorer link into a relative path pointing back at the
+// dashboard. So: for values where empty is meaningless, treat it as absent.
+//
+// Three variables are excluded on purpose, because empty is a real setting
+// there and means "off": DASH_TOKEN, DASH_CLI_REGISTRY, DASH_ELIGIBILITY_IGNORE.
+const envStr = (name, fallback) => {
+  const v = process.env[name]
+  return v === undefined || v.trim() === '' ? fallback : v.trim()
+}
+
+/** Numeric env with a floor. A NaN here is not cosmetic: it disabled the
+ *  history ring's size cap entirely (`length > NaN` is always false), and a NaN
+ *  interval makes setInterval fire every millisecond. */
+const envNum = (name, fallback, min = 1) => {
+  const n = Number(envStr(name, String(fallback)))
+  if (!Number.isFinite(n) || n < min) {
+    if (process.env[name]) console.warn(`xl1-dashboard: ignoring ${name}=${process.env[name]} — using ${fallback}`)
+    return fallback
+  }
+  return n
+}
+
+const NETWORK = envStr('XL1_NETWORK', 'sequence')
+const PORT = envNum('DASH_PORT', 8088)
+const BIND = envStr('DASH_BIND', '0.0.0.0')
+const HEALTH_URL = envStr('XL1_HEALTH_URL', 'http://127.0.0.1:9099')
+const STATUS_FILE = envStr('XL1_STATUS_FILE', '/var/lib/xl1/producer-status.json')
 // statfs('/') inside a container reports the overlay filesystem, not the SD
 // card. Point this at a host bind-mount so the disk figure is the real one.
-const DISK_PATH = process.env.DASH_DISK_PATH ?? '/var/lib/xl1'
+const DISK_PATH = envStr('DASH_DISK_PATH', '/var/lib/xl1')
+// Empty is a real setting: no token required.
 const TOKEN = process.env.DASH_TOKEN ?? ''
-const CHAIN_POLL_MS = Number(process.env.DASH_CHAIN_POLL_MS ?? 15_000)
-const LOCAL_POLL_MS = Number(process.env.DASH_LOCAL_POLL_MS ?? 5_000)
+const CHAIN_POLL_MS = envNum('DASH_CHAIN_POLL_MS', 15_000, 1000)
+const LOCAL_POLL_MS = envNum('DASH_LOCAL_POLL_MS', 5_000, 1000)
 
 // The SDK preset's explorerUrl points at the beta explorer host. The public
 // explorer serves each network under /xl1/<network>, which is where an operator
 // actually goes to look up a block or an address.
-const EXPLORER_URL = (process.env.DASH_EXPLORER_URL ?? `https://explore.xyo.network/xl1/${NETWORK}`).replace(/\/+$/, '')
+const EXPLORER_URL = envStr('DASH_EXPLORER_URL', `https://explore.xyo.network/xl1/${NETWORK}`).replace(/\/+$/, '')
 const explorerAddress = (a) => (a ? `${EXPLORER_URL}/address/${a}` : undefined)
 
 // Where to look up the newest published CLI, for the "update available"
 // comparison. Set empty to switch version checking off entirely.
 const CLI_REGISTRY = process.env.DASH_CLI_REGISTRY ?? 'https://registry.npmjs.org/@xyo-network/xl1-cli/latest'
 // Four times a day is plenty for something that changes every few weeks.
-const CLI_CHECK_MS = Number(process.env.DASH_CLI_CHECK_MS ?? 21_600_000)
+const CLI_CHECK_MS = envNum('DASH_CLI_CHECK_MS', 21_600_000, 60_000)
 
 // Not every complaint the node makes applies to every network. Sequence is
 // federated: producers are authorized by an allowlist, and staking is not part
@@ -98,7 +124,7 @@ function getGateway() {
 // In memory by deliberate choice. The container is read-only and this is a
 // convenience, not a record: it starts empty after a restart, and the page says
 // so rather than drawing a flat line that looks like nothing is happening.
-const HISTORY_POINTS = Number(process.env.DASH_HISTORY_POINTS ?? 240)
+const HISTORY_POINTS = envNum('DASH_HISTORY_POINTS', 240, 2)
 
 const history = { height: [], reward: [], blocks: [], tempC: [], memPct: [] }
 

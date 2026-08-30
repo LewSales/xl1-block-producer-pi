@@ -216,9 +216,31 @@ cmd_backup() {
   passphrase the backup is unrecoverable — there is no reset.
 
 EOF
-  tar -czf - -C / etc/xl1 var/lib/xl1/.blocks-published 2>/dev/null \
+  # Restrictive mode BEFORE any bytes are written. openssl creates the file
+  # itself, so a chmod placed after the pipeline never runs when the pipeline
+  # reports failure — and this pipeline reports failure routinely: under
+  # `pipefail`, tar exits 2 merely because .blocks-published does not exist yet,
+  # which is the state of every Pi whose producer has not started. The result
+  # was a complete, decryptable backup of the seed phrase left at 0644 while the
+  # operator was told the backup had failed.
+  local prev_umask; prev_umask="$(umask)"
+  umask 077
+
+  # Back up only what exists. The counter is a nice-to-have; the config is not.
+  local members=(etc/xl1)
+  [[ -f /var/lib/xl1/.blocks-published ]] && members+=(var/lib/xl1/.blocks-published)
+
+  local ok=1
+  tar -czf - -C / "${members[@]}" \
     | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -out "${out}" \
-    || die "backup failed"
+    || ok=0
+  umask "${prev_umask}"
+
+  if (( ! ok )) || [[ ! -s "${out}" ]]; then
+    # Never leave a partial archive of a seed phrase lying around.
+    shred -u "${out}" 2>/dev/null || rm -f "${out}"
+    die "backup failed — nothing was written"
+  fi
 
   chmod 600 "${out}"
   printf '\n%s✓%s backup written to %s%s%s (%s)\n' "${GREEN}" "${RESET}" "${BOLD}" "${out}" "${RESET}" "$(du -h "${out}" | cut -f1)"
@@ -323,20 +345,52 @@ cmd_update() {
     Download them:  xl1ctl update --release
     Or point at a bundle:  xl1ctl update /path/to/xl1-pi"
 
+  # Every step below used to discard its status and fall through to an
+  # unconditional success line, so a corrupt tarball, a full card, or a tag that
+  # did not match reported "✓ images reloaded" while the old image kept running.
+  # An operator was twice told an upgrade had landed when nothing had changed.
+  local loaded=0 failed=0
   for t in xl1-local-arm64 xl1-dashboard-arm64; do
     [[ -f "${dir}/${t}.tar.gz" ]] || { printf '  %sskipping%s %s (not present)\n' "${DIM}" "${RESET}" "${t}"; continue; }
     printf '  loading %s…\n' "${t}"
-    gunzip -c "${dir}/${t}.tar.gz" | docker load | sed 's/^/    /'
+    if gunzip -c "${dir}/${t}.tar.gz" | docker load | sed 's/^/    /'; then
+      loaded=$(( loaded + 1 ))
+    else
+      printf '    %sfailed to load %s%s\n' "${RED}" "${t}" "${RESET}"
+      failed=$(( failed + 1 ))
+    fi
   done
 
-  docker image inspect xl1:local-arm64 >/dev/null 2>&1 && docker tag xl1:local-arm64 xl1:local
-  docker image inspect xl1-dashboard:local-arm64 >/dev/null 2>&1 && docker tag xl1-dashboard:local-arm64 xl1-dashboard:local
+  (( failed )) && die "${failed} image(s) failed to load — nothing was restarted, the previous images are still running"
+  (( loaded )) || die "no image tarballs found in ${dir}"
+
+  local retagged=0
+  for pair in "xl1:local-arm64 xl1:local" "xl1-dashboard:local-arm64 xl1-dashboard:local"; do
+    set -- ${pair}
+    if docker image inspect "$1" >/dev/null 2>&1; then
+      docker tag "$1" "$2" && retagged=$(( retagged + 1 ))
+    else
+      printf '  %swarning:%s %s not present after load — %s left pointing at the old image\n' \
+        "${YELLOW}" "${RESET}" "$1" "$2"
+    fi
+  done
 
   apply_ui_overlay
 
-  systemctl restart xl1-dashboard 2>/dev/null
-  systemctl is-active --quiet xl1-producer && systemctl restart xl1-producer
-  printf '\n%s✓%s images reloaded and services restarted\n\n' "${GREEN}" "${RESET}"
+  systemctl restart xl1-dashboard || printf '  %swarning:%s dashboard did not restart — check: journalctl -u xl1-dashboard -n 50\n' "${YELLOW}" "${RESET}"
+  if systemctl is-active --quiet xl1-producer; then
+    systemctl restart xl1-producer \
+      || die "images loaded, but the producer did not restart — check: xl1ctl doctor"
+  fi
+
+  # Say what actually happened rather than asserting success. The version the
+  # node now runs is the only claim worth making here.
+  local now=""
+  now="$(docker run --rm --entrypoint xl1 xl1:local --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+  printf '\n%s✓%s %s image(s) loaded, %s retagged, services restarted\n' \
+    "${GREEN}" "${RESET}" "${loaded}" "${retagged}"
+  [[ -n "${now}" ]] && printf '  xl1-cli now: %s%s%s\n' "${BOLD}" "${now}" "${RESET}"
+  printf '\n'
 }
 
 # -------------------------------------------------------------------- doctor

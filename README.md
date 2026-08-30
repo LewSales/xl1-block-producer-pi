@@ -201,7 +201,7 @@ dashboard port on `tailscale0` and on your LAN subnet, and nowhere else.
 | Panel | Shows |
 |---|---|
 | **Producer cannot produce** | Only when it applies: the node's own stated reason it is ineligible |
-| **Producer** | `/livez`, container state, uptime, restarts, blocks submitted, **last block landed (linked to the explorer) and how far the head has moved since**, log errors, eligibility |
+| **Producer** | `/livez`, container state, uptime, restarts, **blocks produced — counted from the chain, not from the log — share of chain blocks, last produced block linked to the explorer**, log errors, eligibility |
 | **Chain** | Current block, finalized head, lag, chain ID vs. preset, height sparkline, block time and chain rate |
 | **Rewards** | Reward and producer balances, both linked into the explorer, plus per-hour, per-day and share-of-chain tiles |
 | **Software & host** | `xl1-cli` version vs. the published release, pending host updates, security updates, apt list age |

@@ -18,6 +18,13 @@ set -Eeuo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${HERE}/.build"
 XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.1}"
+# The Pi is arm64; a workstation running the producer natively is amd64, and
+# building for it needs no emulation at all — which is why this is a variable
+# rather than a fork of the script.
+#
+#   TARGET_ARCH=amd64 ./build-images.sh
+TARGET_ARCH="${TARGET_ARCH:-arm64}"
+PLATFORM="linux/${TARGET_ARCH}"
 NODE_VERSION="${NODE_VERSION:-24.14.1}"
 UPSTREAM="${UPSTREAM:-https://github.com/XYOracleNetwork/xl1-docker-images.git}"
 UPSTREAM_REF="${UPSTREAM_REF:-main}"
@@ -29,9 +36,10 @@ warn() { printf '\033[1;33m    warning: %s\033[0m\n' "$*"; }
 command -v docker >/dev/null || die "docker not found"
 docker buildx version >/dev/null 2>&1 || die "docker buildx not available"
 
-if ! docker buildx ls | grep -q 'linux/arm64'; then
-  die "this Docker cannot build linux/arm64.
-    Enable QEMU emulation first:  docker run --privileged --rm tonistiigi/binfmt --install arm64"
+if ! docker buildx ls | grep -q "${PLATFORM}"; then
+  die "this Docker cannot build ${PLATFORM}.
+    For a foreign architecture, enable emulation first:
+      docker run --privileged --rm tonistiigi/binfmt --install ${TARGET_ARCH}"
 fi
 
 # ---------------------------------------------------------- producer image
@@ -57,30 +65,30 @@ pnpm install --frozen-lockfile
 pnpm xy compile
 [[ -f dist/node/entrypoint.mjs ]] || die "entrypoint did not compile"
 
-docker build --platform linux/arm64 \
+docker build --platform "${PLATFORM}" \
   -f docker/Dockerfile \
   --build-arg "NODE_VERSION=${NODE_VERSION}" \
   --build-arg "XL1_CLI_VERSION=${XL1_CLI_VERSION}" \
-  -t xl1:local-arm64 .
+  -t "xl1:local-${TARGET_ARCH}" .
 
 popd >/dev/null
 
 # --------------------------------------------------------- dashboard image
 
 log "Dashboard image"
-docker build --platform linux/arm64 -t xl1-dashboard:local-arm64 "${HERE}/dashboard"
+docker build --platform "${PLATFORM}" -t "xl1-dashboard:local-${TARGET_ARCH}" "${HERE}/dashboard"
 
 # ------------------------------------------------------------------ export
 
 log "Exporting tarballs"
-docker save xl1:local-arm64           | gzip -1 > "${HERE}/xl1-local-arm64.tar.gz"
-docker save xl1-dashboard:local-arm64 | gzip -1 > "${HERE}/xl1-dashboard-arm64.tar.gz"
+docker save "xl1:local-${TARGET_ARCH}"           | gzip -1 > "${HERE}/xl1-local-${TARGET_ARCH}.tar.gz"
+docker save "xl1-dashboard:local-${TARGET_ARCH}" | gzip -1 > "${HERE}/xl1-dashboard-${TARGET_ARCH}.tar.gz"
 
 log "Verifying"
 
 # The producer image states its own version. Anything else here is a claim about
 # what was built; this is the build answering for itself.
-BUILT_VERSION="$(docker run --rm --platform linux/arm64 --entrypoint xl1 xl1:local-arm64 --version 2>&1 \
+BUILT_VERSION="$(docker run --rm --platform "${PLATFORM}" --entrypoint xl1 "xl1:local-${TARGET_ARCH}" --version 2>&1 \
   | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
 [[ -n "${BUILT_VERSION}" ]] || die "the built image would not report a version — refusing to publish it"
 printf '    xl1 %s\n' "${BUILT_VERSION}"
@@ -93,7 +101,7 @@ printf '    xl1 %s\n' "${BUILT_VERSION}"
 # published port unreachable, so the smoke test failed on a perfectly good
 # image — a check that cries wolf is worse than no check, because the next
 # failure gets waved through.
-DASH_ID="$(docker run -d --rm --platform linux/arm64 -p 127.0.0.1:18088:8088 xl1-dashboard:local-arm64 2>/dev/null || true)"
+DASH_ID="$(docker run -d --rm --platform "${PLATFORM}" -p 127.0.0.1:18088:8088 "xl1-dashboard:local-${TARGET_ARCH}" 2>/dev/null || true)"
 if [[ -n "${DASH_ID}" ]]; then
   for _ in $(seq 1 30); do
     curl -fsS --max-time 2 http://127.0.0.1:18088/healthz >/dev/null 2>&1 && break
@@ -115,14 +123,14 @@ fi
 # xl1ctl update --release verifies against this file and silently skips when it
 # is absent, so producing it by hand meant verification was optional in practice.
 log "Checksums"
-( cd "${HERE}" && sha256sum xl1-local-arm64.tar.gz xl1-dashboard-arm64.tar.gz > SHA256SUMS )
-sed 's/^/    /' "${HERE}/SHA256SUMS"
+( cd "${HERE}" && sha256sum "xl1-local-${TARGET_ARCH}.tar.gz" "xl1-dashboard-${TARGET_ARCH}.tar.gz" > "SHA256SUMS-${TARGET_ARCH}" )
+sed 's/^/    /' "${HERE}/SHA256SUMS-${TARGET_ARCH}"
 
 ls -lh "${HERE}"/*.tar.gz | sed 's/^/    /'
 
 cat <<EOF
 
-    Both images built for linux/arm64.
+    Both images built for ${PLATFORM}.
 
     xl1-cli ${BUILT_VERSION}, SHA256SUMS written.
 

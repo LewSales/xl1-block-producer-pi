@@ -2,7 +2,7 @@
 # Reproduce with ./build-images.sh
 *.tar.gz
 .build/
-SHA256SUMS
+SHA256SUMS*
 dashboard/node_modules/
 
 # Real operator config. Only the .template files belong in git.

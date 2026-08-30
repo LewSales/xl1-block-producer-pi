@@ -211,14 +211,17 @@ function render(d) {
       c && ['Container uptime', esc(c.uptime ?? '—')],
       c && ['Restarts', `${num(c.restartCount)}${c.restartCount > 3 ? ' <span class="warn">⚠</span>' : ''}`],
       c && ['Image', `<span class="mono">${esc(c.image ?? '—')}</span>`],
-      d.node?.blocksPublished !== undefined && ['Blocks submitted', num(d.node.blocksPublished)],
-      dv.lastBlock !== undefined && ['Last block', dv.lastBlockUrl
+      dv.producedObserved !== undefined && ['Blocks produced',
+        `<span class="${dv.producedObserved > 0 ? 'ok' : ''}">${num(dv.producedObserved)}</span>`
+        + (dv.producedSince !== undefined ? ` <span class="sub">since #${num(dv.producedSince)}</span>` : '')],
+      dv.producedSharePercent !== undefined && ['Share of chain', `${dv.producedSharePercent}%`],
+      dv.lastBlock !== undefined && ['Last produced', dv.lastBlockUrl
         ? `<a href="${esc(dv.lastBlockUrl)}" target="_blank" rel="noopener noreferrer">#${num(dv.lastBlock)}</a>`
         : `#${num(dv.lastBlock)}`],
       dv.blocksSinceLast !== undefined && ['Blocks since', `${num(dv.blocksSinceLast)} ago`],
-      d.node?.lastPublishedAt && ['Last seen at', esc(new Date(d.node.lastPublishedAt).toLocaleString())],
-      d.node?.blocksPublished === 0 && !d.node?.lastPublishedAt &&
-        ['Last block', '<span class="sub">none yet — this node has not landed one</span>'],
+      dv.lastBlock === undefined && dv.producedObserved === 0 &&
+        ['Last produced', '<span class="sub">none in the observed range</span>'],
+      dv.productionError && ['Block scan', `<span class="warn">${esc(dv.productionError)}</span>`],
       d.node?.errorCount !== undefined && ['Log errors', `<span class="${d.node.errorCount > 0 ? 'warn' : ''}">${num(d.node.errorCount)}</span>`],
       d.node?.eligibility && ['Eligibility', d.node.eligibility.blocked
         ? (d.node.eligibilityIgnored
@@ -363,15 +366,17 @@ function render(d) {
     const t = s.throttle
     const tempCls = s.cpuTempC >= 75 ? 'bad' : s.cpuTempC >= 65 ? 'warn' : 'ok'
     cards.push(`<section style="--c: var(--c-pi)">
-      <h2><span class="ico" aria-hidden="true">🍓</span>Raspberry Pi</h2>
+      <h2><span class="ico" aria-hidden="true">${s.platform === 'windows' ? '🖥️' : '🍓'}</span>${s.platform === 'windows' ? 'Host' : 'Raspberry Pi'}</h2>
       <div class="big ${tempCls}">${s.cpuTempC ?? '—'}°C</div>
       <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)} · load ${s.loadAverage?.join(' ')}</div>
-      ${spark(d.history?.tempC)}
+      ${s.cpuTempC !== undefined ? spark(d.history?.tempC) : ''}
       ${tiles([
         ['RAM', `${s.memory.usedPercent}%`, `${bytes(s.memory.totalBytes - s.memory.availableBytes)} of ${bytes(s.memory.totalBytes)}`],
         ['Swap', `${s.swap.usedPercent}%`, `${bytes(s.swap.usedBytes)} of ${bytes(s.swap.totalBytes)}`],
         s.disk && ['Disk', `${s.disk.usedPercent}%`, `${bytes(s.disk.freeBytes)} free`],
-        ['Load', `${s.loadAverage?.[0] ?? '—'}`, `${s.cpuCount} cores`],
+        s.cpuPercent !== undefined
+          ? ['CPU', `${s.cpuPercent}%`, `${s.cpuCount} cores`]
+          : ['Load', `${s.loadAverage?.[0] ?? '—'}`, `${s.cpuCount} cores`],
         t && ['Power', t.undervoltageNow ? '<span class="bad">LOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">dipped</span>' : '<span class="ok">stable</span>',
               t.undervoltageNow ? 'undervolting now' : t.undervoltageSinceBoot ? 'since boot' : '5V holding'],
         t && ['Throttle', t.throttledNow ? '<span class="bad">NOW</span>' : t.throttledSinceBoot ? '<span class="warn">earlier</span>' : '<span class="ok">none</span>',

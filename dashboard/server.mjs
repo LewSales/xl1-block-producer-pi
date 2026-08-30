@@ -266,6 +266,53 @@ const state = {
 
 let baselineBalance // first balance we saw, to show earned-since-start
 
+// Blocks this node actually produced, counted from the chain.
+//
+// This used to be grepped out of the container log for "published block" — a
+// string the producer never emits. The result was a dashboard reporting zero
+// blocks about a node that was producing several every ten minutes, and a
+// fortnight of wrong conclusions built on top of that number.
+//
+// A block is a BoundWitness and its producer is a signer, so the chain itself
+// answers the question. This agrees with the block explorer by construction,
+// which the log grep never could.
+const production = { counted: 0, lastBlock: undefined, scannedFrom: undefined, error: undefined }
+let productionCursor
+
+/** Scan only what is new. The first pass looks back a window; afterwards it
+ *  reads the handful of blocks that appeared since, so the cost does not grow
+ *  with uptime. */
+async function scanProduction(viewer, currentNum) {
+  const addr = PRODUCER_ADDRESS || REWARD_ADDRESS
+  if (!addr || !Number.isFinite(currentNum)) return
+
+  const WINDOW = Number(envNum('DASH_PRODUCTION_WINDOW', 120, 10))
+  const from = productionCursor === undefined ? Math.max(0, currentNum - WINDOW + 1) : productionCursor + 1
+  if (currentNum < from) return
+
+  const limit = Math.min(currentNum - from + 1, 200)
+  try {
+    // Newest-first, per the SDK's documented direction.
+    const blocks = await viewer.block.blocksByNumber(currentNum, limit)
+    for (const entry of blocks ?? []) {
+      const bw = Array.isArray(entry) ? entry[0] : entry
+      const n = Number(bw?.block)
+      if (!Number.isFinite(n) || n < from) continue
+      const signers = (bw?.addresses ?? []).map((a) => String(a).replace(/^0x/i, '').toLowerCase())
+      if (signers.includes(addr)) {
+        production.counted += 1
+        if (production.lastBlock === undefined || n > production.lastBlock) production.lastBlock = n
+      }
+    }
+    production.scannedFrom ??= from
+    production.error = undefined
+    productionCursor = currentNum
+  } catch (error) {
+    // Leave the cursor alone so the same range is retried rather than skipped.
+    production.error = error.message?.slice(0, 160)
+  }
+}
+
 async function pollChain() {
   try {
     const gateway = await getGateway()
@@ -311,6 +358,8 @@ async function pollChain() {
       balances,
       polledAt: new Date().toISOString(),
     }
+
+    await scanProduction(viewer, currentNum)
 
     sample('height', currentNum)
     if (balances.reward?.atto !== undefined) {
@@ -513,8 +562,31 @@ async function pollSystem() {
       polledAt: new Date().toISOString(),
     }
 
+    // On Windows, containers run inside a Linux VM, so /proc and os.* describe
+    // that VM and not the machine an operator is looking at. The collector runs
+    // natively there and supplies the real figures — same division of labour as
+    // the throttle reading on the Pi, for the same reason.
+    const hostMetrics = state.node?.host
+    if (hostMetrics?.platform === 'windows') {
+      state.system = {
+        ...state.system,
+        hostname: hostMetrics.hostname ?? state.system.hostname,
+        platform: 'windows',
+        uptimeSeconds: hostMetrics.uptimeSeconds ?? state.system.uptimeSeconds,
+        cpuCount: hostMetrics.cpuCount ?? state.system.cpuCount,
+        cpuPercent: hostMetrics.cpuPercent,
+        // A Windows host has no load average and no SoC throttle register.
+        // Absent, not zero — a zero would read as a measurement.
+        loadAverage: undefined,
+        cpuTempC: undefined,
+        throttle: undefined,
+        memory: hostMetrics.memory ?? state.system.memory,
+        disk: hostMetrics.disk ?? state.system.disk,
+      }
+    }
+
     sample('tempC', state.system.cpuTempC)
-    sample('memPct', state.system.memory.usedPercent)
+    sample('memPct', state.system.memory?.usedPercent)
   } catch (error) {
     state.system = { ok: false, error: error.message?.slice(0, 200) }
   }
@@ -607,11 +679,24 @@ function derived() {
     // The last block this node actually landed, and how far the chain has moved
     // since. "Blocks submitted: 3" is a number taken on faith; a height is
     // something an operator can open and see.
-    lastBlock: state.node?.lastPublishedBlock,
-    lastBlockUrl: explorerBlock(state.node?.lastPublishedBlock),
+    // The chain is the authority. The collector's log-derived figure stays as a
+    // fallback for a node whose address is not configured, but it is not what
+    // this reports when the chain can answer.
+    lastBlock: production.lastBlock ?? state.node?.lastPublishedBlock,
+    lastBlockUrl: explorerBlock(production.lastBlock ?? state.node?.lastPublishedBlock),
     lastBlockAt: state.node?.lastPublishedAt,
-    blocksSinceLast: (state.chain?.currentBlock !== undefined && state.node?.lastPublishedBlock !== undefined)
-      ? state.chain.currentBlock - Number(state.node.lastPublishedBlock)
+    blocksSinceLast: (state.chain?.currentBlock !== undefined && (production.lastBlock ?? state.node?.lastPublishedBlock) !== undefined)
+      ? state.chain.currentBlock - Number(production.lastBlock ?? state.node.lastPublishedBlock)
+      : undefined,
+    producedObserved: production.counted,
+    producedSince: production.scannedFrom,
+    productionError: production.error,
+    // Share of the chain's blocks this node signed over the observed range.
+    producedSharePercent: (production.scannedFrom !== undefined && state.chain?.currentBlock !== undefined)
+      ? (() => {
+          const span = state.chain.currentBlock - production.scannedFrom + 1
+          return span > 0 ? Number(((production.counted / span) * 100).toFixed(2)) : undefined
+        })()
       : undefined,
   }
 }

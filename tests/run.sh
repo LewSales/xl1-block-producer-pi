@@ -46,6 +46,14 @@ else
   bad "index.html inline script does not parse"
 fi
 
+step "Attribution"
+# Someone shown a screenshot of this should not come away thinking XYO shipped
+# it. Asserted so a refactor cannot quietly drop the disclaimer.
+for pair in "dashboard/index.html:not affiliated with" "README.md:Not affiliated with" "scripts/xl1-screen:not affiliated with XYO"; do
+  f="${pair%%:*}"; needle="${pair#*:}"
+  if grep -qi -- "${needle}" "${ROOT}/${f}"; then ok "${f} states it is unofficial"; else bad "${f} no longer says it is unaffiliated with XYO"; fi
+done
+
 step "Dashboard behaviour"
 SDK="${ROOT}/dashboard/node_modules/@xyo-network/xl1-sdk"
 STUBBED=0

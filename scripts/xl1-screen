@@ -170,6 +170,13 @@ render() {
     rule
     line "  ${FG_GR}${LASTLOG:0:$(( W - 4 ))}${R}"
   fi
+
+  # This panel is the version people photograph and post. Say whose it is on the
+  # screen itself, not only in a repo nobody following the photo will open.
+  if (( rows >= 20 )); then
+    line ""
+    line "  ${D}by Lando Williams · unofficial · not affiliated with XYO${R}"
+  fi
 }
 
 if (( ONCE )); then

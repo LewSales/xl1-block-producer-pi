@@ -1,5 +1,12 @@
 # XL1 Block Producer — Raspberry Pi 3 B+
 
+> **An independent community project by Lando Williams.** Not affiliated with,
+> endorsed by, or supported by XYO Network. It runs the official
+> [`xl1-docker-images`](https://github.com/XYOracleNetwork/xl1-docker-images)
+> producer unmodified; everything around it — the dashboard, alerting, preflight
+> and operator tooling — is mine. Bugs here are mine too: open an issue on this
+> repo, not with XYO.
+
 A provisioning bundle for running an XL1 federated block producer on the Sequence
 (beta) network, with a local status dashboard.
 

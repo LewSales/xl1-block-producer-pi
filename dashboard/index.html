@@ -76,6 +76,45 @@
   .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
   .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
   .wide { grid-column: 1 / -1; }
+
+  /* Per-card accent. One hue per subject, carried by the heading, the rule
+     under it and that card's sparkline, so a glance finds the right panel
+     before the words are read. Set with style="--c: var(--c-chain)". */
+  :root {
+    --c-producer: #2f7ae5; --c-chain: #7a4ddb; --c-rewards: #1a7f47;
+    --c-software: #b4690e; --c-trend: #0d7c8f; --c-pi: #c0392b; --c-log: #5b6472;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --c-producer: #6aa8ff; --c-chain: #a98bff; --c-rewards: #4ec97f;
+      --c-software: #e0a341; --c-trend: #48c3d6; --c-pi: #ff8a7a; --c-log: #9aa4b2;
+    }
+  }
+  section { position: relative; overflow: hidden; }
+  /* A hairline of the card's own colour along the top edge. */
+  section[style*="--c"]::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+    background: linear-gradient(90deg, var(--c), transparent 70%);
+  }
+  section h2 { display: flex; align-items: center; gap: 7px; }
+  section[style*="--c"] h2 { color: var(--c); }
+  section[style*="--c"] .spark path.line { stroke: var(--c); }
+  section[style*="--c"] .spark path.area { fill: color-mix(in srgb, var(--c) 14%, transparent); }
+  section[style*="--c"] .bar > i:not(.warn):not(.bad) { background: var(--c); }
+  .ico { font-size: 14px; line-height: 1; filter: saturate(1.1); }
+
+  /* Attribution. Deliberately plain — it is a disclaimer, not a badge. */
+  .whose {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+    display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  }
+  .whose .who { font-weight: 600; color: var(--fg); }
+  .whose .sep { color: var(--line); }
+  .chip {
+    font-size: 10.5px; padding: 2px 7px; border-radius: 999px; font-weight: 600;
+    letter-spacing: 0.03em; border: 1px solid var(--line); color: var(--muted);
+    white-space: nowrap;
+  }
   .logfoot { color: var(--muted); font-size: 11px; margin-top: 7px; }
   .banner {
     margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
@@ -87,7 +126,8 @@
 </head>
 <body>
 <header>
-  <h1>XL1 Block Producer</h1>
+  <h1>⛏️ XL1 Block Producer</h1>
+  <span class="chip" title="An independent project. Not built, endorsed, or supported by XYO.">unofficial</span>
   <span class="net" id="net">—</span>
   <span class="spacer"></span>
   <span class="pill" id="overall">connecting…</span>
@@ -150,7 +190,7 @@ function render(d) {
   // on this page raises but cannot settle.
   if (d.node?.eligibility?.blocked && !d.node?.eligibilityIgnored) {
     cards.push(`<section class="wide" style="border-color:color-mix(in srgb,var(--bad) 40%,transparent)">
-      <h2>Producer cannot produce</h2>
+      <h2><span class="ico" aria-hidden="true">⛔</span>Producer cannot produce</h2>
       <div class="big bad">${esc(d.node.eligibility.reason)}</div>
       <div class="sub">the node said so itself, within the last ${esc(d.node.eligibility.window)}</div>
       <div class="banner">Every other signal here can read perfectly healthy while this is true.
@@ -162,8 +202,8 @@ function render(d) {
   // Producer
   const c = d.node?.container
   const healthClass = d.health?.ok ? 'ok' : 'bad'
-  cards.push(`<section>
-    <h2>Producer</h2>
+  cards.push(`<section style="--c: var(--c-producer)">
+    <h2><span class="ico" aria-hidden="true">⚙️</span>Producer</h2>
     <div class="big ${healthClass}">${d.health?.ok ? 'Live' : 'Not responding'}</div>
     <div class="sub">/livez on ${esc(d.health?.endpoint ?? '')}</div>
     ${dl([
@@ -192,8 +232,8 @@ function render(d) {
 
   // Chain
   if (d.chain?.ok) {
-    cards.push(`<section>
-      <h2>Chain</h2>
+    cards.push(`<section style="--c: var(--c-chain)">
+      <h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2>
       <div class="big">${num(d.chain.currentBlock)}</div>
       <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
       ${dl([
@@ -210,7 +250,7 @@ function render(d) {
       ])}
     </section>`)
   } else {
-    cards.push(`<section><h2>Chain</h2><div class="big bad">Unreachable</div>
+    cards.push(`<section style="--c: var(--c-chain)"><h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2><div class="big bad">Unreachable</div>
       <div class="err" style="margin-top:8px">${esc(d.chain?.error ?? 'unknown')}</div></section>`)
   }
 
@@ -221,8 +261,8 @@ function render(d) {
     ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.address)}</a>`
     : `<span class="mono">${esc(x?.address)}</span>`
   if (b.reward || b.producer) {
-    cards.push(`<section>
-      <h2>Rewards</h2>
+    cards.push(`<section style="--c: var(--c-rewards)">
+      <h2><span class="ico" aria-hidden="true">💰</span>Rewards</h2>
       ${b.reward?.xl1 ? `<div class="big">${esc(b.reward.xl1)} <span style="font-size:14px;color:var(--muted)">XL1</span></div>
         <div class="sub">reward address balance</div>` : ''}
       ${dl([
@@ -261,8 +301,8 @@ function render(d) {
       : aptAge > 48 ? `<span class="warn">${Math.round(aptAge / 24)}d</span>`
       : `<span class="ok">${aptAge < 1 ? '<1' : Math.round(aptAge)}h</span>`
 
-    cards.push(`<section>
-      <h2>Software &amp; host</h2>
+    cards.push(`<section style="--c: var(--c-software)">
+      <h2><span class="ico" aria-hidden="true">📦</span>Software &amp; host</h2>
       <div class="big">${esc(rel.installed ?? '—')}</div>
       <div class="sub">xl1-cli in the running container</div>
       ${dl([
@@ -289,10 +329,10 @@ function render(d) {
     const totalB = days.reduce((a, x) => a + x.blocks, 0)
     const totalE = days.reduce((a, x) => a + x.earned, 0)
     const bars = (vals, max) => `<div style="display:flex;align-items:flex-end;gap:2px;height:40px;margin-top:10px">${
-      vals.map((v) => `<div title="${esc(v.day)}: ${v.n}" style="flex:1;min-width:3px;border-radius:2px 2px 0 0;background:var(--accent);height:${Math.max(2, (v.n / max) * 100)}%"></div>`).join('')}</div>`
+      vals.map((v) => `<div title="${esc(v.day)}: ${v.n}" style="flex:1;min-width:3px;border-radius:2px 2px 0 0;background:var(--c, var(--accent));height:${Math.max(2, (v.n / max) * 100)}%"></div>`).join('')}</div>`
 
-    cards.push(`<section>
-      <h2>Trends</h2>
+    cards.push(`<section style="--c: var(--c-trend)">
+      <h2><span class="ico" aria-hidden="true">📈</span>Trends</h2>
       ${tr.error ? `<div class="err">${esc(tr.error)}</div>` : ''}
       <div class="big">${num(totalB)}</div>
       <div class="sub">blocks over ${num(days.length)} day(s) recorded · ${num(tr.points)} samples</div>
@@ -312,8 +352,8 @@ function render(d) {
   if (s?.ok) {
     const t = s.throttle
     const tempCls = s.cpuTempC >= 75 ? 'bad' : s.cpuTempC >= 65 ? 'warn' : 'ok'
-    cards.push(`<section>
-      <h2>Raspberry Pi</h2>
+    cards.push(`<section style="--c: var(--c-pi)">
+      <h2><span class="ico" aria-hidden="true">🍓</span>Raspberry Pi</h2>
       <div class="big ${tempCls}">${s.cpuTempC ?? '—'}°C</div>
       <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)} · load ${s.loadAverage?.join(' ')}</div>
       ${spark(d.history?.tempC)}
@@ -335,8 +375,8 @@ function render(d) {
   // and a panel that opens scrolled to the oldest line makes the reader scroll
   // past forty lines of history to reach it.
   if (d.node?.recentLog?.length) {
-    cards.push(`<section class="wide">
-      <h2>Producer log — newest first (${d.node.recentLog.length} lines)</h2>
+    cards.push(`<section class="wide" style="--c: var(--c-log)">
+      <h2><span class="ico" aria-hidden="true">📜</span>Producer log — newest first (${d.node.recentLog.length} lines)</h2>
       <pre class="log">${esc([...d.node.recentLog].reverse().join('\n'))}</pre>
       <div class="logfoot">Most recent at the top. Collected ${d.node.ageSeconds ?? '?'}s ago.</div>
     </section>`)
@@ -345,7 +385,17 @@ function render(d) {
   $('grid').innerHTML = cards.join('')
   $('foot').innerHTML = (d.problems?.length
     ? `<ul class="problems">${d.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`
-    : '') + `<div style="margin-top:8px">updated ${new Date(d.generatedAt).toLocaleTimeString()} · dashboard up since ${new Date(d.dashboardStartedAt).toLocaleString()} · <a href="/api/status${location.search}">JSON</a></div>`
+    : '')
+    + `<div style="margin-top:8px">updated ${new Date(d.generatedAt).toLocaleTimeString()} · dashboard up since ${new Date(d.dashboardStartedAt).toLocaleString()} · <a href="/api/status${location.search}">JSON</a></div>`
+    // Said plainly, on every page, rather than left to be inferred. Someone
+    // shown a screenshot of this should not come away thinking XYO shipped it.
+    + `<div class="whose">
+         <span class="who">🛠️ Built by Lando Williams</span>
+         <span class="sep">·</span>
+         <span>Independent community project — <strong>not affiliated with, endorsed by, or supported by XYO Network</strong>.</span>
+         <span class="sep">·</span>
+         <a href="https://github.com/LewSales/xl1-block-producer-pi" target="_blank" rel="noopener noreferrer">source &amp; issues ↗</a>
+       </div>`
 }
 
 async function tick() {

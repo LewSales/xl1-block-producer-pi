@@ -17,7 +17,7 @@ set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${HERE}/.build"
-XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.0}"
+XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.1}"
 NODE_VERSION="${NODE_VERSION:-24.14.1}"
 UPSTREAM="${UPSTREAM:-https://github.com/XYOracleNetwork/xl1-docker-images.git}"
 UPSTREAM_REF="${UPSTREAM_REF:-main}"

@@ -304,9 +304,9 @@ function render(d) {
     cards.push(`<section style="--c: var(--c-software)">
       <h2><span class="ico" aria-hidden="true">📦</span>Software &amp; host</h2>
       <div class="big">${esc(rel.installed ?? '—')}</div>
-      <div class="sub">xl1-cli in the running container</div>
+      <div class="sub">xl1&#8209;cli in the running container</div>
       ${dl([
-        ['xl1-cli', lagCell],
+        ['CLI version', lagCell],
         rel.ok === false && !rel.disabled && ['Registry', `<span class="warn">${esc(rel.error ?? 'unreachable')}</span>`],
         osi && ['Host updates', osi.updates > 0 ? `<span class="warn">${num(osi.updates)} pending</span>` : '<span class="ok">none pending</span>'],
         osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],

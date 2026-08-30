@@ -29,7 +29,8 @@ mkdocker aaa 5.3.0 "[xl1-producer] Producer has insufficient stake."
 run
 check "eligibility key detected"      "$(field "['eligibility']['key']")"  '"insufficient-stake"'
 check "cli version read"              "$(field "['cliVersion']")"          '"5.3.0"'
-check "schema stamp written"          "$(cat "${WORK}/state/.cache-schema")" "2"
+EXPECT_SCHEMA="$(grep -m1 -oE '^CACHE_SCHEMA=[0-9]+' "${COLLECT}" | cut -d= -f2)"
+check "schema stamp written"          "$(cat "${WORK}/state/.cache-schema")" "${EXPECT_SCHEMA}"
 
 # A version can only change when the image does; the cache must not outlive it.
 mkdocker bbb 5.4.0 "[xl1-producer] all good"
@@ -60,6 +61,13 @@ rm -f "${WORK}/state/.eligibility"
 printf '[xl1-producer] Producer has insufficient stake.\n' > /dev/null
 run
 check "failed log read is not cached"  "$([[ -f "${WORK}/state/.eligibility" ]] && echo present || echo absent)" "absent"
+
+# A publish must record which block, not merely that one happened.
+mkdocker ddd 5.4.0 "[BlockRunner] published block 575735 ok"
+rm -f "${WORK}/state/.collect-cursor" "${WORK}/state/.last-published"
+run
+check "last published block captured" "$(field "['lastPublishedBlock']")" "575735"
+check "publish timestamp captured"    "$([[ -n "$(field "['lastPublishedAt']")" ]] && echo yes || echo no)" "yes"
 
 # The container disappearing mid-cycle must produce a valid document, not commas.
 cat > "${WORK}/bin/docker" <<'INNER'

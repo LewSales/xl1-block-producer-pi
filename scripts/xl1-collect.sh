@@ -63,10 +63,10 @@ cache_age() {
 # told to `rm` a specific dotfile — and until they are, a short read leaves a
 # field empty, the emitted JSON fails validation, and the previous snapshot is
 # served unchanged for up to six hours while the page looks perfectly alive.
-CACHE_SCHEMA=2
+CACHE_SCHEMA=3
 SCHEMA_STAMP="${STATE_DIR}/.cache-schema"
 if [[ "$(cat "${SCHEMA_STAMP}" 2>/dev/null || echo 0)" != "${CACHE_SCHEMA}" ]]; then
-  rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}"
+  rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}" "${STATE_DIR}/.last-published"
   printf '%s' "${CACHE_SCHEMA}" > "${SCHEMA_STAMP}"
   echo "xl1-collect: cache schema changed — derived values will be re-read" >&2
 fi
@@ -124,10 +124,19 @@ NEW_PUBLISHED="$(printf '%s' "${NEW_LOG}" | grep -c -i 'published block' || true
 TOTAL=$(( TOTAL + NEW_PUBLISHED ))
 echo "${TOTAL}" > "${COUNTER}"
 
-LAST_PUBLISHED=""
-if (( NEW_PUBLISHED > 0 )); then LAST_PUBLISHED="${COLLECTED_AT}"
-else LAST_PUBLISHED="$(cat "${STATE_DIR}/.last-published" 2>/dev/null || echo "")"; fi
-[[ -n "${LAST_PUBLISHED}" ]] && echo "${LAST_PUBLISHED}" > "${STATE_DIR}/.last-published"
+# Which block, not just when. "Blocks submitted: 3" is a number an operator has
+# to take on faith; a block height is something they can open in the explorer
+# and see. The producer names it in the same line it announces the publish.
+LAST_PUBLISHED=""; LAST_BLOCK=""
+if (( NEW_PUBLISHED > 0 )); then
+  LAST_PUBLISHED="${COLLECTED_AT}"
+  # Last match in the slice, since a busy window can contain several.
+  LAST_BLOCK="$(printf '%s' "${NEW_LOG}" | grep -i 'published block' \
+    | grep -oE '[0-9]{2,}' | tail -n1)"
+  printf '%s\t%s\n' "${LAST_PUBLISHED}" "${LAST_BLOCK}" > "${STATE_DIR}/.last-published"
+elif [[ -s "${STATE_DIR}/.last-published" ]]; then
+  IFS=$'\t' read -r LAST_PUBLISHED LAST_BLOCK < "${STATE_DIR}/.last-published"
+fi
 
 ERRORS="$(printf '%s' "${NEW_LOG}" | grep -c -iE '\b(error|fatal|unhandled|exception)\b' || true)"
 
@@ -308,6 +317,7 @@ fi
     printf '},'
   fi
   [[ -n "${LAST_PUBLISHED}" ]] && printf '"lastPublishedAt":"%s",' "${LAST_PUBLISHED}"
+  [[ "${LAST_BLOCK}" =~ ^[0-9]+$ ]] && printf '"lastPublishedBlock":%s,' "${LAST_BLOCK}"
   printf '"recentLog":%s' "${LOG_JSON}"
   printf '}\n'
 } > "${OUT}.tmp"

@@ -6,7 +6,7 @@
 //   node    — producer container state, written by the host collector timer
 //   system  — Pi vitals from /proc and /sys (temp, throttle, RAM, swap, disk)
 
-import { readFile } from 'node:fs/promises'
+import { readFile, appendFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { statfs } from 'node:fs'
 import { promisify } from 'node:util'
@@ -60,6 +60,7 @@ const LOCAL_POLL_MS = envNum('DASH_LOCAL_POLL_MS', 5_000, 1000)
 // actually goes to look up a block or an address.
 const EXPLORER_URL = envStr('DASH_EXPLORER_URL', `https://explore.xyo.network/xl1/${NETWORK}`).replace(/\/+$/, '')
 const explorerAddress = (a) => (a ? `${EXPLORER_URL}/address/${a}` : undefined)
+const explorerBlock = (n) => (Number.isFinite(Number(n)) ? `${EXPLORER_URL}/block/${n}` : undefined)
 
 // Where to look up the newest published CLI, for the "update available"
 // comparison. Set empty to switch version checking off entirely.
@@ -126,6 +127,97 @@ function getGateway() {
 // convenience, not a record: it starts empty after a restart, and the page says
 // so rather than drawing a flat line that looks like nothing is happening.
 const HISTORY_POINTS = envNum('DASH_HISTORY_POINTS', 240, 2)
+
+// Long-range history, written to disk so it survives a restart.
+//
+// The in-memory ring above is minutes of detail; this is weeks of shape. They
+// answer different questions — "is it moving right now" versus "did it earn
+// anything last Tuesday" — and the ring cannot answer the second at any size,
+// because the container restarts and it starts empty.
+//
+// One row per five minutes for thirty days is ~8,600 lines, a few hundred KB.
+const TREND_FILE = envStr('DASH_TREND_FILE', '/var/lib/xl1/dashboard/trend.jsonl')
+const TREND_EVERY_MS = envNum('DASH_TREND_EVERY_MS', 300_000, 60_000)
+const TREND_RETAIN_DAYS = envNum('DASH_TREND_RETAIN_DAYS', 30, 1)
+
+/** Rows already on disk, newest last. Empty when the store is unwritable, which
+ *  is reported rather than hidden — a flat chart and an absent one look the
+ *  same, and only one of them means something is wrong. */
+let trend = []
+let trendError
+let trendLastWrite = 0
+
+async function loadTrend() {
+  try {
+    const raw = await readFile(TREND_FILE, 'utf8')
+    const cutoff = Date.now() - TREND_RETAIN_DAYS * 86_400_000
+    trend = raw.split('\n')
+      .filter(Boolean)
+      .map((l) => { try { return JSON.parse(l) } catch { return null } })
+      .filter((r) => r && typeof r.t === 'number' && r.t >= cutoff)
+    trendError = undefined
+  } catch (error) {
+    trend = []
+    // ENOENT on first run is normal, not a fault worth reporting.
+    trendError = error.code === 'ENOENT' ? undefined : error.message?.slice(0, 160)
+  }
+}
+
+/** Append one row, and compact when the file has drifted past retention.
+ *  Failure here must never take the dashboard down — it is a nice-to-have
+ *  sitting on a bind mount an older install will not have. */
+async function persistTrend() {
+  if (Date.now() - trendLastWrite < TREND_EVERY_MS) return
+  const row = {
+    t: Date.now(),
+    height: state.chain?.currentBlock,
+    reward: history.reward.at(-1)?.v,
+    blocks: state.node?.blocksPublished,
+    tempC: state.system?.cpuTempC,
+  }
+  if (row.height === undefined && row.reward === undefined) return
+
+  try {
+    await appendFile(TREND_FILE, `${JSON.stringify(row)}\n`)
+    trend.push(row)
+    trendLastWrite = row.t
+
+    const cutoff = row.t - TREND_RETAIN_DAYS * 86_400_000
+    if (trend.length && trend[0].t < cutoff) {
+      trend = trend.filter((r) => r.t >= cutoff)
+      await writeFile(TREND_FILE, trend.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    }
+    trendError = undefined
+  } catch (error) {
+    trendError = error.code === 'EACCES' || error.code === 'EROFS'
+      ? `${TREND_FILE} is not writable — add a rw bind mount for its directory`
+      : error.message?.slice(0, 160)
+  }
+}
+
+/** Collapse rows into per-day buckets: blocks produced and XL1 earned each day.
+ *  Differences between consecutive readings, not the readings themselves —
+ *  both underlying figures are cumulative totals. */
+function trendDaily() {
+  if (trend.length < 2) return []
+  const byDay = new Map()
+  for (const r of trend) {
+    const day = new Date(r.t).toISOString().slice(0, 10)
+    const cur = byDay.get(day)
+    if (!cur) byDay.set(day, { day, firstBlocks: r.blocks, lastBlocks: r.blocks, firstReward: r.reward, lastReward: r.reward })
+    else {
+      if (r.blocks !== undefined) { cur.firstBlocks ??= r.blocks; cur.lastBlocks = r.blocks }
+      if (r.reward !== undefined) { cur.firstReward ??= r.reward; cur.lastReward = r.reward }
+    }
+  }
+  return [...byDay.values()].map((d) => ({
+    day: d.day,
+    blocks: (d.lastBlocks ?? 0) - (d.firstBlocks ?? 0),
+    // A restart resets nothing here (both are chain-side or cumulative), but a
+    // negative would mean the counter was reset — report 0 rather than nonsense.
+    earned: Math.max(0, Number(((d.lastReward ?? 0) - (d.firstReward ?? 0)).toFixed(4))),
+  })).sort((a, b) => a.day.localeCompare(b.day))
+}
 
 const history = { height: [], reward: [], blocks: [], tempC: [], memPct: [] }
 
@@ -479,6 +571,16 @@ function derived() {
       ? Math.round((history.height.at(-1).t - history.height[0].t) / 1000) : 0,
     samples: history.height.length,
     rewardEqualsProducer: Boolean(b?.reward && b?.producer && b.reward.address === b.producer.address),
+
+    // The last block this node actually landed, and how far the chain has moved
+    // since. "Blocks submitted: 3" is a number taken on faith; a height is
+    // something an operator can open and see.
+    lastBlock: state.node?.lastPublishedBlock,
+    lastBlockUrl: explorerBlock(state.node?.lastPublishedBlock),
+    lastBlockAt: state.node?.lastPublishedAt,
+    blocksSinceLast: (state.chain?.currentBlock !== undefined && state.node?.lastPublishedBlock !== undefined)
+      ? state.chain.currentBlock - Number(state.node.lastPublishedBlock)
+      : undefined,
   }
 }
 
@@ -490,6 +592,7 @@ const snapshot = () => ({
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   derived: derived(),
   history,
+  trend: { daily: trendDaily(), points: trend.length, retainDays: TREND_RETAIN_DAYS, error: trendError },
 })
 
 // ---------------------------------------------------------------------- server
@@ -530,7 +633,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history }
+export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -547,13 +650,18 @@ if (isMain) {
   })
 
   // Prime every source before listening so the first page load is never empty.
+  await loadTrend()
   await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease()])
+  if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
 
   // Each poller catches internally, but a rejection escaping one of them would
   // take the process down, so none of these promises may go unwatched.
   const guard = (fn, name) => () => { Promise.resolve(fn()).catch((e) => console.error(`xl1-dashboard: ${name} failed —`, e)) }
 
   setInterval(guard(pollChain, 'pollChain'), CHAIN_POLL_MS).unref()
+  // Checked often, written rarely — persistTrend decides for itself whether
+  // enough time has passed, so the cadence lives in one place.
+  setInterval(guard(persistTrend, 'persistTrend'), 60_000).unref()
   setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')() }, LOCAL_POLL_MS).unref()
   setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
 

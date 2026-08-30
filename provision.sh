@@ -209,10 +209,15 @@ ufw status | sed 's/^/    /'
 
 log "Directories and configuration"
 
-mkdir -p "${STATE_DIR}/data" "${CONF_DIR}"
+mkdir -p "${STATE_DIR}/data" "${STATE_DIR}/dashboard" "${CONF_DIR}"
 chmod 755 "${STATE_DIR}"
 # The producer runs as uid 1000 (`node`) inside the image and owns /data.
 chown -R 1000:1000 "${STATE_DIR}/data"
+# The dashboard runs as the same uid and is the only writer here — everything
+# else it sees is mounted read-only. This is its long-range history, which is
+# the one thing on that page that cannot survive a container restart otherwise.
+chown 1000:1000 "${STATE_DIR}/dashboard"
+chmod 755 "${STATE_DIR}/dashboard"
 
 # Returns 0 only when it actually installed the file. Callers must not infer
 # "the destination has my content" from "this ran without error" — the whole

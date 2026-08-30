@@ -1,10 +1,14 @@
 [Unit]
 Description=Check XL1 producer state and notify on changes
+# After= only. Wants= is a start dependency, so the 60s timer would pull a
+# deliberately stopped dashboard back up within a minute, with no explanation.
 After=xl1-dashboard.service
-Wants=xl1-dashboard.service
 
 [Service]
 Type=oneshot
+# Worst case: a 20s fetch plus three channels x 15s per condition. A SIGKILL
+# partway through the state write re-fires every condition on the next run.
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/xl1-alert.sh
 Nice=10
 IOSchedulingClass=idle

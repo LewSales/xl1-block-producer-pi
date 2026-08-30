@@ -194,11 +194,12 @@ dashboard port on `tailscale0` and on your LAN subnet, and nowhere else.
 | Panel | Shows |
 |---|---|
 | **Producer cannot produce** | Only when it applies: the node's own stated reason it is ineligible |
-| **Producer** | `/livez`, container state, uptime, restarts, blocks submitted, log errors, eligibility |
+| **Producer** | `/livez`, container state, uptime, restarts, blocks submitted, **last block landed (linked to the explorer) and how far the head has moved since**, log errors, eligibility |
 | **Chain** | Current block, finalized head, lag, chain ID vs. preset, height sparkline, block time and chain rate |
 | **Rewards** | Reward and producer balances, both linked into the explorer, plus per-hour, per-day and share-of-chain tiles |
 | **Software & host** | `xl1-cli` version vs. the published release, pending host updates, security updates, apt list age |
 | **Raspberry Pi** | CPU temp sparkline, RAM, swap, disk, load, and **undervoltage / throttling flags** |
+| **Trends** | Blocks and XL1 per day over a rolling 30 days — survives restarts |
 | **Producer log** | Last 40 lines, **newest first** |
 
 `GET /api/status` returns the same data as JSON. Set `DASH_TOKEN` in
@@ -287,6 +288,28 @@ Two that are never ignored, because they are real on every network:
 - **`too-slow`** — blocks rejected as `behind-finalized-head`. The node is
   building slower than the chain finalizes, so each candidate is stale before it
   is submitted. On a Pi 3 B+ this is a hardware ceiling, not a setting.
+
+---
+
+## History that survives a restart
+
+The sparklines are an in-memory ring: minutes of detail, gone when the container
+restarts. The **Trends** panel is the other half — one sample every five minutes,
+kept for thirty days in `/var/lib/xl1/dashboard/trend.jsonl`, bucketed into
+blocks and XL1 **per day**.
+
+Per day means the difference across each day, not the reading at the end of it:
+both underlying figures are cumulative totals, and charting a total produces a
+line that only ever goes up.
+
+This needs the writable bind mount in `xl1-dashboard.service` and a
+`/var/lib/xl1/dashboard` owned by uid 1000. `provision.sh` creates it. On an
+install that predates it the panel says so rather than drawing an empty chart —
+a flat line and a missing one look identical, and only one of them means
+something is wrong.
+
+Tunable in `dashboard.env`: `DASH_TREND_RETAIN_DAYS`, `DASH_TREND_EVERY_MS`,
+`DASH_TREND_FILE`.
 
 ---
 

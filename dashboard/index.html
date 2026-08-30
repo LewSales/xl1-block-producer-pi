@@ -172,7 +172,13 @@ function render(d) {
       c && ['Restarts', `${num(c.restartCount)}${c.restartCount > 3 ? ' <span class="warn">⚠</span>' : ''}`],
       c && ['Image', `<span class="mono">${esc(c.image ?? '—')}</span>`],
       d.node?.blocksPublished !== undefined && ['Blocks submitted', num(d.node.blocksPublished)],
-      d.node?.lastPublishedAt && ['Last submission', esc(d.node.lastPublishedAt)],
+      dv.lastBlock !== undefined && ['Last block', dv.lastBlockUrl
+        ? `<a href="${esc(dv.lastBlockUrl)}" target="_blank" rel="noopener noreferrer">#${num(dv.lastBlock)}</a>`
+        : `#${num(dv.lastBlock)}`],
+      dv.blocksSinceLast !== undefined && ['Blocks since', `${num(dv.blocksSinceLast)} ago`],
+      d.node?.lastPublishedAt && ['Last seen at', esc(new Date(d.node.lastPublishedAt).toLocaleString())],
+      d.node?.blocksPublished === 0 && !d.node?.lastPublishedAt &&
+        ['Last block', '<span class="sub">none yet — this node has not landed one</span>'],
       d.node?.errorCount !== undefined && ['Log errors', `<span class="${d.node.errorCount > 0 ? 'warn' : ''}">${num(d.node.errorCount)}</span>`],
       d.node?.eligibility && ['Eligibility', d.node.eligibility.blocked
         ? (d.node.eligibilityIgnored
@@ -194,7 +200,7 @@ function render(d) {
         ['Finalization lag', `${num(d.chain.finalizationLag)} blocks`],
         ['Chain ID', `<span class="mono">${esc(d.chain.chainId)}</span>`],
         ['Matches preset', d.chain.chainIdMatchesPreset ? '<span class="ok">yes</span>' : '<span class="bad">NO</span>'],
-        ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener">open</a>`],
+        ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener noreferrer">open</a>`],
       ])}
       ${spark(d.history?.height)}
       ${tiles([
@@ -212,7 +218,7 @@ function render(d) {
   const b = d.chain?.balances ?? {}
   // Addresses link straight into the explorer — the lookup an operator does most.
   const addrCell = (x) => x?.url
-    ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.address)}</a>`
+    ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.address)}</a>`
     : `<span class="mono">${esc(x?.address)}</span>`
   if (b.reward || b.producer) {
     cards.push(`<section>
@@ -268,6 +274,36 @@ function render(d) {
         osi?.rebootRequired && ['Reboot', '<span class="bad">required</span>'],
       ])}
       ${!osi ? '<div class="sub" style="margin-top:8px">host package check off or not yet run</div>' : ''}
+    </section>`)
+  }
+
+  // Trends — days, not minutes. The in-memory sparklines above reset with the
+  // container; this survives, which is the only way to answer "did it earn
+  // anything last week".
+  const tr = d.trend
+  if (tr && (tr.daily?.length || tr.error)) {
+    const days = tr.daily ?? []
+    const recent = days.slice(-14)
+    const maxB = Math.max(1, ...recent.map((x) => x.blocks))
+    const maxE = Math.max(1, ...recent.map((x) => x.earned))
+    const totalB = days.reduce((a, x) => a + x.blocks, 0)
+    const totalE = days.reduce((a, x) => a + x.earned, 0)
+    const bars = (vals, max) => `<div style="display:flex;align-items:flex-end;gap:2px;height:40px;margin-top:10px">${
+      vals.map((v) => `<div title="${esc(v.day)}: ${v.n}" style="flex:1;min-width:3px;border-radius:2px 2px 0 0;background:var(--accent);height:${Math.max(2, (v.n / max) * 100)}%"></div>`).join('')}</div>`
+
+    cards.push(`<section>
+      <h2>Trends</h2>
+      ${tr.error ? `<div class="err">${esc(tr.error)}</div>` : ''}
+      <div class="big">${num(totalB)}</div>
+      <div class="sub">blocks over ${num(days.length)} day(s) recorded · ${num(tr.points)} samples</div>
+      ${recent.length ? bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB) : ''}
+      <div class="sparkfoot"><span>blocks/day</span><span>peak ${num(maxB)}</span></div>
+      ${recent.length ? bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE) : ''}
+      <div class="sparkfoot"><span>XL1/day</span><span>peak ${num(maxE)}</span></div>
+      ${tiles([
+        ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
+        ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],
+      ])}
     </section>`)
   }
 

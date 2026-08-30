@@ -141,7 +141,32 @@ fi
 ERRORS="$(printf '%s' "${NEW_LOG}" | grep -c -iE '\b(error|fatal|unhandled|exception)\b' || true)"
 
 # Tail for display comes from the full log so the panel is never empty on a quiet cycle.
-TAIL_LOG="$(docker logs --tail "${LOG_LINES}" "${CONTAINER}" 2>&1)"
+#
+# With timestamps, because every question the panel gets asked is about *when*:
+# did it stop an hour ago or a minute ago, is it still attempting a block a
+# minute, did that error come before the last publish or after it. Without them
+# the 40 lines are a wall of text that could be five seconds or five hours old.
+#
+# Docker stamps UTC, as 2026-08-30T23:41:12.229348397Z — too wide for the panel
+# and in the wrong zone. Rewritten to a local HH:MM:SS with the offset computed
+# once and the arithmetic done in a single awk pass, because `date -d` per line
+# would be forty forks on a Pi 3 every collection cycle.
+TZ_OFFSET="$(date +%z)"                       # e.g. -0600
+TZ_SECS=$(( 10#${TZ_OFFSET:1:2} * 3600 + 10#${TZ_OFFSET:3:2} * 60 ))
+[[ "${TZ_OFFSET:0:1}" == "-" ]] && TZ_SECS=$(( -TZ_SECS ))
+
+TAIL_LOG="$(docker logs --timestamps --tail "${LOG_LINES}" "${CONTAINER}" 2>&1 |
+  awk -v off="${TZ_SECS}" '
+      # Rewrite only lines carrying the fixed-width docker stamp; anything else
+      # (a wrapped line, an error from docker itself) passes through intact.
+      substr($0, 5, 1) == "-" && substr($0, 11, 1) == "T" {
+        t = (substr($0, 12, 2) * 3600 + substr($0, 15, 2) * 60 + substr($0, 18, 2) + off + 86400) % 86400
+        sp = index($0, " ")
+        printf "%02d:%02d:%02d %s\n", t / 3600, (t % 3600) / 60, t % 60, substr($0, sp + 1)
+        next
+      }
+      { print }
+    ')"
 LOG_JSON="["
 FIRST=1
 while IFS= read -r line; do

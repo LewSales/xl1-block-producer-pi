@@ -179,8 +179,11 @@ cmd_logs() {
     esac
   done
   if docker inspect xl1-producer >/dev/null 2>&1; then
-    if [[ -n "${follow}" ]]; then docker logs -f --tail "${lines}" xl1-producer 2>&1
-    else docker logs --tail "${lines}" xl1-producer 2>&1; fi
+    # --timestamps here stays in docker's native UTC rather than being rewritten
+    # to local as the dashboard panel does: a terminal has the width for it, and
+    # the full stamp is what you paste into a bug report.
+    if [[ -n "${follow}" ]]; then docker logs -f --timestamps --tail "${lines}" xl1-producer 2>&1
+    else docker logs --timestamps --tail "${lines}" xl1-producer 2>&1; fi
   else
     if [[ -n "${follow}" ]]; then journalctl -u xl1-producer -f
     else journalctl -u xl1-producer -n "${lines}" --no-pager; fi

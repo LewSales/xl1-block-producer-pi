@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Every script here runs as root on a machine holding a wallet mnemonic.
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      # The suite stubs the SDK when it is absent, so this is an optimisation
+      # rather than a requirement — but running against the real package is
+      # what catches an SDK upgrade breaking the chain poller.
+      - name: Install dashboard dependencies
+        run: npm install --omit=dev --no-audit --no-fund
+        working-directory: dashboard
+        continue-on-error: true
+
+      - name: Run the suite
+        run: ./tests/run.sh
+
+  # Fails loudly rather than shipping a bundle whose scripts disagree with the
+  # documentation an operator will follow.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every shipped script is mentioned in the README
+        run: |
+          missing=0
+          for f in scripts/*; do
+            n="$(basename "$f")"
+            grep -q -- "$n" README.md || { echo "::error::$n is not mentioned in README.md"; missing=1; }
+          done
+          for t in *.env.template; do
+            grep -q -- "$t" README.md || { echo "::error::$t is not mentioned in README.md"; missing=1; }
+          done
+          exit $missing

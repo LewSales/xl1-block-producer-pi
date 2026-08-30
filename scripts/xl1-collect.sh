@@ -57,23 +57,45 @@ cache_age() {
   printf '%s' "$(( $(date +%s) - m ))"
 }
 
+# Cache format version. Bump when the layout of any dotfile below changes.
+#
+# Without this, a shipped format change is only discovered by an operator being
+# told to `rm` a specific dotfile — and until they are, a short read leaves a
+# field empty, the emitted JSON fails validation, and the previous snapshot is
+# served unchanged for up to six hours while the page looks perfectly alive.
+CACHE_SCHEMA=2
+SCHEMA_STAMP="${STATE_DIR}/.cache-schema"
+if [[ "$(cat "${SCHEMA_STAMP}" 2>/dev/null || echo 0)" != "${CACHE_SCHEMA}" ]]; then
+  rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}"
+  printf '%s' "${CACHE_SCHEMA}" > "${SCHEMA_STAMP}"
+  echo "xl1-collect: cache schema changed — derived values will be re-read" >&2
+fi
+
 COLLECTED_AT="$(now_iso)"
 
-if ! docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+# One inspect, captured once. Two separate calls let the container disappear
+# between them — an xl1ctl restart is enough — after which `read` fills every
+# variable with the empty string and the JSON below emits bare commas, fails
+# validation, and silently leaves the previous snapshot in place.
+#
+# .Config.Image is the tag the container was started from and does not change
+# when that tag is repointed at a new build. .Image is the resolved image ID,
+# which is what actually says whether this is the same software as last time.
+INSPECT=""
+if ! INSPECT="$(docker inspect "${CONTAINER}" --format \
+    '{{.State.Status}} {{.State.Running}} {{.State.StartedAt}} {{.RestartCount}} {{.Config.Image}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.Image}}' 2>/dev/null)" \
+   || [[ -z "${INSPECT}" ]]; then
   printf '{"collectedAt":"%s","container":null,"error":"container %s not found"}\n' \
     "${COLLECTED_AT}" "${CONTAINER}" > "${OUT}.tmp"
   mv "${OUT}.tmp" "${OUT}"
   chmod 644 "${OUT}"
   exit 0
 fi
-
-# .Config.Image is the tag the container was started from and does not change
-# when that tag is repointed at a new build. .Image is the resolved image ID,
-# which is what actually says whether this is the same software as last time.
-read -r STATE RUNNING STARTED RESTARTS IMAGE HEALTH IMAGE_ID < <(
-  docker inspect "${CONTAINER}" --format \
-    '{{.State.Status}} {{.State.Running}} {{.State.StartedAt}} {{.RestartCount}} {{.Config.Image}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.Image}}'
-)
+read -r STATE RUNNING STARTED RESTARTS IMAGE HEALTH IMAGE_ID <<< "${INSPECT}"
+[[ -n "${STATE}" && -n "${RUNNING}" && -n "${RESTARTS}" ]] || {
+  echo "xl1-collect: incomplete inspect output, kept previous snapshot" >&2
+  exit 1
+}
 
 UPTIME="unknown"
 if [[ "${RUNNING}" == "true" && -n "${STARTED}" ]]; then
@@ -157,7 +179,15 @@ insufficient-self-bond|self-bond|self-bond below the minimum
 behind-finalized-head|too-slow|blocks rejected: built too slowly for the chain
 PATTERNS
 fi
-  printf '%s\t%s\n' "${BLOCKED_KEY:-}" "${BLOCKED_REASON}" > "${ELIG_CACHE}"
+  # Only cache a result we actually derived. An empty log means `docker logs`
+  # failed, and caching "no complaint" from that is indistinguishable from a
+  # clean read — for the one signal that exists because a blocked producer looks
+  # healthy from every other angle.
+  if [[ -n "${ELIG_LOG}" ]]; then
+    printf '%s\t%s\n' "${BLOCKED_KEY:-}" "${BLOCKED_REASON}" > "${ELIG_CACHE}"
+  else
+    echo "xl1-collect: could not read container log for eligibility; keeping previous answer" >&2
+  fi
 fi
 # `read` reports failure at EOF even when it populated the variables, so a
 # trailing newline above is load-bearing and the result is not tested for
@@ -283,7 +313,12 @@ fi
 } > "${OUT}.tmp"
 
 # Validate before publishing so the dashboard never reads a half-written file.
-if node -e "JSON.parse(require('fs').readFileSync('${OUT}.tmp','utf8'))" 2>/dev/null \
+# jq first: it is the only one of the three that provision.sh installs. Falling
+# back to node or python3 meant a host with neither failed validation on every
+# cycle and never delivered a first snapshot — reported identically to genuinely
+# corrupt JSON.
+if jq -e . "${OUT}.tmp" >/dev/null 2>&1 \
+   || node -e "JSON.parse(require('fs').readFileSync('${OUT}.tmp','utf8'))" 2>/dev/null \
    || python3 -c "import json,sys; json.load(open('${OUT}.tmp'))" 2>/dev/null; then
   mv "${OUT}.tmp" "${OUT}"
   chmod 644 "${OUT}"

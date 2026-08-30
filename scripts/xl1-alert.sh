@@ -119,8 +119,12 @@ else
     [
       (if $s.status == "down"
         then "node-down|urgent|Producer is DOWN" else empty end),
-      (if ($s.node.container.running // true) | not
+      (if ($s.node.ok // false) and ($s.node.container == null)
+        then "container-missing|urgent|Producer container does not exist" else empty end),
+      (if ($s.node.container.running == false)
         then "container-stopped|urgent|Producer container is not running" else empty end),
+      (if ($s.node.ok // true) | not
+        then "collector-down|high|Collector is not reporting: " + ($s.node.error // "unknown") else empty end),
       (if ($s.node.eligibility.blocked // false) and (($s.node.eligibilityIgnored // false) | not)
         then "ineligible|high|Producer cannot produce: " + ($s.node.eligibility.reason // "unknown") else empty end),
       (if ($s.health.ok // true) | not

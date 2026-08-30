@@ -26,6 +26,10 @@ for the differences and why each one exists.
 | `dashboard.env.template` | Dashboard config → `/etc/xl1/dashboard.env`. |
 | `systemd/` | Producer, dashboard, and collector units. |
 | `scripts/xl1-collect.sh` | Host-side collector feeding the dashboard. |
+| `scripts/xl1-alert.sh` | Watches the dashboard's own status and notifies on changes. |
+| `alert.env.template` | Alert channels → `/etc/xl1/alert.env` (mode 0600). |
+| `build-images.sh` | Cross-builds both arm64 images on a workstation. Emits `SHA256SUMS`. |
+| `tests/` | The full check suite. `./tests/run.sh` runs everything CI runs. |
 | `dashboard/` | Dashboard source, for rebuilding after edits. |
 
 Both images are **prebuilt**. The Pi never compiles anything.
@@ -189,11 +193,13 @@ dashboard port on `tailscale0` and on your LAN subnet, and nowhere else.
 
 | Panel | Shows |
 |---|---|
-| **Producer** | `/livez` result, container state, uptime, restart count, blocks submitted, log error count |
-| **Chain** | Current block, finalized head, finalization lag, chain ID vs. the preset |
-| **Rewards** | Reward-address balance in XL1, and the change since the dashboard started |
-| **Raspberry Pi** | CPU temp, RAM, swap, disk, and **undervoltage / throttling flags** |
-| **Producer log** | Last 40 lines |
+| **Producer cannot produce** | Only when it applies: the node's own stated reason it is ineligible |
+| **Producer** | `/livez`, container state, uptime, restarts, blocks submitted, log errors, eligibility |
+| **Chain** | Current block, finalized head, lag, chain ID vs. preset, height sparkline, block time and chain rate |
+| **Rewards** | Reward and producer balances, both linked into the explorer, plus per-hour, per-day and share-of-chain tiles |
+| **Software & host** | `xl1-cli` version vs. the published release, pending host updates, security updates, apt list age |
+| **Raspberry Pi** | CPU temp sparkline, RAM, swap, disk, load, and **undervoltage / throttling flags** |
+| **Producer log** | Last 40 lines, **newest first** |
 
 `GET /api/status` returns the same data as JSON. Set `DASH_TOKEN` in
 `/etc/xl1/dashboard.env` to require `?token=…` or an `Authorization: Bearer`
@@ -212,6 +218,100 @@ because the method surface is not a stable contract.
 One thing worth knowing if you edit it: **balance lookups take bare lowercase
 hex and reject the `0x` form**, even though the upstream env examples write
 reward addresses with `0x`. The dashboard strips the prefix for you.
+
+---
+
+## Alerting
+
+Nothing here alerts until you configure a channel. `sudo nano /etc/xl1/alert.env`,
+then `sudo systemctl enable --now xl1-alert.timer`.
+
+```bash
+sudo xl1-alert.sh --status    # what is wrong right now; sends nothing
+sudo xl1-alert.sh --test      # prove the channel works
+```
+
+It reads the dashboard's own `/api/status` rather than re-deriving anything, so
+the panel and your phone can never disagree. It fires on **transitions**, not on
+conditions — an unresolved problem repeats once every six hours and is otherwise
+silent — and reports recoveries as well as failures.
+
+| Channel | Setting | Notes |
+|---|---|---|
+| Phone push | `XL1_ALERT_NTFY_TOPIC` | [ntfy](https://ntfy.sh) — no account. Use a long random topic; anyone who knows it can read your alerts. |
+| Discord / Slack | `XL1_ALERT_WEBHOOK` | One payload satisfies both. |
+| Email | `XL1_ALERT_EMAIL` | Needs `mail` or `sendmail` on the host. Stock Raspberry Pi OS has neither. |
+| **Dead man** | `XL1_ALERT_DEADMAN_URL` | **The important one.** See below. |
+
+### Why the dead man's switch is the one that matters
+
+Every other channel reports problems the Pi is alive to observe. A Pi that loses
+power, corrupts its SD card, or hangs sends nothing — and nothing is exactly
+what a healthy Pi sends. The failure you most want to hear about is the one this
+machine can never report about itself.
+
+Point `XL1_ALERT_DEADMAN_URL` at a service that alarms when pings *stop*:
+[healthchecks.io](https://healthchecks.io) (free, email/SMS/push) or a Push
+monitor in a self-hosted Uptime Kuma. Set its period to a few minutes with about
+ten minutes of grace. A node reporting DOWN pings `<url>/fail` instead, so a
+definite failure alarms immediately rather than waiting out the grace period.
+
+A run that could not read the status document deliberately sends **no** ping.
+
+---
+
+## When a healthy node produces nothing
+
+This is the failure this bundle was built around, because every ordinary signal
+reads green: the container runs, `/livez` passes, the chain is reachable, there
+are no errors — and no block the node builds is ever accepted.
+
+The node does say why, on stderr. The collector scans a 20-minute window of its
+log for the protocol's own phrasing and the dashboard shows it, loudly, in its
+own panel. A window rather than the whole history, because a complaint resolved
+two days ago is not a current fault.
+
+Whether a complaint *counts* depends on the network. Sequence is federated:
+producers are authorized by an allowlist and staking is not how it decides who
+may produce, so a stake complaint there is the node reciting a rule this network
+does not enforce. Those are shown greyed and marked "not enforced on sequence",
+kept off the problem list, and never alerted. Override per deployment with
+`DASH_ELIGIBILITY_IGNORE` in `/etc/xl1/dashboard.env` — a comma-separated list
+of keys (`insufficient-stake`, `no-intent`, `unseasoned`, `self-bond`,
+`not-allowed`, `too-slow`, `no-balance`).
+
+Two that are never ignored, because they are real on every network:
+
+- **`not-allowed`** — the signing address is not on the allowlist. `xl1ctl addr`
+  tells you which address that is.
+- **`too-slow`** — blocks rejected as `behind-finalized-head`. The node is
+  building slower than the chain finalizes, so each candidate is stale before it
+  is submitted. On a Pi 3 B+ this is a hardware ceiling, not a setting.
+
+---
+
+## Keeping it current
+
+The **Software & host** panel watches two layers that rot quietly.
+
+`xl1-cli` in the running container is compared against the published release
+every six hours. The version is cached against the container's **image ID**, so
+an upgrade shows immediately rather than at the end of a cache window.
+
+Host packages are reported with the **age of the apt lists beside the count**.
+`apt` answers against its last refresh, so a host unrefreshed for months reports
+zero updates confidently and wrongly — which reads as good news and is the worst
+answer the check can give. Past a week the age is escalated to a problem in its
+own right.
+
+To upgrade the CLI, rebuild the images on a workstation and reload:
+
+```bash
+XL1_CLI_VERSION=5.3.0 ./build-images.sh    # on an amd64 machine, not the Pi
+```
+
+Then either cut a release and `sudo xl1ctl update --release` on the Pi, or copy
+the tarballs across and `sudo xl1ctl update /path/to/bundle`.
 
 ---
 
@@ -244,12 +344,35 @@ xl1ctl addr          # which address the node actually signs as
 xl1ctl doctor        # diagnose a producer that is not working
 xl1ctl dashboard     # print the dashboard URLs
 sudo xl1ctl restart
+
+sudo xl1ctl update --release     # fetch the latest release, verify it, reload
+sudo xl1ctl backup               # encrypted copy of /etc/xl1
 ```
+
+`update --release` downloads the image tarballs as root, checks them against the
+release's `SHA256SUMS`, and refuses to load on a mismatch. Fetching them by hand
+into a root-owned bundle directory fails with a permission error, after which a
+plain `xl1ctl update` reloads the images already there and reports success —
+which is how an upgrade can appear to land twice without changing anything.
+
+`update`, `backup` and `restore` take paths and therefore still ask for a
+password; the read-only and service-control verbs do not.
 
 `xl1ctl addr` is the one to reach for when blocks are submitted but never
 accepted. It derives the signing address out of the mnemonic and tells you
 whether it matches the reward address — the thing nothing else in the running
 system will show you.
+
+### When the producer gives up entirely
+
+`xl1-producer.service` caps restarts at five failures in 300 seconds. Past that
+systemd stops trying **permanently** and the unit sits in `failed` — correct for
+SD-card longevity, but it will not recover on its own and nothing says so:
+
+```bash
+sudo systemctl reset-failed xl1-producer
+sudo systemctl start xl1-producer
+```
 
 ### Backups
 
@@ -313,13 +436,32 @@ xl1-screen            # draws on whatever TTY you run it from
 ### 3.5" SPI panel
 
 ```bash
+sudo ./scripts/xl1-screen-setup.sh --probe          # which panel is this?
 sudo ./scripts/xl1-screen-setup.sh --panel tft35a
 sudo reboot
 ```
 
-Panels: `tft35a` (start here — it drives most ILI9486 boards), `mhs35`,
-`mhs35b`, `mhs35ips`, `mis35`. Add `--rotate 270` if it comes up upside down.
-Undo everything with `--revert`, which also gives tty1 its login prompt back.
+**Start with `--probe` unless you know the board.** Every 3.5" SPI panel in this
+class is physically identical and shows the same white screen when driven by the
+wrong controller, and the silkscreen is often unreadable or under a heatsink.
+The probe enables SPI for the current boot, loads each candidate overlay at
+runtime, and writes noise to whatever framebuffer appears — static means that
+controller is right. It writes nothing to `config.txt`.
+
+It refuses to run if a panel overlay is already applied from `config.txt`: that
+overlay owns `spi0.0` for the life of the boot, so every candidate would collide
+and report a kernel failure, which looks like a dozen dead panels rather than
+one occupied bus. `--revert`, then reboot, then probe.
+
+Panels: `tft35a` (drives most ILI9486 boards), `mhs35`, `mhs35b`, `mhs35ips`,
+`mis35`, plus whichever of `piscreen`, `piscreen2r` and `pitft35-resistive` your
+firmware ships. Add `--rotate 270` if it comes up upside down. Undo everything
+with `--revert`, which also gives tty1 its login prompt back.
+
+**A white screen means the controller was never spoken to** — backlight on, no
+data — so power and ribbon are fine. A *black* screen is progress: initialised,
+nothing drawn. Those need opposite fixes, which is why `xl1-screen-diag.sh`
+separates them.
 
 The layout is built for **60×20 characters**, which is what a 480×320 panel
 gives at an 8×16 console font.

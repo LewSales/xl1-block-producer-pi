@@ -1,0 +1,7 @@
+{"collectedAt":"2099-01-01T00:00:00Z",
+ "container":{"name":"xl1-producer","state":"running","running":true,"uptime":"2h 5m","restartCount":0,"image":"xl1:local","health":"healthy"},
+ "blocksPublished":42,"errorCount":0,
+ "eligibility":{"blocked":false,"window":"20m"},
+ "cliVersion":"5.3.0",
+ "os":{"updates":0,"securityUpdates":0,"rebootRequired":false,"aptAgeHours":2},
+ "recentLog":["all good"]}

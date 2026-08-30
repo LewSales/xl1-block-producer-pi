@@ -11,6 +11,7 @@ import { createServer } from 'node:http'
 import { statfs } from 'node:fs'
 import { promisify } from 'node:util'
 import os from 'node:os'
+import { pathToFileURL } from 'node:url'
 
 import { DefaultNetworks, GatewayBuilder, NetworkDataLakeUrls } from '@xyo-network/xl1-sdk'
 
@@ -408,7 +409,20 @@ async function pollSystem() {
 function overall() {
   const problems = []
   if (!state.health.ok) problems.push('producer health probe failing')
+
+  // A deleted container is a first-class state, not a missing field. The
+  // collector reports it as `container: null` with an error string, and
+  // `container?.running === false` is `undefined === false` — so this read as
+  // healthy on its own signal, and the error text was never rendered anywhere.
+  if (state.node.ok && state.node.container === null) {
+    problems.push(`producer container not found: ${state.node.error ?? 'no container'}`)
+  }
   if (state.node.ok && state.node.container?.running === false) problems.push('producer container not running')
+
+  // Stale data and no data are different failures, and only the first was
+  // reported. A collector that has never written a snapshot leaves node.ok
+  // false and node.stale undefined, which said nothing at all.
+  if (!state.node.ok) problems.push(`collector not reporting: ${state.node.error ?? 'unknown'}`)
   if (state.node.ok && state.node.stale) problems.push('collector data stale')
   if (!state.chain.ok) problems.push('chain unreachable')
   if (state.system.ok && state.system.throttle && !state.system.throttle.healthy) problems.push('Pi undervoltage/throttling')
@@ -433,7 +447,9 @@ function overall() {
     if (osInfo.aptAgeHours > 168) problems.push(`apt lists ${Math.round(osInfo.aptAgeHours / 24)}d stale — update count is not trustworthy`)
   }
 
-  const critical = !state.health.ok || (state.node.ok && state.node.container?.running === false)
+  const critical = !state.health.ok
+    || (state.node.ok && state.node.container?.running === false)
+    || (state.node.ok && state.node.container === null)
   return { status: critical ? 'down' : problems.length ? 'degraded' : 'ok', problems }
 }
 
@@ -510,17 +526,49 @@ const server = createServer(async (req, res) => {
   res.writeHead(404, { 'content-type': 'text/plain' }).end('not found')
 })
 
-// Prime every source before listening so the first page load is never empty.
-await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease()])
+// Exported so the decisions on this page can be tested without a network, a
+// Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
+// contract with xl1-collect.sh, which is where two silent failures have already
+// hidden.
+export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history }
 
-setInterval(pollChain, CHAIN_POLL_MS).unref()
-setInterval(() => { pollHealth(); pollNode(); pollSystem() }, LOCAL_POLL_MS).unref()
-setInterval(pollRelease, CLI_CHECK_MS).unref()
+// Only run as a server when executed directly, not when imported by a test.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 
-server.listen(PORT, BIND, () => {
-  console.log(`xl1-dashboard listening on http://${BIND}:${PORT} (network=${NETWORK}${TOKEN ? ', token required' : ''})`)
-})
+if (isMain) {
+  // A crash here is otherwise invisible: Restart=always brings the container
+  // back in 10s, so the only trace is history resetting and "since dashboard
+  // start" silently rebasing.
+  process.on('unhandledRejection', (err) => {
+    console.error('xl1-dashboard: unhandled rejection —', err)
+  })
+  process.on('uncaughtException', (err) => {
+    console.error('xl1-dashboard: uncaught exception —', err)
+  })
 
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => { server.close(() => process.exit(0)) })
+  // Prime every source before listening so the first page load is never empty.
+  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease()])
+
+  // Each poller catches internally, but a rejection escaping one of them would
+  // take the process down, so none of these promises may go unwatched.
+  const guard = (fn, name) => () => { Promise.resolve(fn()).catch((e) => console.error(`xl1-dashboard: ${name} failed —`, e)) }
+
+  setInterval(guard(pollChain, 'pollChain'), CHAIN_POLL_MS).unref()
+  setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')() }, LOCAL_POLL_MS).unref()
+  setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
+
+  server.listen(PORT, BIND, () => {
+    console.log(`xl1-dashboard listening on http://${BIND}:${PORT} (network=${NETWORK}${TOKEN ? ', token required' : ''})`)
+  })
+
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.on(sig, () => {
+      // close() alone waits for keep-alive sockets, and the page holds one open
+      // by polling — so it never returned and every stop burned the full
+      // 15s docker timeout before SIGKILL.
+      server.closeAllConnections?.()
+      server.close(() => process.exit(0))
+      setTimeout(() => process.exit(0), 3000).unref()
+    })
+  }
 }

@@ -331,19 +331,29 @@ function render(d) {
     const bars = (vals, max) => `<div style="display:flex;align-items:flex-end;gap:2px;height:40px;margin-top:10px">${
       vals.map((v) => `<div title="${esc(v.day)}: ${v.n}" style="flex:1;min-width:3px;border-radius:2px 2px 0 0;background:var(--c, var(--accent));height:${Math.max(2, (v.n / max) * 100)}%"></div>`).join('')}</div>`
 
+    // Nothing recorded yet is not zero blocks and a peak of one. Say what is
+    // actually true — that it has not been running long enough — rather than
+    // charting placeholders that read as a node which earned nothing.
+    const empty = days.length === 0
     cards.push(`<section style="--c: var(--c-trend)">
       <h2><span class="ico" aria-hidden="true">📈</span>Trends</h2>
       ${tr.error ? `<div class="err">${esc(tr.error)}</div>` : ''}
-      <div class="big">${num(totalB)}</div>
-      <div class="sub">blocks over ${num(days.length)} day(s) recorded · ${num(tr.points)} samples</div>
-      ${recent.length ? bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB) : ''}
-      <div class="sparkfoot"><span>blocks/day</span><span>peak ${num(maxB)}</span></div>
-      ${recent.length ? bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE) : ''}
-      <div class="sparkfoot"><span>XL1/day</span><span>peak ${num(maxE)}</span></div>
-      ${tiles([
-        ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
-        ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],
-      ])}
+      ${empty ? `
+        <div class="big sub" style="font-size:16px">collecting…</div>
+        <div class="sub">One sample every 5 minutes. The first full day appears tomorrow;
+          history survives restarts once the store is writable.</div>
+      ` : `
+        <div class="big">${num(totalB)}</div>
+        <div class="sub">blocks over ${num(days.length)} day(s) · ${num(tr.points)} samples</div>
+        ${bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB)}
+        <div class="sparkfoot"><span>blocks/day</span><span>peak ${num(maxB)}</span></div>
+        ${bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE)}
+        <div class="sparkfoot"><span>XL1/day</span><span>peak ${num(maxE)}</span></div>
+        ${tiles([
+          ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
+          ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],
+        ])}
+      `}
     </section>`)
   }
 

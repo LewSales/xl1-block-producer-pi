@@ -6,7 +6,8 @@
 //   node    — producer container state, written by the host collector timer
 //   system  — Pi vitals from /proc and /sys (temp, throttle, RAM, swap, disk)
 
-import { readFile, appendFile, writeFile } from 'node:fs/promises'
+import { readFile, appendFile, writeFile, mkdir } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { createServer } from 'node:http'
 import { statfs } from 'node:fs'
 import { promisify } from 'node:util'
@@ -189,8 +190,22 @@ async function persistTrend() {
     }
     trendError = undefined
   } catch (error) {
+    // First run has no directory. Create it and let the next cycle write —
+    // reporting "no such file" for a store that has simply never been written
+    // is an error message where an empty state belongs.
+    if (error.code === 'ENOENT') {
+      try {
+        await mkdir(dirname(TREND_FILE), { recursive: true })
+        trendError = undefined
+        return
+      } catch {
+        trendError = `${dirname(TREND_FILE)} does not exist and cannot be created`
+          + ' — xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)'
+        return
+      }
+    }
     trendError = error.code === 'EACCES' || error.code === 'EROFS'
-      ? `${TREND_FILE} is not writable — add a rw bind mount for its directory`
+      ? `${dirname(TREND_FILE)} is mounted read-only — update xl1-dashboard.service and daemon-reload`
       : error.message?.slice(0, 160)
   }
 }

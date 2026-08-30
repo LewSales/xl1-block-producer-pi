@@ -645,9 +645,15 @@ for on the kernel command line, so Docker accepts the flags and discards them:
 
 ```bash
 docker inspect xl1-producer --format '{{.HostConfig.Memory}}'   # 0, not 805306368
-grep -c '^memory' /proc/cgroups                                 # 0 — no controller
 docker stats --no-stream xl1-producer                           # mem reads 0B / 0B
+grep -w memory /sys/fs/cgroup/cgroup.controllers                # absent — no controller
 ```
+
+Check `cgroup.controllers`, **not** `/proc/cgroups`. Current Raspberry Pi OS runs
+cgroup **v2**, where `/proc/cgroups` is the legacy v1 view and never lists
+`memory` — before or after enabling it. Testing there reports failure on a
+working system, which is worse than not checking. `stat -fc %T /sys/fs/cgroup`
+says `cgroup2fs` on v2; only on a v1 host is `/proc/cgroups` the right file.
 
 Two consequences worth being clear about:
 
@@ -667,10 +673,17 @@ To enable enforcement, append to `/boot/firmware/config.txt`'s cmdline (that is
 cgroup_enable=memory cgroup_memory=1
 ```
 
-Then `grep -c '^memory' /proc/cgroups` returns 1 and the limits bite. Do this
-when you can watch the node: it activates a 768 MB cap that has never been live,
-and a container that exceeds it is killed rather than slowed. The cost of
-enabling it is roughly 1% of RAM in kernel accounting structures.
+Then `memory` appears in `/sys/fs/cgroup/cgroup.controllers` and the limits
+bite — `docker inspect` reports `805306368` instead of `0`, and `docker stats`
+shows real per-container figures for the first time. Do this when you can watch
+the node: it activates a 768 MB cap that has never been live, and a container
+that exceeds it is killed rather than slowed. The cost of enabling it is roughly
+1% of RAM in kernel accounting structures.
+
+A useful side effect: Node reads its container's memory limit when one exists.
+Without it the dashboard sized its heap against all 955 MB of host RAM while
+capped at 256 MB — the container became better behaved once the limit was real,
+not merely more constrained.
 
 This is left off by default because an unenforced flag that looks enforced is
 the more dangerous of the two states only if you believe it — hence this

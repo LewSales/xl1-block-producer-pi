@@ -16,6 +16,11 @@ set -uo pipefail
 
 API="${XL1_SCREEN_API:-http://127.0.0.1:8088/api/status}"
 INTERVAL="${XL1_SCREEN_INTERVAL:-5}"
+# Written by xl1-touch. Absent when nothing is driving touch, in which case the
+# panel behaves exactly as it did before touch existed: page 0, forever.
+PAGE_FILE="${XL1_SCREEN_PAGE_FILE:-/run/xl1-screen/page}"
+PAGES=4
+PAGE=0
 ONCE=0
 [[ "${1:-}" == "--once" ]] && ONCE=1
 
@@ -50,15 +55,93 @@ line() {  # line <content-with-ansi>
 
 rule() { printf ' %s%s%s\n' "${FG_GR}" "$(printf '─%.0s' $(seq 1 "${W}"))" "${R}"; }
 
+# Fetch and draw are separate so that changing page redraws from what is already
+# in hand. Re-polling the API on every tap would make the panel feel slower the
+# more you touch it, which is the opposite of the point.
+# ---------------------------------------------------------------- pages
+#
+# Each draws its own body under the shared header. They exist because the panel
+# previously showed one truncated log line and reading any further back meant
+# finding a laptop.
+
+page_log() {  # page_log <rows>
+  local rows="$1" n
+  # Leave room for header, rule and the footer hint.
+  n=$(( rows - 5 )); (( n < 4 )) && n=4
+  line "  ${B}PRODUCER LOG${R} ${D}newest first · ${LOGN:-0} held${R}"
+  rule
+  if (( have_jq )) && [[ -n "${JSON:-}" ]]; then
+    printf '%s' "${JSON}" | jq -r --argjson n "${n}" \
+      '.node.recentLog // [] | reverse | .[0:$n] | .[]' 2>/dev/null \
+      | while IFS= read -r l; do line "  ${FG_GR}${l:0:$(( W - 3 ))}${R}"; done
+  else
+    line "  ${D}${LASTLOG:0:$(( W - 4 ))}${R}"
+  fi
+}
+
+page_chain() {
+  line "  ${B}CHAIN & REWARDS${R}"
+  rule
+  line "  ${D}HEIGHT${R}   ${B}${FG_W}$(group "${CUR}")${R}  ${D}final${R} $(group "${FIN}")  ${D}lag${R} ${LAG:-?}"
+  line "  ${D}RATE${R}     ${SPB:-?}s/block  ${D}·${R} ${BPH:-?}/h chain"
+  line ""
+  line "  ${D}REWARD${R}   ${B}${FG_G}${REW}${R} XL1"
+  [[ -n "${RPD}" ]] && line "  ${D}PER DAY${R}  ~${RPD} XL1 ${D}extrapolated${R}"
+  line "  ${D}SHARE${R}    ${SHARE:-0}% ${D}of chain blocks${R}"
+  line ""
+  if [[ -n "${LASTBLK}" ]]; then
+    line "  ${D}LAST${R}     block ${FG_W}#$(group "${LASTBLK}")${R} ${D}·${R} ${SINCEBLK:-?} blocks ago"
+  else
+    line "  ${D}LAST${R}     ${FG_Y}no block landed yet${R}"
+  fi
+  [[ -n "${ELIG}" ]] && line "  ${D}BLOCKED${R}  ${FG_Y}${ELIG:0:$(( W - 12 ))}${R}"
+  [[ -n "${PADDR}" ]] && line "  ${D}SIGNS AS${R} ${FG_GR}${PADDR:0:16}…${R}"
+}
+
+page_system() {
+  line "  ${B}HOST${R}"
+  rule
+  local tc="${FG_G}"; [[ "${TEMP%%.*}" -ge 65 ]] 2>/dev/null && tc="${FG_Y}"
+  [[ "${TEMP%%.*}" -ge 75 ]] 2>/dev/null && tc="${FG_R}"
+  line "  ${D}CPU${R}      ${tc}${TEMP:-?}°C${R}   ${D}load${R} ${LOAD:-?}"
+  line "  ${D}MEMORY${R}   ${MEM:-?}%  ${D}swap${R} ${SWP:-?}%  ${D}disk${R} ${DISK:-?}%"
+  local pw
+  case "${PWROK}" in
+    true)  [[ "${UVEVER}" == "true" ]] && pw="${FG_Y}undervolted earlier${R}" || pw="${FG_G}stable${R}" ;;
+    false) pw="${ON_R} UNDERVOLTAGE ${R}" ;;
+    *)     pw="${D}unknown${R}" ;;
+  esac
+  line "  ${D}POWER${R}    ${pw}"
+  line "  ${D}UPTIME${R}   $(( UPS / 86400 ))d $(( UPS % 86400 / 3600 ))h"
+  line ""
+  line "  ${D}CONTAINER${R} ${CST:-?}  ${D}up${R} ${CUPT:-?}  ${D}restarts${R} ${RESTARTS:-0}"
+  if [[ -n "${CLIV}" ]]; then
+    if [[ -n "${CLIL}" && "${CLIV}" != "${CLIL}" ]]; then
+      line "  ${D}xl1-cli${R}   ${FG_Y}${CLIV} → ${CLIL} available${R}"
+    else
+      line "  ${D}xl1-cli${R}   ${FG_G}${CLIV}${R}"
+    fi
+  fi
+  [[ -n "${OSU}" ]] && line "  ${D}HOST PKGS${R} ${OSU} pending${OSS:+, ${FG_Y}${OSS} security${R}}"
+}
+
+OK=1
+fetch() {
+  local json
+  json="$(curl -sf --max-time 4 "${API}" 2>/dev/null)" || { OK=0; return; }
+  [[ -z "${json}" ]] && { OK=0; return; }
+  OK=1
+  JSON="${json}"
+}
+
 render() {
   local cols rows
   cols=$(tput cols 2>/dev/null || echo 60)
   rows=$(tput lines 2>/dev/null || echo 20)
   W=$(( cols - 2 )); (( W < MINW )) && W=${MINW}
 
-  local json ok=1
-  json="$(curl -sf --max-time 4 "${API}" 2>/dev/null)" || ok=0
-  [[ -z "${json}" ]] && ok=0
+  local json ok="${OK}"
+  json="${JSON:-}"
 
   printf '%s[H%s[2J%s[?25l' "${esc}" "${esc}" "${esc}"
 
@@ -100,22 +183,59 @@ render() {
       @sh "NET=\(.chain.networkName // "")",
       @sh "CHOK=\(.chain.ok)",
       @sh "PROB=\(.problems | join(" | "))",
-      @sh "LASTLOG=\(.node.recentLog[-1] // "")"
+      @sh "LASTLOG=\(.node.recentLog[-1] // "")",
+      @sh "LOGN=\(.node.recentLog | length)",
+      @sh "LASTBLK=\(.derived.lastBlock // "")",
+      @sh "SINCEBLK=\(.derived.blocksSinceLast // "")",
+      @sh "SPB=\(.derived.secondsPerBlock // "")",
+      @sh "BPH=\(.derived.blocksPerHourChain // "")",
+      @sh "SHARE=\(.derived.sharePercent // "")",
+      @sh "RPD=\(.derived.rewardPerDay // "")",
+      @sh "PADDR=\(.chain.balances.producer.address // "")",
+      @sh "ELIG=\(if .node.eligibility.blocked then (.node.eligibility.reason + (if .node.eligibilityIgnored then " (not enforced here)" else "" end)) else "" end)",
+      @sh "CLIV=\(.release.installed // "")",
+      @sh "CLIL=\(.release.latest // "")",
+      @sh "OSU=\(.node.os.updates // "")",
+      @sh "OSS=\(.node.os.securityUpdates // "")",
+      @sh "DISK=\(.system.disk.usedPercent // "")",
+      @sh "LOAD=\(.system.loadAverage[0] // "")",
+      @sh "CUPT=\(.node.container.uptime // "")",
+      @sh "RESTARTS=\(.node.container.restartCount // "")"
     ')"
   else
     ST="unknown"; PROB="jq not installed"; CUR=""; REW=""; NET=""
     CHOK=false; HLIVE=false; TEMP=""; MEM=""; SWP=""; UPS=0; SUB=""; ERRS=""
     CST=""; HOST=""; LASTLOG=""; DELTA=""; FIN=""; LAG=""; PWROK=unknown; UVEVER=false
+    LOGN=0; LASTBLK=""; SINCEBLK=""; SPB=""; BPH=""; SHARE=""; RPD=""; PADDR=""
+    ELIG=""; CLIV=""; CLIL=""; OSU=""; OSS=""; DISK=""; LOAD=""; CUPT=""; RESTARTS=""
   fi
 
   # --- header -------------------------------------------------------------
   local title="${B}${FG_C}XL1 PRODUCER${R}"
   [[ -n "${HOST}" ]] && title+=" ${FG_GR}${HOST}${R}"
   [[ -n "${NET}" ]] && title+=" ${D}·${R} ${FG_W}${NET}${R}"
-  local clock="${FG_GR}$(date '+%H:%M:%S')${R}"
+  # Dots rather than "2/4": at this size the reader wants to know there is more,
+  # not to do arithmetic.
+  local dots=""
+  if [[ -e "${PAGE_FILE}" ]]; then
+    local i
+    for (( i = 0; i < PAGES; i++ )); do
+      (( i == PAGE )) && dots+="${FG_W}●${R}" || dots+="${FG_GR}·${R}"
+    done
+    dots+=" "
+  fi
+  local clock="${dots}${FG_GR}$(date '+%H:%M:%S')${R}"
   local tlen; tlen=$(vislen "${title}${clock}")
   printf ' %s%*s%s\n' "${title}" $(( W - tlen > 0 ? W - tlen : 1 )) "" "${clock}"
   rule
+
+  # Pages 1-3 draw their own body and return; page 0 is the overview below,
+  # unchanged from what this panel showed before touch existed.
+  case "${PAGE}" in
+    1) page_log "${rows}"; return ;;
+    2) page_chain; return ;;
+    3) page_system; return ;;
+  esac
 
   # --- status banner ------------------------------------------------------
   case "${ST}" in
@@ -179,6 +299,9 @@ render() {
   # fits when the log tail has taken the space.
   if (( rows >= 18 )); then
     line ""
+    if [[ -e "${PAGE_FILE}" ]]; then
+      line "  ${D}tap: next page · hold: back here${R}"
+    fi
     if (( W >= 56 )); then
       line "  ${D}by Lando Williams · unofficial · not affiliated with XYO${R}"
     else
@@ -187,13 +310,41 @@ render() {
   fi
 }
 
+read_page() {
+  local p
+  p="$(cat "${PAGE_FILE}" 2>/dev/null || echo 0)"
+  [[ "${p}" =~ ^[0-9]+$ ]] || p=0
+  (( p >= PAGES )) && p=0
+  printf '%s' "${p}"
+}
+
 if (( ONCE )); then
+  PAGE="$(read_page)"
+  fetch
   render
   printf '%s[?25h' "${esc}"
   exit 0
 fi
 
+# Two clocks. Data refreshes on INTERVAL; the page is checked ten times a second
+# so a tap redraws immediately instead of whenever the next poll happens to land.
+# A redraw from a page change costs nothing — the data is already in hand.
+LAST_FETCH=0
 while true; do
-  render
-  sleep "${INTERVAL}"
+  now=${SECONDS}
+  if (( now - LAST_FETCH >= INTERVAL )); then
+    fetch
+    LAST_FETCH=${now}
+    render
+  fi
+
+  for (( i = 0; i < INTERVAL * 10; i++ )); do
+    sleep 0.1
+    p="$(read_page)"
+    if [[ "${p}" != "${PAGE}" ]]; then
+      PAGE="${p}"
+      render
+    fi
+    (( SECONDS - LAST_FETCH >= INTERVAL )) && break
+  done
 done

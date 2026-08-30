@@ -231,6 +231,21 @@ if [[ "${CLI_CACHED_ID}" != "${IMAGE_ID}" ]] || (( $(cache_age "${CLI_CACHE}") >
   fi
 fi
 
+# ------------------------------------------------------------- power/throttle
+#
+# The dashboard reads the throttle flags from
+# /sys/devices/platform/soc/soc:firmware/get_throttled, which this kernel does
+# not expose — so the panel reports POWER unknown on the one machine the reading
+# exists for. vcgencmd does have it, but only on the host: the container has
+# neither the binary nor /dev/vcio. So the host reads it and passes it along,
+# which is the same reason this script exists at all.
+THROTTLE_RAW=""
+if command -v vcgencmd >/dev/null 2>&1; then
+  THROTTLE_RAW="$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)"
+fi
+[[ -z "${THROTTLE_RAW}" && -r /sys/devices/platform/soc/soc:firmware/get_throttled ]] \
+  && THROTTLE_RAW="$(cat /sys/devices/platform/soc/soc:firmware/get_throttled 2>/dev/null)"
+
 # ------------------------------------------------------- the layer underneath
 #
 # A host can sit unpatched for months while every node signal reads perfectly
@@ -309,6 +324,7 @@ fi
   fi
 
   [[ -n "${CLI_INSTALLED}" ]] && printf '"cliVersion":"%s",' "$(json_escape "${CLI_INSTALLED}")"
+  [[ "${THROTTLE_RAW}" =~ ^0x[0-9a-fA-F]+$ ]] && printf '"throttleRaw":"%s",' "${THROTTLE_RAW}"
 
   if [[ -n "${OS_TOTAL}" ]]; then
     printf '"os":{"updates":%s,"securityUpdates":%s,"rebootRequired":%s' \

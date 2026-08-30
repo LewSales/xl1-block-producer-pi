@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Turn taps on the attached panel into page changes for xl1-screen.
+
+Deliberately keyed on how long a press lasts, not where it lands.
+
+A 3.5" SPI panel reports touch in its own raw coordinate space (roughly
+0-4095), unrotated, while the display is rotated by the overlay. Mapping one to
+the other means a calibration step that every rotation change invalidates, and
+gets it silently wrong rather than obviously wrong. Duration needs no
+calibration, cannot be misconfigured, and works the same whichever way up the
+panel is mounted.
+
+    short tap    next page
+    long press   back to the overview
+
+State is a single integer in a file that xl1-screen polls. No socket, no
+protocol, and if this daemon is not running the panel simply stays on page 0 —
+which is exactly what it did before touch existed.
+
+    xl1-touch                 # run (systemd does this)
+    xl1-touch --calibrate     # print raw coordinates, for zone work later
+"""
+import os
+import select
+import struct
+import sys
+import time
+
+# struct input_event: timeval(16 on 64-bit) + type(2) + code(2) + value(4)
+FMT, SZ = "llHHi", 24
+EV_KEY, EV_ABS = 0x01, 0x03
+BTN_TOUCH = 0x14A
+ABS_X, ABS_Y = 0x00, 0x01
+
+DEVICE = os.environ.get("XL1_TOUCH_DEVICE", "")
+STATE = os.environ.get("XL1_TOUCH_STATE", "/run/xl1-screen/page")
+PAGES = int(os.environ.get("XL1_TOUCH_PAGES", "4"))
+LONG_PRESS = float(os.environ.get("XL1_TOUCH_LONG_PRESS", "0.7"))
+# Two events from one physical tap is the usual failure of a resistive panel.
+DEBOUNCE = float(os.environ.get("XL1_TOUCH_DEBOUNCE", "0.25"))
+
+
+def find_device():
+    """The touchscreen, found by name rather than by event number.
+
+    Event numbering is allocation order, so /dev/input/event0 is the
+    touchscreen until the day someone plugs in a keyboard.
+    """
+    if DEVICE:
+        return DEVICE
+    try:
+        with open("/proc/bus/input/devices", encoding="utf-8", errors="replace") as f:
+            blocks = f.read().split("\n\n")
+    except OSError:
+        return "/dev/input/event0"
+    for b in blocks:
+        if "touch" not in b.lower():
+            continue
+        for tok in b.split():
+            if tok.startswith("event"):
+                return f"/dev/input/{tok}"
+    return "/dev/input/event0"
+
+
+def write_page(n):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    tmp = f"{STATE}.tmp"
+    with open(tmp, "w", encoding="ascii") as f:
+        f.write(str(n))
+    # Atomic, so xl1-screen can never read a half-written value.
+    os.replace(tmp, STATE)
+    os.chmod(STATE, 0o644)
+
+
+def main():
+    calibrate = "--calibrate" in sys.argv
+    dev = find_device()
+    try:
+        f = open(dev, "rb", buffering=0)
+    except PermissionError:
+        print(f"xl1-touch: need root to read {dev}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"xl1-touch: cannot open {dev}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"xl1-touch: reading {dev}"
+          f"{' (calibrate)' if calibrate else f', {PAGES} pages, long press {LONG_PRESS}s'}",
+          flush=True)
+
+    page = 0
+    if not calibrate:
+        write_page(page)
+
+    down_at = None
+    last_tap = 0.0
+    x = y = None
+
+    while True:
+        if not select.select([f], [], [], 1.0)[0]:
+            continue
+        data = f.read(SZ)
+        if not data or len(data) < SZ:
+            continue
+        _s, _us, typ, code, val = struct.unpack(FMT, data)
+
+        if typ == EV_ABS:
+            if code == ABS_X:
+                x = val
+            elif code == ABS_Y:
+                y = val
+            continue
+        if typ != EV_KEY or code != BTN_TOUCH:
+            continue
+
+        now = time.monotonic()
+        if val:                       # press
+            down_at = now
+            continue
+
+        # release
+        if down_at is None:
+            continue
+        held, down_at = now - down_at, None
+        if now - last_tap < DEBOUNCE:
+            continue
+        last_tap = now
+
+        if calibrate:
+            print(f"  tap: x={x} y={y} held={held:.2f}s "
+                  f"-> {'LONG (home)' if held >= LONG_PRESS else 'short (next)'}", flush=True)
+            continue
+
+        page = 0 if held >= LONG_PRESS else (page + 1) % PAGES
+        try:
+            write_page(page)
+        except OSError as e:
+            print(f"xl1-touch: could not write {STATE}: {e}", file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main() or 0)
+    except KeyboardInterrupt:
+        sys.exit(0)

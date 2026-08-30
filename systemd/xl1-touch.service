@@ -1,0 +1,30 @@
+[Unit]
+Description=Panel touch input for the XL1 console dashboard
+After=xl1-screen.service
+# Not Wants=: touch is an enhancement. If the screen is deliberately stopped,
+# this must not drag it back up.
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+# A panel that is unplugged makes this fail on open; without a limit it would
+# retry every 5s forever onto an SD card.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Reads /dev/input and writes one integer to /run. Nothing else.
+ExecStart=/usr/local/bin/xl1-touch
+RuntimeDirectory=xl1-screen
+RuntimeDirectoryMode=0755
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=48M
+
+[Install]
+WantedBy=multi-user.target

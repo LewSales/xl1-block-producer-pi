@@ -542,6 +542,29 @@ data — so power and ribbon are fine. A *black* screen is progress: initialised
 nothing drawn. Those need opposite fixes, which is why `xl1-screen-diag.sh`
 separates them.
 
+### Touch
+
+If the panel has a touchscreen, `xl1-screen-setup.sh` installs and enables
+`xl1-touch` automatically — it detects one rather than assuming, and where there
+is none the panel behaves exactly as it did before.
+
+| Gesture | Does |
+|---|---|
+| Short tap | next page |
+| Hold (0.7s) | back to the overview |
+
+Four pages: **overview**, **producer log** (newest first, as many lines as the
+screen fits), **chain & rewards**, **host**. Dots in the header show where you
+are.
+
+Deliberately keyed on how long a press lasts, not where it lands. The panel
+reports touch in its own raw coordinate space, unrotated, while the display is
+rotated by the overlay — mapping one to the other needs a calibration step that
+every rotation change invalidates and that fails silently rather than obviously.
+Duration needs no calibration and works whichever way up the panel is mounted.
+
+`xl1-touch --calibrate` prints raw coordinates if you want to build zones later.
+
 The layout is built for **60×20 characters**, which is what a 480×320 panel
 gives at an 8×16 console font.
 

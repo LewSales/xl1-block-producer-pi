@@ -474,7 +474,12 @@ async function pollSystem() {
       loadAverage: os.loadavg().map((n) => Number(n.toFixed(2))),
       cpuCount: os.cpus().length,
       cpuTempC: tempRaw ? Number((Number(tempRaw) / 1000).toFixed(1)) : undefined,
-      throttle: decodeThrottle(throttleRaw),
+      // That sysfs path does not exist on every kernel — on the Pi 3 B+ running
+      // Trixie it does not — and the container can run neither vcgencmd nor
+      // reach /dev/vcio. The collector reads it on the host and passes it here,
+      // so the panel stops saying "unknown" about the one figure that has cost
+      // this node the most time.
+      throttle: decodeThrottle(throttleRaw || state.node?.throttleRaw),
       memory: {
         totalBytes: memTotal,
         availableBytes: memAvailable,

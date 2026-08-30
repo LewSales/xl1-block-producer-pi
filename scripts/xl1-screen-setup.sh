@@ -372,6 +372,25 @@ systemctl disable getty@tty1.service >/dev/null 2>&1 || true
 systemctl enable xl1-screen.service >/dev/null
 info "xl1-screen.service enabled on tty1"
 
+# Touch is optional and silent when the panel has none: xl1-touch is installed
+# but not enabled, the page file never appears, and xl1-screen stays on the
+# overview exactly as it did before any of this existed.
+BUNDLE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${BUNDLE}/scripts/xl1-touch" ]]; then
+  install -m 755 "${BUNDLE}/scripts/xl1-touch" /usr/local/bin/xl1-touch
+  install -m 644 "${BUNDLE}/systemd/xl1-touch.service" /etc/systemd/system/xl1-touch.service
+  systemctl daemon-reload
+  if grep -qi touch /proc/bus/input/devices 2>/dev/null; then
+    if systemctl enable --now xl1-touch.service >/dev/null 2>&1; then
+      info "touchscreen found — xl1-touch enabled (tap: next page, hold: home)"
+    else
+      warn "xl1-touch could not start; check: journalctl -u xl1-touch"
+    fi
+  else
+    info "no touchscreen detected — xl1-touch installed but not enabled"
+  fi
+fi
+
 # ------------------------------------------------------------------- report
 
 cat <<EOF

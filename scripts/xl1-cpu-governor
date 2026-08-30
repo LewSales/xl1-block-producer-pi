@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Pin the CPU frequency governor, and keep it pinned across reboots.
+#
+# A Raspberry Pi cannot suspend — /sys/power/state is empty on a 3 B+, so there
+# is no sleep state to prevent and nothing here is a `caffeinate` equivalent.
+# What a Pi does instead is quieter: the stock `ondemand` governor idles the ARM
+# cores at 600 MHz and ramps to 1400 only after it notices load. A block
+# producer's work arrives in short bursts, which is precisely the shape of load
+# that spends its first moments on a core still winding up.
+#
+# `performance` holds the maximum clock. It is not an overclock: the ceiling is
+# unchanged, only the floor moves. There is no stability or corruption risk, the
+# cost is idle power and heat, and on a node that builds a block in seventeen
+# seconds against a one-second budget the trade is not close.
+#
+#   /etc/xl1/cpu-governor      one line, the governor to use
+#   xl1-cpu-governor.service   applies it at boot
+#
+#   xl1-cpu-governor --show    what is set right now, and what is available
+
+set -uo pipefail
+
+CONF="${XL1_GOVERNOR_FILE:-/etc/xl1/cpu-governor}"
+SYS=/sys/devices/system/cpu
+AVAIL_FILE="${SYS}/cpu0/cpufreq/scaling_available_governors"
+
+governors() { cat "${AVAIL_FILE}" 2>/dev/null; }
+
+if [[ "${1:-}" == "--show" ]]; then
+  if [[ ! -r "${AVAIL_FILE}" ]]; then
+    echo "no cpufreq on this host — nothing to set"
+    exit 0
+  fi
+  for c in "${SYS}"/cpu[0-9]*/cpufreq; do
+    [[ -r "${c}/scaling_governor" ]] || continue
+    printf '%-8s %-12s %s MHz\n' "$(basename "$(dirname "${c}")")" \
+      "$(cat "${c}/scaling_governor")" \
+      "$(( $(cat "${c}/scaling_cur_freq" 2>/dev/null || echo 0) / 1000 ))"
+  done
+  printf 'available: %s\n' "$(governors)"
+  printf 'configured: %s\n' "$(cat "${CONF}" 2>/dev/null || echo '(none — default performance)')"
+  exit 0
+fi
+
+# No cpufreq at all is normal on some hosts. Say so and succeed, rather than
+# failing a boot unit over a knob this machine does not have.
+if [[ ! -r "${AVAIL_FILE}" ]]; then
+  echo "xl1-cpu-governor: no cpufreq on this host; nothing to do"
+  exit 0
+fi
+
+WANT="$(tr -d '[:space:]' < "${CONF}" 2>/dev/null || true)"
+[[ -n "${WANT}" ]] || WANT=performance
+
+# An unavailable governor written to sysfs is silently rejected on some kernels
+# and errors on others. Check first so the reason ends up in the journal either
+# way, and leave the running governor alone rather than half-applying.
+if ! printf '%s' " $(governors) " | grep -q " ${WANT} "; then
+  echo "xl1-cpu-governor: '${WANT}' is not available here (have: $(governors))" >&2
+  exit 1
+fi
+
+changed=0 total=0
+for c in "${SYS}"/cpu[0-9]*/cpufreq/scaling_governor; do
+  [[ -w "${c}" ]] || continue
+  total=$(( total + 1 ))
+  [[ "$(cat "${c}" 2>/dev/null)" == "${WANT}" ]] && continue
+  printf '%s' "${WANT}" > "${c}" 2>/dev/null && changed=$(( changed + 1 ))
+done
+
+# Finding no writable core while cpufreq plainly exists means this ran without
+# the privilege to do its job. Reporting that as success would leave the node on
+# ondemand with a green unit beside it — the exact shape of silent failure the
+# rest of this repo exists to avoid.
+if (( total == 0 )); then
+  echo "xl1-cpu-governor: cpufreq is present but no governor was writable — run as root" >&2
+  exit 1
+fi
+
+echo "xl1-cpu-governor: ${WANT} on ${total} core(s), ${changed} changed"

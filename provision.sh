@@ -24,6 +24,11 @@ TEMP_SOFT_LIMIT="${TEMP_SOFT_LIMIT:-70}"
 # config.txt", which is the only safe default for a box that holds a wallet seed
 # and is expected to run unattended for months.
 ARM_FREQ="${ARM_FREQ:-}"
+# Unlike the overclock above, this one is on by default. It does not raise any
+# ceiling — it stops the cores idling back to 600 MHz between bursts of work.
+# Set to "ondemand" for the stock behaviour, or empty to leave the governor
+# entirely alone.
+CPU_GOVERNOR="${CPU_GOVERNOR-performance}"
 OVER_VOLTAGE="${OVER_VOLTAGE:-}"
 DASH_PORT="${DASH_PORT:-8088}"
 INSTALL_TAILSCALE="${INSTALL_TAILSCALE:-1}"
@@ -419,6 +424,20 @@ info "installed /usr/local/bin/xl1ctl"
 install -o root -g root -m 755 "${BUNDLE_DIR}/scripts/xl1-screen" /usr/local/bin/xl1-screen
 info "installed /usr/local/bin/xl1-screen (run xl1-screen-setup.sh to put it on a panel)"
 
+# A Pi has no suspend state to prevent, but the stock ondemand governor idles
+# the cores at 600 MHz and ramps only once it notices load — and a producer's
+# work arrives in exactly the short bursts that spend their first moments on a
+# core still winding up. This is not an overclock: the ceiling is unchanged.
+install -o root -g root -m 755 "${BUNDLE_DIR}/scripts/xl1-cpu-governor" /usr/local/bin/xl1-cpu-governor
+info "installed /usr/local/bin/xl1-cpu-governor"
+if [[ -n "${CPU_GOVERNOR}" ]]; then
+  printf '%s\n' "${CPU_GOVERNOR}" > "${CONF_DIR}/cpu-governor"
+  chmod 644 "${CONF_DIR}/cpu-governor"
+  info "CPU governor set to ${CPU_GOVERNOR} (applied at boot by xl1-cpu-governor.service)"
+else
+  info "CPU_GOVERNOR empty — leaving the governor alone"
+fi
+
 # Let the operator drive xl1ctl without retyping a password, so the desktop
 # shortcuts work in one click. Scoped to this one command, nothing else.
 if [[ -n "${TARGET_USER}" ]] && id "${TARGET_USER}" >/dev/null 2>&1; then
@@ -492,6 +511,16 @@ systemctl daemon-reload
 systemctl enable xl1-collect.timer >/dev/null
 systemctl enable xl1-dashboard.service >/dev/null
 info "enabled xl1-collect.timer and xl1-dashboard.service"
+
+if [[ -n "${CPU_GOVERNOR}" ]]; then
+  # --now so the governor takes effect during this run rather than at the next
+  # reboot; the unit exists to survive reboots, not to defer the first one.
+  if systemctl enable --now xl1-cpu-governor.service >/dev/null 2>&1; then
+    info "$(/usr/local/bin/xl1-cpu-governor --show 2>/dev/null | tail -2 | head -1)"
+  else
+    warn "xl1-cpu-governor.service did not start — check: journalctl -u xl1-cpu-governor"
+  fi
+fi
 
 # The alerter stays disabled until a channel is configured. Enabling it with an
 # empty alert.env would run a timer every 60s that can only ever log that it had

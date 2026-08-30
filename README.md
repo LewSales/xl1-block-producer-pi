@@ -257,7 +257,10 @@ The panel says so rather than normalising it away, which would make the number
 tidier and wrong.
 
 `DASH_PEERS_TOP` sets how many rows show; this node is always shown even when it
-ranks below the cut.
+ranks below the cut. The attached panel carries the same standings on its fifth
+page (tap to reach it), with bars scaled to the leader rather than to 100 — at
+60 columns, against a fixed 100 every row would be a stub and the ranking would
+be unreadable.
 
 #### Naming the other producers
 
@@ -633,6 +636,35 @@ reads both limits and distinguishes the two.
 | `0x8` | Clocked down for heat **right now** — check the fan. |
 | `0x50000` | Undervoltage since boot: a power supply problem, not a heat one. |
 
+### It does not sleep — but it does idle down
+
+A Pi has no suspend state. `/sys/power/state` is empty on a 3 B+, so there is
+nothing to keep awake and no `caffeinate` equivalent to install: the producer
+will never stop because the machine dozed off.
+
+What a Pi does instead is quieter. The stock **`ondemand`** governor idles the
+ARM cores at 600 MHz and ramps to 1400 only once it notices load — and a
+producer's work arrives in short bursts, which is exactly the shape of load that
+spends its first moments on a core still winding up.
+
+So provisioning pins the **`performance`** governor:
+
+```bash
+xl1-cpu-governor --show          # what is set now, per core, and what is available
+sudo CPU_GOVERNOR=ondemand ./provision.sh    # back to stock
+sudo CPU_GOVERNOR= ./provision.sh            # leave the governor alone entirely
+```
+
+This is **not** an overclock. The ceiling is unchanged at 1400 MHz; only the
+floor moves. There is no stability or corruption risk — the cost is idle power
+and a little more heat, which is a trade worth making on a node that builds a
+block in seventeen seconds against a one-second budget.
+
+The governor lives in sysfs and resets on every boot, so
+`xl1-cpu-governor.service` reapplies it. It refuses a governor the kernel does
+not offer, and fails loudly rather than reporting success if it cannot write —
+a green unit beside a node still on `ondemand` would be worse than no unit.
+
 ### Overclocking
 
 Off unless asked for, because it is the one change here that can make a working
@@ -650,6 +682,10 @@ clamps `ARM_FREQ` at 1500 and `OVER_VOLTAGE` at 6, warns if a raised clock is
 asked for without extra voltage (it usually will not boot), and rewrites both
 keys as a block so re-running replaces the previous attempt rather than stacking
 contradictory ones.
+
+Try the governor above first. It is free, reversible and risk-free, and on a
+node whose cores were idling at 600 MHz between blocks it is usually the larger
+of the two effects.
 
 **Do not do this before cooling is sorted.** A higher clock is more heat, and a
 Pi that hits the soft limit drops to 1.2 GHz — slower than stock and hotter with
@@ -683,6 +719,10 @@ On an HDMI monitor it needs no setup at all:
 ```bash
 xl1-screen            # draws on whatever TTY you run it from
 ```
+
+The panel has five pages: overview, log, chain & rewards, host, and producer
+standings. Tap to advance, hold to return to the overview. Bars and trend lines
+use Block Elements, which the console font (Terminus) carries in full.
 
 ### 3.5" SPI panel
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=Pin the CPU governor for XL1 block production
+# The governor lives in sysfs and resets to the kernel default on every boot,
+# which is the whole reason this unit exists.
+After=sysinit.target
+# Deliberately not tied to xl1-producer: the clock policy should be right
+# whether or not the node happens to be running, and restarting the producer
+# must not drag this along with it.
+
+[Service]
+Type=oneshot
+# The setting is applied once and then persists in sysfs. Without this the unit
+# reads as "inactive (dead)" the moment it finishes, which looks like a failure.
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/xl1-cpu-governor
+
+[Install]
+WantedBy=multi-user.target

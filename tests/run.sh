@@ -21,6 +21,7 @@ SHELL_SCRIPTS=(
   "${ROOT}/provision.sh" "${ROOT}/preflight.sh" "${ROOT}/build-images.sh"
   "${ROOT}/scripts/xl1-collect.sh" "${ROOT}/scripts/xl1-alert.sh"
   "${ROOT}/scripts/xl1ctl" "${ROOT}/scripts/xl1-screen-setup.sh" "${ROOT}/scripts/xl1-screen"
+  "${ROOT}/scripts/xl1-cpu-governor"
 )
 
 step "Shell syntax"

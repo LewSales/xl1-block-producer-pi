@@ -31,14 +31,38 @@ ExecStartPre=/usr/bin/test -s /etc/xl1/presets/roles/producer.json
 # pushes the box into swap on the SD card and the node stalls.
 #
 # The role preset is overridden to shorten the block-production interval. The
-# image ships 60000ms in /opt/xl1/presets/roles/producer.json — six times the
-# xl1-cli code default of 10000 — and at that cadence this node learns of a new
-# head up to a minute after it exists, builds a candidate in 3-5s, and offers it
-# for a height the chain settled half a minute ago. Measured on 2026-08-31:
-# every "Found updated head" landed at :17 past the minute for twelve minutes
-# straight, one production attempt per cycle. 15000 is a compromise — 4x the
-# head-discovery resolution, still under a third duty cycle on a 3 B+ that runs
-# 3-5s per attempt, and 4x rather than 6x the poll rate against XYO's RPC.
+# image ships 60000ms in /opt/xl1/presets/roles/producer.json, six times the
+# xl1-cli code default of 10000. Every tick reads both the head and the mempool,
+# so this one number sets how fast the node notices anything at all.
+#
+# At 60000 it lost on head latency: "Found updated head" landed at :17 past the
+# minute for twelve minutes straight, so candidates were built for heights the
+# chain had settled half a minute earlier. 15000 fixed that and exposed the real
+# gate — the producer builds only when it sees a pending transaction. Measured
+# over 40 minutes at 15s: pending=0 declined on 136 of 137 ticks, pending=1
+# built on 20 of 22. A transaction survives in the mempool about six seconds
+# before some producer sweeps it into a block, and sampling that window every
+# 15s caught it on 18 ticks of 154 — usually too late to win the race.
+#
+# So this is really a mempool sampling rate, and the value is a trade against
+# how hard it leans on XYO's RPC. Ticks are 60/interval, and roughly the share
+# of six-second windows caught follows from that:
+#
+#     60000 -> 1/min  ~10%      15000 -> 4/min  ~34%
+#     30000 -> 2/min  ~19%      10000 -> 6/min  ~46%
+#                               5000  -> 12/min ~71%
+#
+# 10000 is xl1-cli's own code default, which makes it the defensible rate to
+# take from a shared endpoint, and it is six times the discovery resolution of
+# the shipped preset. 5000 measurably catches more, and was run for a while, but
+# doubling the read rate against someone else's infrastructure to chase it is
+# not a trade to make silently.
+#
+# Cost on the Pi is not the constraint either way: idle ticks are cheap, and at
+# 15s the producer sat at 6% CPU and 0.25 load across four cores, 65°C,
+# throttled=0x0. Only real builds cost 2-4s, and those stay bounded at roughly
+# one per block whatever the tick rate — ProducerActor holds a Mutex over
+# produceBlock, so a tick arriving mid-build is dropped, not stacked.
 #
 # Only the one field differs from the image's file. Mounting a single file
 # rather than the presets tree keeps the shadow as small as possible: a future

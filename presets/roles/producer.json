@@ -15,7 +15,7 @@
     {
       "name": "producer",
       "accountPath": "0",
-      "blockProductionCheckInterval": 15000,
+      "blockProductionCheckInterval": 10000,
       "heartbeatInterval": 60000
     }
   ]

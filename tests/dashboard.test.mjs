@@ -10,8 +10,13 @@ import assert from 'node:assert/strict'
 import { readFile, writeFile, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const here = new URL('.', import.meta.url).pathname
+// fileURLToPath, not .pathname: under Windows-native node the latter yields
+// /C:/... and every join below then builds C:\C:\... . This repo is worked on
+// from Windows, so the suite has to find its own directory whether node runs
+// under WSL or natively.
+const here = fileURLToPath(new URL('.', import.meta.url))
 const fixture = (n) => readFile(join(here, 'fixtures', n), 'utf8')
 
 process.env.XL1_STATUS_FILE ??= join(here, 'fixtures', 'healthy.json')

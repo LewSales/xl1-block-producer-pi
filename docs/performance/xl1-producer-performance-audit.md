@@ -277,3 +277,99 @@ The next place to look is therefore Phase 9 (the cryptographic hot path), not
 Phase 4 or 5: specifically whether incoming block validation re-verifies
 signatures the producer does not need re-verified, and whether identity
 derivation is repeated per cycle.
+
+## Cryptographic profile (Phase 9) — closed, nothing to fix
+
+Measured on the Pi 3 B+ itself (node v24.14.1, arm64):
+
+| operation | cost |
+|---|---|
+| sha256 of 1 KB | **0.043 ms** |
+| secp256k1 sign | **3.10 ms** |
+| JSON round-trip, small object | ~0.01 ms |
+
+A produced block carries a handful of signatures. Reaching the ~1.8 s that a
+producing cycle spends beyond an idle one would take **~580 signatures**.
+Cryptography is not the cost.
+
+The other Phase 9 questions resolve the same way, from source:
+
+- **Identity derivation is not repeated.** `SimpleBlockRunner` assigns `_account`
+  once in its create handler and caches `_address` and `_rewardAddress` beside it.
+  `ProducerActor` takes `account: input.wallet` at construction and computes
+  `_metricAttributes` once.
+- **Signer objects are not recreated.** The reward diviner that appears to build
+  an account per block (`account: "random"`) is memoized with `??=`.
+- **`chainId()` does not hit the network here.** Its base implementation is
+  `(await this.headBlock()).chain`, but a configured `chain.id` short-circuits it,
+  and `presets/networks/sequence.json` sets one. Arithmetic confirms it: an extra
+  head fetch could not fit inside a `blockProduction` p50 of 267 ms when
+  `mempoolPendingTransactionsFetch` alone is 132 ms.
+
+## The real cost: one sequential RPC per distinct sender
+
+`SimpleBlockRunner.filterByFunded` — which runs on every produced block, since
+`validateBalances` defaults to `true`:
+
+```js
+for (const tx of txs) {
+  ...
+  let balance = balanceCache.get(from);
+  if (balance === void 0) {
+    const accountBalances = await this.accountBalanceViewer.accountBalances([from]);
+    balance = accountBalances[String(from)] ?? AttoXL1(0n);
+    balanceCache.set(from, balance);
+  }
+  ...
+}
+```
+
+The loop is sequential and `await`s inside. Each **distinct sender** costs a full
+round trip — 110-220 ms measured here. The per-invocation `balanceCache` already
+deduplicates repeated senders, so the cost is O(distinct senders), not
+O(transactions).
+
+**`accountBalances` takes an array.** Every address in the block is known before
+the loop begins, and the lookups are independent of one another. One batched call
+would replace N sequential round trips. This is the clearest optimisation the
+audit found, and it is upstream code.
+
+Two further uninstrumented network calls sit on the same producing path:
+
+- `generateTimePayload()` → `timeSyncViewer.currentTimePayload()`, which warns
+  above 100 ms and was observed at **147 ms**.
+- `getBlockRewardTransfers()` → the reward diviner's `divine()`.
+
+Neither appears in `ProducerTimingNames`, so neither shows up in `/statz`.
+
+### Why this is invisible today and matters tomorrow
+
+Sequence currently carries about 2 transfers per block, so the loop makes ~2
+round trips and costs ~300-400 ms of the ~2 s producing cycle. The shape is the
+problem, not today's magnitude: **cost grows linearly with distinct senders per
+block, sequentially, at ~150-220 ms each.** A block with 20 senders would spend
+3-4 seconds in `filterByFunded` alone, well past the 1000 ms `produceBlock`
+budget, on a path with no batching and no concurrency.
+
+### On the budget, corrected again
+
+`p50`/`p95` are in the snapshot and I had not been reading them. Over 6.75 hours
+(4853 checks, 445 blocks produced, 88% idle attempts):
+
+```
+segment                            n    min    p50    p95   mean    max
+blockProduction                  3803    215    267   2076    510  26335
+headFetch                        4853    104    219    253    242   3940
+mempoolPendingBlocksFetch        1064    114    133    202    159   3870
+mempoolPendingTransactionsFetch  3799    102    132    197    165   5954
+mempoolSubmitBlock                445    128    159    230    179   1172
+productionCycle                  4853    216    450   2050    693  26958
+```
+
+The earlier "837 ms, inside the 1000 ms budget" was a mean dominated by idle
+cycles. Split properly: **idle cycles ~450 ms (inside budget), producing cycles
+~2050 ms at p95 — about 2x over.** That matches the ~2.5 s figure recorded
+before this work and never contradicted it; the average simply hid it.
+
+Only one budget line has ever been logged because the warning fires at **10x**
+("exceeded 10x budget: 26958ms > 1000ms"), so a routine 2x overrun is silent.

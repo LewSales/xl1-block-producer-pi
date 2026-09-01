@@ -373,3 +373,52 @@ before this work and never contradicted it; the average simply hid it.
 
 Only one budget line has ever been logged because the warning fires at **10x**
 ("exceeded 10x budget: 26958ms > 1000ms"), so a routine 2x overrun is silent.
+
+## Fourteen-hour outcome window at 5000 ms
+
+Snapshot at 2026-09-01 14:09 MDT, 14 h 10 m after the 23:59 restart that put
+`blockProductionCheckInterval: 5000` into effect (confirmed live in
+`/etc/xl1/presets/roles/producer.json`, bind-mounted to `/opt/xl1/presets`).
+
+```
+blockProductionChecks 10173   blockProductionAttempts 7862   idleAttempts 6905
+blocksProduced 940   blocksPublished 940   rejectedPublishes 0
+concurrentChecksSkipped 0   candidateRecoveries 31   failedChecks 24
+```
+
+```
+segment                            n    min    p50    p95   mean    max
+blockProduction                  7862    215    263   1651    499  26335
+headFetch                       10173    104    231    277    239   4190
+mempoolPendingBlocksFetch        2336    104    135    190    158   3870
+mempoolPendingTransactionsFetch  7854    102    132    201    156   5954
+mempoolSubmitBlock                940    128    169    233    182   1172
+productionCycle                 10173    216    502   2049    678  26958
+```
+
+`maxMs` is still the cold-start cycle from 14 hours ago; nothing since has come
+near it. The distribution is unchanged from the 23-minute window, so the timings
+are a property of the configuration rather than of start-up.
+
+**Share, counted from reward deltas in `trend.jsonl`** (each landed block is
+exactly 50 XL1, so the count is exact, not an estimate): 860 chain blocks in the
+window, **117 of them ours — 13.6%.** An even split across the six producers on
+record would be 16.7%, so the node is now near parity rather than at the 0.5-2%
+it sat at on the 60000 ms cadence.
+
+Two things this settles:
+
+- **Publishing is no longer the constraint; winning is.** 940 candidates
+  published against 860 heights — the node now has a candidate in play for
+  effectively every block, and 87.4% of them lose the race. `rejectedPublishes`
+  stayed at 0 and `concurrentChecksSkipped` at 0 throughout, so neither the
+  endpoint nor the Pi is refusing work.
+- **No uptime decay appeared in 14 hours.** Hourly share held between 8% and 28%
+  for every hour of the window, including the daytime hours in which the node
+  previously collapsed. Compare the two prior days, where hourly share fell to
+  0-3.7% (08-30 08:00-18:00) and 0-6.6% (08-31 13:00-23:00).
+
+That last point is not yet proof. Both earlier collapses set in somewhere around
+19-24 h of container uptime, and this window is 14 h — it has not reached the
+age at which the failure showed itself before. The check that would settle it is
+another reading tonight at 20-24 h uptime, before any restart.

@@ -670,7 +670,7 @@ reads both limits and distinguishes the two.
 | `0x8` | Clocked down for heat **right now** — check the fan. |
 | `0x50000` | Undervoltage since boot: a power supply problem, not a heat one. |
 
-### Memory limits are not enforced by default
+### Memory limits: off by default, enabled on this Pi
 
 `xl1-producer.service` passes `--memory 768m --memory-swap 2g`, and
 `xl1-dashboard.service` passes `--memory 256m`. **On stock Raspberry Pi OS none
@@ -710,9 +710,28 @@ cgroup_enable=memory cgroup_memory=1
 Then `memory` appears in `/sys/fs/cgroup/cgroup.controllers` and the limits
 bite — `docker inspect` reports `805306368` instead of `0`, and `docker stats`
 shows real per-container figures for the first time. Do this when you can watch
-the node: it activates a 768 MB cap that has never been live, and a container
-that exceeds it is killed rather than slowed. The cost of enabling it is roughly
-1% of RAM in kernel accounting structures.
+the node: it activates a 768 MB cap, and a container that exceeds it is killed
+rather than slowed. The cost of enabling it is roughly 1% of RAM in kernel
+accounting structures.
+
+**On xl1pi this is already done** — since the 2026-08-30 reboot, so everything
+above describes a stock Pi, not this one. Confirmed 2026-09-01:
+
+```
+/boot/firmware/cmdline.txt      … cgroup_enable=memory cgroup_memory=1
+/sys/fs/cgroup/cgroup.controllers   cpuset cpu io memory pids
+docker inspect → Memory=805306368   container's own memory.max = 805306368
+```
+
+So the 768 MB cap is live and the failure mode is now a kill, not a stall. Two
+ceilings are stacked: Node's 512 MB heap inside a hard 768 MB container. The
+gap between them is Node's non-heap overhead, and if the heap ever actually
+reached its ceiling the container would be the thing that gives way first.
+Measured headroom is comfortable — 159.5 MB against 768 MB, `RestartCount=0`
+and `OOMKilled=false` across a 14-hour window — but check `OOMKilled` first if
+the producer ever disappears without a log. Jim reports on Discord that an
+incorrectly set heap stops an RPi 3 producer from running at all; this is the
+form that would take here.
 
 A useful side effect: Node reads its container's memory limit when one exists.
 Without it the dashboard sized its heap against all 955 MB of host RAM while

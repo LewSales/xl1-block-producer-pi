@@ -68,11 +68,16 @@ ExecStartPre=/usr/bin/test -s /etc/xl1/presets/roles/producer.json
 # rather than the presets tree keeps the shadow as small as possible: a future
 # xl1-cli that changes producer.json will be overridden here and nowhere else.
 #
-# NODE_OPTIONS is enforced by Node and does its job. --memory does NOT: stock
-# Raspberry Pi OS ships without the memory cgroup controller, so Docker accepts
-# the flag and discards it (docker inspect reports Memory=0). Kept anyway — it
-# costs nothing and becomes real the moment cgroup_enable=memory is added to the
-# kernel cmdline. See "Memory limits are not enforced by default" in README.md.
+# NODE_OPTIONS is enforced by Node and does its job. --memory used to be inert:
+# stock Raspberry Pi OS ships without the memory cgroup controller, so Docker
+# accepted the flag and discarded it (docker inspect reported Memory=0). That is
+# no longer true here — cgroup_enable=memory is on the kernel cmdline since the
+# 2026-08-30 reboot, so the 768m cap is live and a breach is an OOM kill rather
+# than a slowdown. Node's 512 MB heap now sits inside a hard 768 MB container;
+# the producer measures 159.5 MB against it, so the margin is real but it is a
+# margin now rather than an absence. See "Memory limits: off by default, enabled
+# on this Pi" in README.md, and check OOMKilled before anything else if the
+# container ever vanishes without a log.
 ExecStart=/usr/bin/docker run --rm --name xl1-producer \
   --env-file /etc/xl1/sequence-producer.env \
   -e NODE_OPTIONS=--max-old-space-size=512 \

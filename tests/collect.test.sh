@@ -79,6 +79,19 @@ rm -f "${WORK}/state/.collect-cursor" "${WORK}/state/.last-published"
 run
 check "height read past the hash"     "$(field "['lastPublishedBlock']")" "579361"
 
+# A launch that never enters block production passes /livez forever and never
+# recovers, so the count of builds in THIS run is the only thing that separates
+# it from a healthy node. Readiness time does not: 1243ms here built sixteen.
+mkdocker fff 5.4.0 "[BlockRunner [SimpleBlockRunner]] Building block 579640"
+rm -f "${WORK}/state/.run-builds" "${WORK}/state/.collect-cursor"
+run
+check "builds this run are counted"   "$(field "['buildsThisRun']")" "1"
+
+mkdocker ggg 5.4.0 "[xl1] system ready (producer in 671ms)"
+rm -f "${WORK}/state/.run-builds" "${WORK}/state/.collect-cursor"
+run
+check "a launch that never built reads zero" "$(field "['buildsThisRun']")" "0"
+
 # The container disappearing mid-cycle must produce a valid document, not commas.
 cat > "${WORK}/bin/docker" <<'INNER'
 #!/usr/bin/env bash

@@ -63,10 +63,10 @@ cache_age() {
 # told to `rm` a specific dotfile — and until they are, a short read leaves a
 # field empty, the emitted JSON fails validation, and the previous snapshot is
 # served unchanged for up to six hours while the page looks perfectly alive.
-CACHE_SCHEMA=4
+CACHE_SCHEMA=5
 SCHEMA_STAMP="${STATE_DIR}/.cache-schema"
 if [[ "$(cat "${SCHEMA_STAMP}" 2>/dev/null || echo 0)" != "${CACHE_SCHEMA}" ]]; then
-  rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}" "${STATE_DIR}/.last-published"
+  rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}" "${STATE_DIR}/.last-published" "${STATE_DIR}/.run-builds"
   printf '%s' "${CACHE_SCHEMA}" > "${SCHEMA_STAMP}"
   echo "xl1-collect: cache schema changed — derived values will be re-read" >&2
 fi
@@ -98,9 +98,11 @@ read -r STATE RUNNING STARTED RESTARTS IMAGE HEALTH IMAGE_ID <<< "${INSPECT}"
 }
 
 UPTIME="unknown"
+RUN_SECONDS=""
 if [[ "${RUNNING}" == "true" && -n "${STARTED}" ]]; then
   if START_EPOCH=$(date -d "${STARTED}" +%s 2>/dev/null); then
     SECS=$(( $(date +%s) - START_EPOCH ))
+    RUN_SECONDS="${SECS}"
     D=$((SECS/86400)); H=$((SECS%86400/3600)); M=$((SECS%3600/60))
     if   (( D > 0 )); then UPTIME="${D}d ${H}h"
     elif (( H > 0 )); then UPTIME="${H}h ${M}m"
@@ -145,6 +147,37 @@ elif [[ -s "${STATE_DIR}/.last-published" ]]; then
 fi
 
 ERRORS="$(printf '%s' "${NEW_LOG}" | grep -c -iE '\b(error|fatal|unhandled|exception)\b' || true)"
+
+# ------------------------------------------------- did this run ever produce?
+#
+# A producer can start, log "system ready", pass its /livez healthcheck and
+# never build a single block — reported upstream against xl1-docker-images,
+# reproduced across repeated launches of the same image with the same env. It
+# never recovers: /livez only reports process liveness, so the container is
+# never unhealthy, never exits, and no restart policy fires. Every signal an
+# operator has says normal while the node is absent from consensus.
+#
+# Readiness time was the proposed tell — ~671ms on a bad launch against ~7982ms
+# on a good one. It does not hold here: this node reported ready in 1243ms and
+# built sixteen blocks in the same run. So count the thing itself. A build is
+# the first act of actually producing, and zero of them well past startup is
+# the state that cannot be recovered from.
+#
+# Counted per run, not cumulatively, because the question is about *this*
+# launch. On a restart the count is re-derived from container start — cheap,
+# since the log is by definition short at that point — and incremented from the
+# usual slice thereafter, so the steady-state cost stays one grep.
+RUN_STATE="${STATE_DIR}/.run-builds"
+PREV_STARTED=""; BUILDS=0
+[[ -s "${RUN_STATE}" ]] && IFS=$'\t' read -r PREV_STARTED BUILDS < "${RUN_STATE}"
+[[ "${BUILDS}" =~ ^[0-9]+$ ]] || BUILDS=0
+if [[ "${PREV_STARTED}" != "${STARTED}" ]]; then
+  BUILDS="$(docker logs --since "${STARTED}" "${CONTAINER}" 2>&1 | grep -c -i 'building block' || true)"
+else
+  BUILDS=$(( BUILDS + $(printf '%s' "${NEW_LOG}" | grep -c -i 'building block' || true) ))
+fi
+[[ "${BUILDS}" =~ ^[0-9]+$ ]] || BUILDS=0
+printf '%s\t%s\n' "${STARTED}" "${BUILDS}" > "${RUN_STATE}"
 
 # Tail for display comes from the full log so the panel is never empty on a quiet cycle.
 #
@@ -351,6 +384,8 @@ fi
     "$(json_escape "${UPTIME}")" "${RESTARTS}" "$(json_escape "${IMAGE}")" "$(json_escape "${HEALTH}")"
   printf '"blocksPublished":%s,' "${TOTAL}"
   printf '"errorCount":%s,' "${ERRORS:-0}"
+  printf '"buildsThisRun":%s,' "${BUILDS:-0}"
+  [[ "${RUN_SECONDS}" =~ ^[0-9]+$ ]] && printf '"runSeconds":%s,' "${RUN_SECONDS}"
 
   # Absence is a real answer here and is reported as absence, not as a zero or a
   # false. "We did not look" and "we looked and found nothing" are different

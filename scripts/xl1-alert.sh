@@ -29,6 +29,11 @@ COOLDOWN="${XL1_ALERT_COOLDOWN:-21600}"     # re-nag an ongoing problem after 6h
 # win, so short gaps are normal and must not alert; 90 blocks is roughly 85
 # minutes, and at p=0.07 the chance of an honest run that long is about 1 in 700.
 STALL_BLOCKS="${XL1_ALERT_STALL_BLOCKS:-90}"
+# Seconds a container may run without building anything before that is taken as
+# a launch that never entered production. Generous on purpose: a build needs a
+# pending transaction, and while the chain always has some, the cost of a false
+# "restart me" is worse than noticing fifteen minutes later.
+LAUNCH_GRACE="${XL1_ALERT_LAUNCH_GRACE:-900}"
 NODE_NAME="${XL1_ALERT_NAME:-$(hostname)}"
 
 # A URL that must be pinged regularly, watched by something that is not this
@@ -119,7 +124,7 @@ else
   # another field errored, jq exited non-zero, stderr went to /dev/null, and the
   # timer reported nothing wrong every sixty seconds. Silence that looks exactly
   # like good news is the worst failure an alerter has.
-  CONDITIONS="$(printf '%s' "${JSON}" | jq -r --argjson stall "${STALL_BLOCKS}" '
+  CONDITIONS="$(printf '%s' "${JSON}" | jq -r --argjson stall "${STALL_BLOCKS}" --argjson grace "${LAUNCH_GRACE}" '
     . as $s |
     [
       (if $s.status == "down"
@@ -168,6 +173,20 @@ else
       #
       # Counted from the chain, not from the log: "Published" means submitted,
       # and a node can submit all day without a single block being accepted.
+      # A producer that never entered production on this launch, as distinct
+      # from one that is producing and losing. It cannot recover on its own —
+      # /livez passes on a node that has never built a block, so the container
+      # is never unhealthy, never exits, and no restart policy fires. Only an
+      # operator restarting it clears this, which is exactly why it pages.
+      #
+      # Guarded on the container actually running, so a stopped container
+      # reports container-stopped and not this.
+      (if ($s.node.container.running // false)
+          and (($s.node.runSeconds // 0) > $grace)
+          and (($s.node.buildsThisRun // 1) == 0)
+        then "never-produced|urgent|Producer has been up "
+             + ((($s.node.runSeconds // 0) / 60) | floor | tostring)
+             + " min and has never built a block — it came up in the non-producing state and will not recover without a restart" else empty end),
       (if ($s.derived.blocksSinceLast // 0) > $stall
         then "not-producing|high|No block counted in "
              + ($s.derived.blocksSinceLast|tostring) + " chain blocks (~"

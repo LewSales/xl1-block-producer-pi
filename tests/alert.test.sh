@@ -39,6 +39,27 @@ XL1_ALERT_NAME=testnode
 ENV
 A() { XL1_ALERT_ENV="${WORK}/alert.env" bash "${ALERT}" "$@" 2>&1; }
 
+# A launch that came up non-producing, served separately so the state-machine
+# sequence below is not perturbed. --status only; it writes nothing.
+mk2() {
+cat > "${WORK}/status2.json" <<JSON
+{"status":"ok","health":{"ok":true},"chain":{"ok":true},
+ "node":{"ok":true,"stale":false,"container":{"running":true},
+         "eligibility":{"blocked":false},"runSeconds":${1},"buildsThisRun":${2}},
+ "release":{"ok":true},"derived":{"blocksSinceLast":0},
+ "system":{"throttle":{"undervoltageNow":false},"swap":{"usedPercent":0}}}
+JSON
+cat > "${WORK}/alert2.env" <<ENV
+XL1_ALERT_URL=http://127.0.0.1:${PORT}/status2.json
+XL1_ALERT_STATE=${WORK}/.alert-state2
+XL1_ALERT_NAME=testnode
+ENV
+XL1_ALERT_ENV="${WORK}/alert2.env" bash "${ALERT}" --status 2>&1; }
+
+has   "a launch that never produced is caught"  "never-produced" "$(mk2 1800 0)"
+hasnt "a producing launch is not accused"       "never-produced" "$(mk2 1800 4)"
+hasnt "a young container is given its grace"    "never-produced" "$(mk2 60 0)"
+
 OUT="$(A --status)"
 has  "real conditions are detected"      "ineligible"   "${OUT}"
 has  "version lag is detected"           "cli-behind"   "${OUT}"

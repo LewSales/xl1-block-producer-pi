@@ -1,0 +1,22 @@
+{
+  "providerBindings": {
+    "AccountBalanceViewer": { "connection": "default-rpc" },
+    "BlockViewer": { "connection": "default-rpc" },
+    "FinalizationViewer": { "connection": "default-rpc" },
+    "MempoolViewer": { "connection": "default-rpc" },
+    "MempoolRunner": { "connection": "default-rpc" },
+    "StakeTotalsViewer": { "connection": "default-rpc" },
+    "TimeSyncViewer": { "connection": "default-rpc" },
+    "ChainContractViewer": { "connection": "default-evm-rpc" },
+    "BlockRunner": { "connection": "memory" },
+    "BlockValidationViewer": { "connection": "memory" }
+  },
+  "actors": [
+    {
+      "name": "producer",
+      "accountPath": "0",
+      "blockProductionCheckInterval": 15000,
+      "heartbeatInterval": 60000
+    }
+  ]
+}

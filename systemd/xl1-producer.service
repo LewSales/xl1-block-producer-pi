@@ -19,9 +19,30 @@ EnvironmentFile=/etc/xl1/sequence-producer.env
 # A stale container from an unclean shutdown would block --name reuse.
 ExecStartPre=-/usr/bin/docker rm -f xl1-producer
 
+# The role preset below is bind-mounted as a *file*. If it is missing, docker
+# creates a directory at the host path and mounts that instead — the node then
+# fails to parse its own role config, and the wreckage outlives the fix. Failing
+# here is louder and leaves nothing to clean up. provision.sh installs the file,
+# so this only fires on a unit updated without its preset.
+ExecStartPre=/usr/bin/test -s /etc/xl1/presets/roles/producer.json
+
 # Health port stays on loopback: only the dashboard consumes it.
 # 1 GB of RAM means the Node heap needs an explicit ceiling, or a GC spike
 # pushes the box into swap on the SD card and the node stalls.
+#
+# The role preset is overridden to shorten the block-production interval. The
+# image ships 60000ms in /opt/xl1/presets/roles/producer.json — six times the
+# xl1-cli code default of 10000 — and at that cadence this node learns of a new
+# head up to a minute after it exists, builds a candidate in 3-5s, and offers it
+# for a height the chain settled half a minute ago. Measured on 2026-08-31:
+# every "Found updated head" landed at :17 past the minute for twelve minutes
+# straight, one production attempt per cycle. 15000 is a compromise — 4x the
+# head-discovery resolution, still under a third duty cycle on a 3 B+ that runs
+# 3-5s per attempt, and 4x rather than 6x the poll rate against XYO's RPC.
+#
+# Only the one field differs from the image's file. Mounting a single file
+# rather than the presets tree keeps the shadow as small as possible: a future
+# xl1-cli that changes producer.json will be overridden here and nowhere else.
 #
 # NODE_OPTIONS is enforced by Node and does its job. --memory does NOT: stock
 # Raspberry Pi OS ships without the memory cgroup controller, so Docker accepts
@@ -35,6 +56,7 @@ ExecStart=/usr/bin/docker run --rm --name xl1-producer \
   -p 30303:30303/tcp \
   -p 30303:30303/udp \
   -v /var/lib/xl1/data:/data \
+  -v /etc/xl1/presets/roles/producer.json:/opt/xl1/presets/roles/producer.json:ro \
   --memory 768m --memory-swap 2g \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
   xl1:local

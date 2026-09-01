@@ -172,3 +172,60 @@ number, and the first number is the larger one.
 7 blocks published in 293 s — one per ~42 s against a ~53 s block interval —
 with zero rejected publishes and 34 of 42 attempts idle. Too short a window to
 call a share improvement, but the machine is comfortably keeping up.
+
+## 23-minute steady-state window at 5000 ms
+
+```
+blockProductionChecks 271   blockProductionAttempts 226   idleAttempts 197
+blocksProduced 29   blocksPublished 29   rejectedPublishes 0
+concurrentChecksSkipped 0   candidateRecoveries 1   failedChecks 1
+
+segment                          n     min     avg     max
+blockProduction                 226     233     689   26335
+headFetch                       271     109     299     920
+mempoolPendingBlocksFetch        46     121     195     992
+mempoolPendingTransactionsFetch 226     112     178     400
+mempoolSubmitBlock               29     134     240    1172
+productionCycle                 271     251     933   26958
+```
+
+**`productionCycle` averages 837 ms excluding the cold-start sample** — inside
+the 1000 ms budget, and lower than the 923 ms measured at 7 minutes as
+start-up effects wash out. Zero budget-overrun lines in the 21-minute window;
+the single 26958 ms cycle remains the first one after restart.
+
+### The rate increase did not provoke the endpoint
+
+This was the one real risk in halving the interval.
+
+- `failedChecks` **1 of 271 (0.37%)** — a single `mempoolViewer_pendingBlocks`
+  502 at 06:02:15, never repeated. Not a rate-limit pattern.
+- `rejectedPublishes` 0, `concurrentChecksSkipped` 0.
+
+Measured RPC load at 5000 ms, all four call sites combined:
+
+| call | per minute |
+|---|---|
+| `headFetch` | 11.8 |
+| `mempoolViewer_pendingTransactions` | 9.8 |
+| `mempoolViewer_pendingBlocks` | 2.0 |
+| `mempoolRunner_submitBlocks` | 1.3 |
+| **total** | **~25/min (0.41/s)** |
+
+That is the honest number to quote if XYO ever asks what this node costs them.
+
+One robustness note: the 502 escaped as far as
+`Error in timer 'xl1-producer:BlockProductionTimer'`, aborting the whole
+production check rather than just the probe that failed. A transient upstream
+error costs a full cycle.
+
+### What now bounds production
+
+**87% of attempts (197 of 226) found no pending transaction.** Sampling twelve
+times a minute does not create transactions to include. The gate is transaction
+availability on sequence, not our sampling rate — which puts a ceiling on what
+any further interval reduction could buy, and is the reason 5000 is the last
+useful step rather than the start of a series.
+
+29 published, 0 rejected, 1.26/min against a ~53 s block interval. A share
+comparison needs a longer window than this and is not claimed here.

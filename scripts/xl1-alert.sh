@@ -24,6 +24,11 @@ URL="${XL1_ALERT_URL:-http://127.0.0.1:8088/api/status}"
 TOKEN="${XL1_ALERT_TOKEN:-}"
 STATE="${XL1_ALERT_STATE:-/var/lib/xl1/.alert-state}"
 COOLDOWN="${XL1_ALERT_COOLDOWN:-21600}"     # re-nag an ongoing problem after 6h
+# Chain blocks that may pass with none of ours counted before that is a fault
+# rather than luck. At a ~7% share we lose about thirteen races for every one we
+# win, so short gaps are normal and must not alert; 90 blocks is roughly 85
+# minutes, and at p=0.07 the chance of an honest run that long is about 1 in 700.
+STALL_BLOCKS="${XL1_ALERT_STALL_BLOCKS:-90}"
 NODE_NAME="${XL1_ALERT_NAME:-$(hostname)}"
 
 # A URL that must be pinged regularly, watched by something that is not this
@@ -114,7 +119,7 @@ else
   # another field errored, jq exited non-zero, stderr went to /dev/null, and the
   # timer reported nothing wrong every sixty seconds. Silence that looks exactly
   # like good news is the worst failure an alerter has.
-  CONDITIONS="$(printf '%s' "${JSON}" | jq -r '
+  CONDITIONS="$(printf '%s' "${JSON}" | jq -r --argjson stall "${STALL_BLOCKS}" '
     . as $s |
     [
       (if $s.status == "down"
@@ -151,7 +156,23 @@ else
       (if $s.node.os.rebootRequired // false
         then "reboot-required|default|Host reboot required" else empty end),
       (if ($s.system.swap.usedPercent // 0) > 60
-        then "swapping|default|Heavy swap use — the Pi is short of RAM" else empty end)
+        then "swapping|default|Heavy swap use — the Pi is short of RAM" else empty end),
+      # The one every other check here misses. On 2026-08-31 this node went two
+      # hours without landing a block while the container was up, /livez was
+      # green, the chain was reachable, nothing was throttling and the log was
+      # still printing a clean "Published block:" every minute. Every predicate
+      # above said healthy, because every one of them was — the candidates were
+      # simply losing every race. Not producing is the only symptom that failure
+      # has, and it is the one that costs money, so it is worth a notification
+      # even though nothing is technically broken.
+      #
+      # Counted from the chain, not from the log: "Published" means submitted,
+      # and a node can submit all day without a single block being accepted.
+      (if ($s.derived.blocksSinceLast // 0) > $stall
+        then "not-producing|high|No block counted in "
+             + ($s.derived.blocksSinceLast|tostring) + " chain blocks (~"
+             + ((($s.derived.blocksSinceLast * ($s.derived.secondsPerBlock // 57)) / 60) | floor | tostring)
+             + " min) — the node looks healthy but is not landing anything" else empty end)
     ] | .[]
   ')"
 

@@ -25,6 +25,7 @@ cat > "${WORK}/status.json" <<'JSON'
          "eligibilityIgnored":false,"cliVersion":"5.2.2",
          "os":{"securityUpdates":30,"rebootRequired":false}},
  "release":{"ok":true,"latest":"5.3.0","installed":"5.2.2","lag":"behind"},
+ "derived":{"blocksSinceLast":150,"secondsPerBlock":57},
  "system":{"throttle":{"undervoltageNow":false},"swap":{"usedPercent":0}}}
 JSON
 python3 -m http.server ${PORT} --bind 127.0.0.1 --directory "${WORK}" >/dev/null 2>&1 &
@@ -42,9 +43,12 @@ OUT="$(A --status)"
 has  "real conditions are detected"      "ineligible"   "${OUT}"
 has  "version lag is detected"           "cli-behind"   "${OUT}"
 has  "security updates are detected"     "os-security"  "${OUT}"
+# A node that is up, healthy and winning nothing looked perfectly fine to every
+# other predicate for two hours on 2026-08-31.
+has  "a healthy node winning nothing is caught" "not-producing" "${OUT}"
 
 OUT="$(A)"
-check "first run tracks all three"       "$(wc -l < "${WORK}/.alert-state")" "3"
+check "first run tracks all four"        "$(wc -l < "${WORK}/.alert-state")" "4"
 OUT="$(A)"
 hasnt "second run is silent"             "XL1 testnode" "${OUT}"
 
@@ -54,7 +58,7 @@ for _ in $(seq 1 20); do curl -fsS --max-time 1 -o /dev/null 2>/dev/null "http:/
 OUT="$(A)"
 has   "outage itself is reported"        "did not answer" "${OUT}"
 hasnt "no false recovery for ineligible" "recovered"      "${OUT}"
-check "prior conditions preserved"       "$(grep -c . "${WORK}/.alert-state")" "4"
+check "prior conditions preserved"       "$(grep -c . "${WORK}/.alert-state")" "5"
 
 OUT="$(A --status)"
 has  "--status admits it could not look" "COULD NOT READ STATUS" "${OUT}"

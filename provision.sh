@@ -414,6 +414,14 @@ info "installed /usr/local/bin/xl1-collect.sh"
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-alert.sh" /usr/local/bin/xl1-alert.sh
 info "installed /usr/local/bin/xl1-alert.sh"
 
+# Role preset override, bind-mounted over the image's copy by xl1-producer
+# .service. Installed unconditionally: the unit refuses to start without it, on
+# purpose, because docker would otherwise invent a directory at that path.
+# See the comment block in the unit for what the one changed field buys.
+install -d -m 755 "${CONF_DIR}/presets/roles"
+install -m 644 "${BUNDLE_DIR}/presets/roles/producer.json" "${CONF_DIR}/presets/roles/producer.json"
+info "installed ${CONF_DIR}/presets/roles/producer.json (blockProductionCheckInterval override)"
+
 # Root-owned and not operator-writable: the sudoers grant below would otherwise
 # be a way to escalate by editing the script it exempts.
 install -o root -g root -m 755 "${BUNDLE_DIR}/scripts/xl1ctl" /usr/local/bin/xl1ctl

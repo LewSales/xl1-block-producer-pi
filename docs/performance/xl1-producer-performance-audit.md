@@ -162,10 +162,9 @@ the entire cycle budget**. Local computation is the remainder and it is not the
 constraint: the Pi 3 B+ sat at `concurrentChecksSkipped: 0`, meaning no tick ever
 arrived while the previous one was still running.
 
-**Answering the sprint's Definition of Done, items 6 and 7:** roughly two thirds
-of candidate-pipeline latency is RPC round-trip time; the balance is local work,
-most of it inside `produceNextBlock`. Optimising the Pi cannot move the first
-number, and the first number is the larger one.
+**This first reading was wrong, and measurement reversed it — see "The stage
+names mislead" below.** The stages are named after network calls, but only about
+a third of the time inside them is network.
 
 ### Early read on the 5000 ms change
 
@@ -229,3 +228,52 @@ useful step rather than the start of a series.
 
 29 published, 0 rejected, 1.26/min against a ~53 s block interval. A share
 comparison needs a longer window than this and is not claimed here.
+
+## Connection reuse: already working (Phase 5 closed)
+
+Sampled the container's own `/proc/net/tcp{,6}` once a second for 40 s
+(no root needed — `docker exec cat`, since the container's netns is its own):
+
+- **13-15 established TLS connections at every tick**, never fewer.
+- 4 connections survived all 40 ticks; most survived 20-39. Only 2 were short-lived.
+
+That is a healthy keep-alive pool with slow turnover, not a connection per call.
+An earlier count of "21 distinct connections in 45 s" was pool churn misread as
+churn per request. **There is no keep-alive fix available here.**
+
+## The stage names mislead: most of the cycle is local, not network
+
+Measured the true network cost from *inside the same container*, same endpoint,
+same real method (`blockViewer_currentBlock`, 3677-byte response):
+
+| | latency |
+|---|---|
+| cold connection (full TLS handshake) | 462 ms |
+| warm connection, n=17 | min 97, **p50 106**, p90 162, max 170, mean 122 ms |
+
+Against the producer's own instrumentation for the same call:
+
+| | min | mean |
+|---|---|---|
+| bare warm HTTP round trip | 97 ms | 122 ms |
+| `headFetch` (`/statz`, n=271) | 109 ms | **299 ms** |
+
+The **minimum matches** — 109 ms against a 97-106 ms warm round trip — which
+confirms the pool is warm and that the floor is network-bound. But the **mean is
+2.4x** the network cost. That excess is local: JSON deserialization of the block,
+bound-witness hash and signature validation, zod schema parsing, and event-loop
+queuing — all on a Pi 3 B+ core.
+
+Recomposing the 837 ms cycle: about 2.3 RPC calls per cycle at roughly 110 ms of
+real network each is **~250 ms, or roughly 30%**. The remaining ~70% is local
+computation inside stages that are *named* after network calls.
+
+**This inverts the earlier conclusion.** Optimising the host is not pointless —
+it is where most of the cycle actually goes. The hardware caveat stands only in
+the sense that the node still finishes inside its budget
+(`concurrentChecksSkipped: 0`), so this is headroom, not a live problem.
+
+The next place to look is therefore Phase 9 (the cryptographic hot path), not
+Phase 4 or 5: specifically whether incoming block validation re-verifies
+signatures the producer does not need re-verified, and whether identity
+derivation is repeated per cycle.

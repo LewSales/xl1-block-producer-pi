@@ -69,6 +69,16 @@ run
 check "last published block captured" "$(field "['lastPublishedBlock']")" "575735"
 check "publish timestamp captured"    "$([[ -n "$(field "['lastPublishedAt']")" ]] && echo yes || echo no)" "yes"
 
+# The real line carries a hash after the height, and reading the last digit run
+# off it produced a slice of the hash. When that slice began with a zero the
+# height was emitted as 0540 — digits, but not a JSON number. jq 1.7 accepts it,
+# so validation passed and the dashboard's JSON.parse took the Producer panel
+# down instead. `field` parses strictly, so an invalid snapshot fails here too.
+mkdocker eee 5.4.0 "[xl1-producer] Published block: 579361 [0xdeadbeef0540]"
+rm -f "${WORK}/state/.collect-cursor" "${WORK}/state/.last-published"
+run
+check "height read past the hash"     "$(field "['lastPublishedBlock']")" "579361"
+
 # The container disappearing mid-cycle must produce a valid document, not commas.
 cat > "${WORK}/bin/docker" <<'INNER'
 #!/usr/bin/env bash

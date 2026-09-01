@@ -63,7 +63,7 @@ cache_age() {
 # told to `rm` a specific dotfile — and until they are, a short read leaves a
 # field empty, the emitted JSON fails validation, and the previous snapshot is
 # served unchanged for up to six hours while the page looks perfectly alive.
-CACHE_SCHEMA=3
+CACHE_SCHEMA=4
 SCHEMA_STAMP="${STATE_DIR}/.cache-schema"
 if [[ "$(cat "${SCHEMA_STAMP}" 2>/dev/null || echo 0)" != "${CACHE_SCHEMA}" ]]; then
   rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}" "${STATE_DIR}/.last-published"
@@ -130,9 +130,15 @@ echo "${TOTAL}" > "${COUNTER}"
 LAST_PUBLISHED=""; LAST_BLOCK=""
 if (( NEW_PUBLISHED > 0 )); then
   LAST_PUBLISHED="${COLLECTED_AT}"
+  # The number the line names, not the last number on it. The producer writes
+  #   [xl1-producer] Published block: 579361 [0x1528a9…82ff0fd7]
+  # and taking the last digit run returned a fragment of the hash instead —
+  # "78", "871", "0540". Wrong on every line that carries a hash, and when the
+  # fragment began with a zero the snapshot was not even valid JSON.
+  #
   # Last match in the slice, since a busy window can contain several.
-  LAST_BLOCK="$(printf '%s' "${NEW_LOG}" | grep -i 'published block' \
-    | grep -oE '[0-9]{2,}' | tail -n1)"
+  LAST_BLOCK="$(printf '%s' "${NEW_LOG}" \
+    | grep -oiE 'published block:?[[:space:]]+[0-9]+' | tail -n1 | grep -oE '[0-9]+$')"
   printf '%s\t%s\n' "${LAST_PUBLISHED}" "${LAST_BLOCK}" > "${STATE_DIR}/.last-published"
 elif [[ -s "${STATE_DIR}/.last-published" ]]; then
   IFS=$'\t' read -r LAST_PUBLISHED LAST_BLOCK < "${STATE_DIR}/.last-published"
@@ -358,19 +364,38 @@ fi
     printf '},'
   fi
   [[ -n "${LAST_PUBLISHED}" ]] && printf '"lastPublishedAt":"%s",' "${LAST_PUBLISHED}"
-  [[ "${LAST_BLOCK}" =~ ^[0-9]+$ ]] && printf '"lastPublishedBlock":%s,' "${LAST_BLOCK}"
+  # JSON-number shape, not merely "digits": 0540 is digits and is not a number,
+  # and this printf is the last thing standing between a bad read and a snapshot
+  # the dashboard cannot parse.
+  [[ "${LAST_BLOCK}" =~ ^(0|[1-9][0-9]*)$ ]] && printf '"lastPublishedBlock":%s,' "${LAST_BLOCK}"
   printf '"recentLog":%s' "${LOG_JSON}"
   printf '}\n'
 } > "${OUT}.tmp"
 
-# Validate before publishing so the dashboard never reads a half-written file.
-# jq first: it is the only one of the three that provision.sh installs. Falling
-# back to node or python3 meant a host with neither failed validation on every
-# cycle and never delivered a first snapshot — reported identically to genuinely
-# corrupt JSON.
-if jq -e . "${OUT}.tmp" >/dev/null 2>&1 \
-   || node -e "JSON.parse(require('fs').readFileSync('${OUT}.tmp','utf8'))" 2>/dev/null \
-   || python3 -c "import json,sys; json.load(open('${OUT}.tmp'))" 2>/dev/null; then
+# Validate before publishing, so the dashboard never reads a document it cannot
+# parse.
+#
+# One parser decides, and it is the strictest one installed — not a chain of
+# `||`, which publishes whatever the most *permissive* parser on the box will
+# accept. jq 1.7 reads `0540` as the number 540; Node, which is what actually
+# reads this file, rejects it. So a jq-blessed snapshot took the entire Producer
+# panel down with "Unexpected number in JSON at position 452" while this script
+# reported a clean cycle. Node first because it is the consumer, python3 next
+# because it is on every Debian, jq last because provision.sh installs it and
+# nothing else — and no validation at all is worse than a lenient one.
+valid_json() {
+  if command -v node >/dev/null 2>&1; then
+    node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$1" 2>/dev/null
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null
+  elif command -v jq >/dev/null 2>&1; then
+    jq -e . "$1" >/dev/null 2>&1
+  else
+    echo "xl1-collect: no JSON parser installed, publishing unvalidated" >&2
+  fi
+}
+
+if valid_json "${OUT}.tmp"; then
   mv "${OUT}.tmp" "${OUT}"
   chmod 644 "${OUT}"
 else

@@ -196,6 +196,15 @@ BLOCKED_REASON=""; BLOCKED_KEY=""
 ELIG_LOG="$(docker logs --since "${ELIGIBILITY_WINDOW}" "${CONTAINER}" 2>&1 | tail -n 4000 | tr '[:upper:]' '[:lower:]')"
 if [[ -n "${ELIG_LOG}" ]]; then
   # needle|reason — the protocol's own phrasing on the left, plain English right.
+  # Every needle here is an authorization or stake gate — a reason the node is
+  # not *allowed* to produce. `behind-finalized-head` was in this list and did
+  # not belong: it is emitted per candidate, by every producer, whenever the
+  # head advances during a build. On a 3 B+ that is the ordinary steady state,
+  # so it pinned "Producer cannot produce" on a node that had produced 179
+  # blocks and paged high priority every six hours forever. Losing a race is not
+  # ineligibility. The condition worth waking someone for is not winning at all,
+  # and xl1-alert.sh measures that directly from the chain as `not-producing`.
+  #
   # needle|key|reason. The key is stable and machine-readable; the reason is
   # prose and may be reworded. Anything classifying these must use the key —
   # whether a complaint matters depends on the network, and that decision is
@@ -216,7 +225,6 @@ no-intent|no-intent|no stake intent declared
 unseasoned-or-understaked|unseasoned|stake too new or too small
 unseasoned|unseasoned|stake not yet seasoned
 insufficient-self-bond|self-bond|self-bond below the minimum
-behind-finalized-head|too-slow|blocks rejected: built too slowly for the chain
 PATTERNS
 fi
   # Only cache a result we actually derived. An empty log means `docker logs`

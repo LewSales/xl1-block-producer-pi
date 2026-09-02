@@ -45,16 +45,23 @@
      Multi-column packs top to bottom and balances the column heights itself, so
      there is no leftover row and no hole under a short card. break-inside keeps
      a card whole; column-span lets the two full-width cards break out. */
-  main { padding: 20px; max-width: 1400px; margin: 0 auto;
-         columns: 4 310px; column-gap: 16px; }
-  main > * { break-inside: avoid; margin: 0 0 16px; }
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  main { padding: 20px; max-width: 1720px; margin: 0 auto;
+         columns: 320px; column-gap: 16px; }
+  /* break-inside on the CARD, not on the wrapper. A stack is two cards that
+     want to be together, not one indivisible slab — making the wrapper
+     unbreakable handed the balancer a 1000px block it could not move, so one
+     column ran to the floor while two others finished halfway up. Now a stack
+     is a plain block: the balancer keeps it together when it fits and splits it
+     when it must, and no card is ever cut in half. */
+  main > * { margin: 0 0 16px; }
+  section { break-inside: avoid; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 13px 14px; }
   section h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
-  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; align-items: baseline; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; align-items: baseline; font-size: 13px; }
   dt { color: var(--muted); white-space: nowrap; }
   dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-  .big { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .big { font-size: 23px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
   .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
   .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
@@ -124,8 +131,8 @@
 
   /* Stat tiles. A dense grid reads faster than a long definition list once
      there are more than about six figures to take in at a glance. */
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(126px, 1fr)); gap: 10px; margin-top: 12px; }
-  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; margin-top: 10px; }
+  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
   .tile .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
   .tile .v { font-size: 19px; font-weight: 640; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; margin-top: 4px; }
   .tile .n { color: var(--muted); font-size: 11px; margin-top: 2px; }
@@ -143,7 +150,10 @@
   /* One block holding two cards, stacked, kept whole by break-inside above.
      The pairing survives the column layout: a stack is a single item, so its
      two cards cannot be split across a column boundary. */
-  .stack { display: flex; flex-direction: column; gap: 16px; }
+  /* Deliberately a plain block rather than flex or grid: a flex container
+     cannot fragment across a column boundary in most engines, which is what
+     made the wrapper unbreakable in the first place. */
+  .stack > section { margin: 0 0 16px; }
 
   /* Per-card accent. One hue per subject, carried by the heading, the rule
      under it and that card's sparkline, so a glance finds the right panel
@@ -603,7 +613,7 @@ function render(d) {
       <h2><span class="ico" aria-hidden="true">🎯</span>Operations</h2>
       ${ops.score !== undefined
         ? `<div class="big">${num(ops.score)} <span style="font-size:14px;color:var(--muted)">/ 100</span></div>
-           <div class="sub">mean of ${num(ops.components.length)} measured component(s) — every one shown below</div>
+           <div class="sub" title="The mean of whichever components could be measured. A component with no data is left out rather than scored zero.">mean of ${num(ops.components.length)} measured component(s)</div>
            ${ops.components.map((c) => `<div class="score-row" title="${esc(c.why)}">
               <span class="sub">${esc(c.label)}</span><span class="mono">${num(c.value)}</span>
               <span class="score-bar ${cls(c.value)}"><i style="width:${Math.max(2, c.value)}%"></i></span>
@@ -640,11 +650,9 @@ function render(d) {
             <span class="lat-bar"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
           </div>`).join('')
         })()}
-        <div class="sub" style="margin-top:6px">
-          Typical (p50) per stage. These nest — a cycle contains the head fetch and
-          the build, and the build contains the mempool calls — so they are not a
-          waterfall and do not sum to the cycle.
-        </div>` : ''}
+        <div class="sub" style="margin-top:5px"
+          title="These nest: a cycle contains the head fetch and the build, and the build contains the mempool calls. They are durations, not a waterfall, and do not sum to the cycle.">
+          p50 per stage · nested, not a waterfall</div>` : ''}
     </section>`)
   }
 
@@ -680,7 +688,7 @@ function render(d) {
     cards.push(`<section style="--c: var(--c-producer)">
       <h2><span class="ico" aria-hidden="true">⚔️</span>Candidate race</h2>
       <div class="big">${race.won !== undefined ? num(race.won) : '—'} <span style="font-size:14px;color:var(--muted)">won</span></div>
-      <div class="sub">of ${num(race.chainBlocks)} recent blocks · wins counted from the chain, not the log</div>
+      <div class="sub" title="Wins are counted from the chain scan. A log line saying &quot;Published block&quot; means submitted, not accepted.">of ${num(race.chainBlocks)} recent blocks · chain-counted</div>
       ${pulse}
       ${tiles([
         ['Built', race.built !== undefined ? num(race.built) : '—', race.observedSeconds ? mins(race.observedSeconds) : 'log window'],
@@ -729,14 +737,9 @@ function render(d) {
           <span class="lat-bar ${cls}"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
         </div>`).join('')
       })()}
-      ${lat.localMs !== undefined ? `<div class="sub" style="margin-top:8px">
-        Overhead above the wire: <strong>+${num(lat.localMs)} ms</strong> — parsing and
-        validating the answer, which is this machine, not the network.
-      </div>` : ''}
-      <div class="sub" style="margin-top:8px">
-        Measured by the producer over ${num(lat.samples)} head fetches. Costs no
-        extra requests — these counters exist whether or not this page is open.
-      </div>
+      ${lat.localMs !== undefined ? `<div class="sub" style="margin-top:7px"
+        title="The wire floor is the fastest head fetch seen — the network. Everything above it is this machine parsing and validating the answer.">
+        <strong>+${num(lat.localMs)} ms</strong> local · ${num(lat.samples)} samples</div>` : ''}
     </section>`)
   }
 
@@ -839,7 +842,7 @@ function render(d) {
       </div>
       <div class="sub" style="margin-top:8px">
         ${num(pb.scannedBlocks)} blocks sampled${pb.scannedFrom !== undefined ? ` (#${num(pb.scannedFrom)}–#${num(pb.scannedTo)})` : ''}${pb.since ? ` · since ${new Date(pb.since).toLocaleDateString()}` : ''}.
-        Totals persist across restarts. Days are ${esc(pb.dayTz ?? 'UTC')}, kept for ${num(pb.daysKept ?? 0)} days.
+        <span title="Totals persist across restarts. Day buckets are kept for ${num(pb.daysKept ?? 0)} days.">Days are ${esc(pb.dayTz ?? 'UTC')}.</span>
       </div>
       ${pb.dayTzError ? `<div class="sub warn">${esc(pb.dayTzError)}</div>` : ''}
       ${pb.daysError ? `<div class="sub warn">day history: ${esc(pb.daysError)}</div>` : ''}

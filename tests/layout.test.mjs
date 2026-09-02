@@ -93,8 +93,22 @@ test('cards pack into columns rather than wrapping onto a ragged row', () => {
   // row of its own — five items across four columns left one card beside three
   // empty columns. Multi-column balances instead, so there is no leftover row.
   const main = html.match(/main \{[^}]*\}/)[0]
-  assert.match(main, /columns:\s*4\s+310px/, 'the card area must be a balanced multi-column layout')
+  assert.match(main, /columns:\s*320px/, 'the card area must be a balanced multi-column layout')
+  // Width only, no column count: the browser fits as many as the viewport
+  // allows, so a wide monitor gets five and a tablet gets two without a query.
+  assert.doesNotMatch(main, /columns:\s*\d+\s/, 'a fixed column count stops the layout adapting to the screen')
   assert.doesNotMatch(main, /display:\s*grid/, 'a row grid reintroduces the stranded-card gap')
-  assert.match(html, /main > \* \{[^}]*break-inside:\s*avoid/, 'cards must not split across a column boundary')
   assert.match(html, /\.wide \{ column-span: all; \}/, 'full-width cards must span the columns')
+})
+
+test('a card is unbreakable but a stack is not', () => {
+  // Making the WRAPPER unbreakable handed the balancer a 1000px block it could
+  // not move: one column ran to the floor while two others finished halfway up.
+  // The card is what must stay whole; the pair is only a preference.
+  assert.match(html, /section \{ break-inside: avoid; \}/, 'a card must never be split across a column')
+  const main = html.match(/main > \* \{[^}]*\}/)[0]
+  assert.doesNotMatch(main, /break-inside/, 'the stack wrapper must stay breakable or the balancer is blocked')
+  // Flex and grid containers do not fragment across columns in most engines,
+  // which is what made the wrapper indivisible in the first place.
+  assert.doesNotMatch(html, /\.stack \{[^}]*display:\s*(flex|grid)/, 'a stack must be a plain block so it can fragment')
 })

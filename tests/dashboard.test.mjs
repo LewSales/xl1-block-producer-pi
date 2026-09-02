@@ -817,7 +817,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.1.0', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.2.2', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -841,4 +841,45 @@ test('the same cycle escalates once it actually costs work', () => {
   const b = m.derived().operations.bottleneck
   assert.equal(b.key, 'cycle')
   assert.match(b.text, /3 check\(s\) skipped, 1 publish\(es\) rejected/)
+})
+
+// Two tiles that exist to answer "is it still happening", which no cumulative
+// number can. Both are computed from history already held.
+
+test('head age comes from the newest block own timestamp', () => {
+  m.production.recent = [
+    { n: 1, mine: false, t: Date.now() - 600_000 },
+    { n: 2, mine: true, t: Date.now() - 45_000 },
+  ]
+  const age = m.derived().headAgeSeconds
+  assert.ok(age >= 44 && age <= 47, `expected ~45s, got ${age}`)
+})
+
+test('no timestamped block means no head age, not a zero', () => {
+  // Zero would read as "the chain just moved", which is the opposite of what an
+  // absent reading means.
+  m.production.recent = [{ n: 1, mine: false }]
+  assert.equal(m.derived().headAgeSeconds, undefined)
+})
+
+test('last payout finds the most recent increase, not the last sample', () => {
+  const now = Date.now()
+  m.history.reward.length = 0
+  m.history.reward.push(
+    { t: now - 900_000, v: 100 },
+    { t: now - 600_000, v: 150 },   // a payout
+    { t: now - 300_000, v: 150 },   // flat: not a payout
+    { t: now - 60_000, v: 150 },
+  )
+  const d = m.derived()
+  assert.equal(d.lastPayoutXl1, 50, 'the increase, not the balance')
+  assert.ok(d.lastPayoutSeconds >= 599 && d.lastPayoutSeconds <= 602,
+    `should date from the increase ten minutes ago, got ${d.lastPayoutSeconds}`)
+})
+
+test('a balance that has never moved reports no payout at all', () => {
+  const now = Date.now()
+  m.history.reward.length = 0
+  m.history.reward.push({ t: now - 600_000, v: 50 }, { t: now, v: 50 })
+  assert.equal(m.derived().lastPayoutSeconds, undefined)
 })

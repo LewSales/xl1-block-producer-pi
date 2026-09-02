@@ -144,7 +144,14 @@
   .spark path.area { fill: color-mix(in srgb, var(--accent) 13%, transparent); stroke: none; }
   .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
   .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
+  .trendbars { display: flex; align-items: flex-end; gap: 4px; margin-top: 10px; }
+  .trendbar { flex: 1 1 0; min-width: 8px; display: flex; flex-direction: column; align-items: stretch; }
+  .trendbar-fill { border-radius: 3px 3px 0 0; background: var(--c, var(--accent)); min-height: 3px; }
+  .trendbar { height: 56px; justify-content: flex-end; }
+  .trendbar-n { font-size: 10px; color: var(--muted); text-align: center; margin-top: 3px;
+                font-variant-numeric: tabular-nums; }
   .brand { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+  .origin { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
   .brand svg { flex: none; }
   .wide { column-span: all; }
   /* One block holding two cards, stacked, kept whole by break-inside above.
@@ -215,16 +222,7 @@
        theme instead of shipping two versions. currentColor for the ring so it
        reads in light and dark; the gold bars are the only fixed colour. -->
   <span class="brand" id="brand" hidden>
-    <svg viewBox="0 0 48 48" width="18" height="18" role="img" aria-label="brand mark">
-      <g fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="butt">
-        <path d="M23 5 A19 19 0 0 0 23 43"/>
-        <path d="M25 5 A19 19 0 0 1 25 43"/>
-        <path d="M11.5 16 L21 24 L11.5 32"/>
-        <path d="M36.5 16 L27 24 L36.5 32"/>
-      </g>
-      <rect x="9" y="22" width="12" height="4" fill="#c99a3b"/>
-      <rect x="27" y="22" width="12" height="4" fill="#c99a3b"/>
-    </svg>
+    <span id="brandmark"></span>
     <span class="mono" id="build">—</span>
   </span>
   <span class="pill" id="overall">connecting…</span>
@@ -247,6 +245,28 @@ const dur = (s) => {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60)
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`
 }
+// Provenance marks. xl1-cli is XYO's own software; this dashboard is not, and
+// the page says so in the header already. Putting the two side by side in
+// Software & host makes the distinction concrete where the versions are read:
+// one line is theirs, the next is ours.
+//
+// The XYO mark is drawn as a plain hexagon outline rather than a facsimile of
+// their logo — enough to read as "theirs" without passing itself off as their
+// trademark on a page that exists to say it is unaffiliated.
+const MARK_XYO = `<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" style="vertical-align:-1px">
+  <path d="M12 2.5 L20.5 7.25 L20.5 16.75 L12 21.5 L3.5 16.75 L3.5 7.25 Z"
+        fill="none" stroke="currentColor" stroke-width="2"/></svg>`
+const MARK_OXYON = `<svg viewBox="0 0 48 48" width="12" height="12" aria-hidden="true" style="vertical-align:-1px">
+  <g fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="butt">
+    <path d="M23 5 A19 19 0 0 0 23 43"/><path d="M25 5 A19 19 0 0 1 25 43"/>
+    <path d="M11.5 16 L21 24 L11.5 32"/><path d="M36.5 16 L27 24 L36.5 32"/>
+  </g>
+  <rect x="9" y="22" width="12" height="4" fill="#c99a3b"/>
+  <rect x="27" y="22" width="12" height="4" fill="#c99a3b"/></svg>`
+const origin = (kind) => kind === 'official'
+  ? `<span class="origin" title="xl1-cli is XYO's own software, running unmodified in the container">${MARK_XYO} official</span>`
+  : `<span class="origin" title="This dashboard is an independent project — not built, endorsed, or supported by XYO">${MARK_OXYON} unofficial</span>`
+
 const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
 const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v, n]) =>
   `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div>${n ? `<div class="n">${n}</div>` : ''}</div>`).join('')}</div>`
@@ -319,6 +339,7 @@ function render(d) {
   // show, so an older dashboard that reports no build does not render an empty
   // badge next to a logo.
   const brand = $('brand')
+  $('brandmark').innerHTML = MARK_OXYON.replace('width="12" height="12"', 'width="17" height="17"')
   if (d.build?.version) {
     $('build').textContent = d.build.commit && d.build.commit !== 'unknown'
       ? `${d.build.version} · ${d.build.commit}`
@@ -409,6 +430,11 @@ function render(d) {
       ${tiles([
         ['Block time', dv.secondsPerBlock ? `${dv.secondsPerBlock}s` : '—', 'observed'],
         ['Chain rate', dv.blocksPerHourChain !== undefined ? `${num(dv.blocksPerHourChain)}/h` : '—', 'blocks per hour'],
+        // Age of the newest block we have seen. Climbing past a couple of block
+        // times means the chain has stalled, which nothing else here would say.
+        ['Head age', dv.headAgeSeconds !== undefined
+          ? `<span class="${dv.headAgeSeconds > 180 ? 'warn' : ''}">${dv.headAgeSeconds}s</span>` : '—',
+          'since newest block'],
         ['Watching', dv.observedSeconds ? dur(dv.observedSeconds) : '—', `${num(dv.samples)} samples`],
       ])}
     </section>`)
@@ -456,6 +482,10 @@ function render(d) {
         ['Per day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—',
           dv.rewardPerDay !== undefined ? 'extrapolated' : `needs ${Math.max(0, 15 - Math.round((dv.observedSeconds ?? 0) / 60))}m more`],
         ['Blocks/hr', dv.blocksPerHourNode !== undefined ? `${num(dv.blocksPerHourNode)}` : '—', 'produced by this node'],
+        // Balance says how much; this says how recently. A node that stopped
+        // earning an hour ago has the same balance as one still earning.
+        ['Last payout', dv.lastPayoutSeconds !== undefined ? dur(dv.lastPayoutSeconds) + ' ago' : '—',
+          dv.lastPayoutXl1 !== undefined ? `+${num(dv.lastPayoutXl1)} XL1` : 'none seen yet'],
       ])}
     </section>`)
   }
@@ -484,7 +514,7 @@ function render(d) {
       <div class="big">${esc(rel.installed ?? '—')}</div>
       <div class="sub">xl1&#8209;cli in the running container</div>
       ${dl([
-        ['CLI version', lagCell],
+        ['CLI version', `${lagCell} ${origin('official')}`],
         rel.ok === false && !rel.disabled && ['Registry', `<span class="warn">${esc(rel.error ?? 'unreachable')}</span>`],
         osi && ['Host updates', osi.updates > 0 ? `<span class="warn">${num(osi.updates)} pending</span>` : '<span class="ok">none pending</span>'],
         osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],
@@ -493,7 +523,7 @@ function render(d) {
         // Ours, not XYO's. The tag never changes across deploys, so this is the
         // only thing on the page that says which dashboard build is answering.
         d.build && ['Dashboard', `<span class="mono" title="built ${esc(d.build.builtAt)}">${esc(d.build.version)}${
-          d.build.commit && d.build.commit !== 'unknown' ? ` · ${esc(d.build.commit)}` : ''}</span>`],
+          d.build.commit && d.build.commit !== 'unknown' ? ` · ${esc(d.build.commit)}` : ''}</span> ${origin('unofficial')}`],
       ])}
       ${!osi ? '<div class="sub" style="margin-top:8px">host package check off or not yet run</div>' : ''}
     </section>`)
@@ -510,8 +540,17 @@ function render(d) {
     const maxE = Math.max(1, ...recent.map((x) => x.earned))
     const totalB = days.reduce((a, x) => a + x.blocks, 0)
     const totalE = days.reduce((a, x) => a + x.earned, 0)
-    const bars = (vals, max) => `<div style="display:flex;align-items:flex-end;gap:2px;height:40px;margin-top:10px">${
-      vals.map((v) => `<div title="${esc(v.day)}: ${v.n}" style="flex:1;min-width:3px;border-radius:2px 2px 0 0;background:var(--c, var(--accent));height:${Math.max(2, (v.n / max) * 100)}%"></div>`).join('')}</div>`
+    // Thicker bars with the number under each one. A bar chart with no scale is
+    // a shape; the value is what makes it a measurement. Only the last few days
+    // are labelled when the window is long, so the labels never collide.
+    const bars = (vals, max, fmt = (n) => num(n)) => {
+      const label = vals.length <= 10
+      return `<div class="trendbars">${vals.map((v) => `
+        <div class="trendbar" title="${esc(v.day)}: ${fmt(v.n)}">
+          <div class="trendbar-fill" style="height:${Math.max(3, (v.n / max) * 100)}%"></div>
+          ${label ? `<div class="trendbar-n">${fmt(v.n)}</div>` : ''}
+        </div>`).join('')}</div>`
+    }
 
     // Nothing recorded yet is not zero blocks and a peak of one. Say what is
     // actually true — that it has not been running long enough — rather than
@@ -528,11 +567,13 @@ function render(d) {
         <div class="big">${num(totalB)}</div>
         <div class="sub">blocks over ${num(days.length)} day(s) · ${num(tr.points)} samples</div>
         ${bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB)}
-        <div class="sparkfoot"><span>blocks/day</span><span>peak ${num(maxB)}</span></div>
-        ${bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE)}
-        <div class="sparkfoot"><span>XL1/day</span><span>peak ${num(maxE)}</span></div>
+        <div class="sparkfoot"><span>blocks/day</span><span>best ${num(maxB)} · avg ${num(Math.round(totalB / days.length))}</span></div>
+        ${bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE, (n) => num(Math.round(n)))}
+        <div class="sparkfoot"><span>XL1/day</span><span>best ${num(Math.round(maxE))} · avg ${num(Math.round(totalE / days.length))}</span></div>
         ${tiles([
           ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
+          ['Best day', num(maxB), 'blocks'],
+          ['Avg/day', num(Number((totalB / days.length).toFixed(1))), 'blocks'],
           ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],
         ])}
       `}
@@ -694,6 +735,10 @@ function render(d) {
         ['Built', race.built !== undefined ? num(race.built) : '—', race.observedSeconds ? mins(race.observedSeconds) : 'log window'],
         ['Lost', race.lostTotal !== undefined ? num(race.lostTotal) : '—', 'rejected locally'],
         ['Retries', race.retries !== undefined ? num(race.retries) : '—', 'rebuilt and resubmitted'],
+        // The rate the whole card is about, and the one number here that is
+        // comparable between machines: wins over the chain blocks we watched.
+        ['Win rate', (race.won !== undefined && race.chainBlocks)
+          ? `${((race.won / race.chainBlocks) * 100).toFixed(1)}%` : '—', 'of recent blocks'],
       ])}
       ${reasons}
     </section>`)

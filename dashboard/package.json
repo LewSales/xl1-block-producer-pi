@@ -1,6 +1,6 @@
 {
   "name": "xl1-pi-dashboard",
-  "version": "2.1.0",
+  "version": "2.2.2",
   "private": true,
   "type": "module",
   "description": "Local status dashboard for an XL1 block producer on a Raspberry Pi",

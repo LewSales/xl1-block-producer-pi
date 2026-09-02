@@ -1227,6 +1227,32 @@ function derived() {
     observedSeconds,
     samples: history.height.length,
 
+    // Age of the newest block seen, from the block's own $epoch. The chain
+    // height alone cannot say whether the chain is moving — a stalled chain and
+    // a healthy one show the same number until you watch it for a while.
+    headAgeSeconds: (() => {
+      const last = (production.recent ?? []).filter((b) => Number.isFinite(b.t)).at(-1)
+      return last ? Math.max(0, Math.round((Date.now() - last.t) / 1000)) : undefined
+    })(),
+
+    // When the reward balance last moved, and by how much. The balance says how
+    // much has been earned; this says whether it is still being earned, which a
+    // cumulative figure can never show — a node that stopped an hour ago reads
+    // identically to one still winning.
+    ...(() => {
+      const r = history.reward ?? []
+      for (let i = r.length - 1; i > 0; i--) {
+        const delta = Number(r[i].v) - Number(r[i - 1].v)
+        if (Number.isFinite(delta) && delta > 0) {
+          return {
+            lastPayoutSeconds: Math.max(0, Math.round((Date.now() - r[i].t) / 1000)),
+            lastPayoutXl1: Number(delta.toFixed(4)),
+          }
+        }
+      }
+      return {}
+    })(),
+
     // Operator summaries, all of them arithmetic over data already in this
     // payload. No new request, no new telemetry, no work in the producer.
     operations: (() => {

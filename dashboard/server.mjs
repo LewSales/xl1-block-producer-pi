@@ -6,7 +6,7 @@
 //   node    — producer container state, written by the host collector timer
 //   system  — Pi vitals from /proc and /sys (temp, throttle, RAM, swap, disk)
 
-import { readFile, appendFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { readFile, readdir, appendFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createServer } from 'node:http'
 import { statfs, readFileSync } from 'node:fs'
@@ -85,6 +85,25 @@ const BUILD_STAMP = (() => {
 // statfs('/') inside a container reports the overlay filesystem, not the SD
 // card. Point this at a host bind-mount so the disk figure is the real one.
 const DISK_PATH = envStr('DASH_DISK_PATH', '/var/lib/xl1')
+/** The fix for "the state directory is not there", in the operator's own terms.
+ *  DASH_HOST_PLATFORM says which host this is; unset means the Pi, so the unit
+ *  file that has never set it keeps the wording it has always had.
+ *
+ *  The remedy is not the same sentence on the two hosts, and the wrong one
+ *  sends a Windows operator off to edit a systemd unit that does not exist on
+ *  their machine. On Windows the cause is usually not a missing mount in the
+ *  compose file at all: Docker Desktop resolves a bind mount created from
+ *  inside WSL through a per-distro shim, and that shim is gone once Docker
+ *  Desktop restarts — which it does before the WSL distro is up. The restart
+ *  policy then brings the container back onto a source path that no longer
+ *  resolves, the mount silently becomes an empty directory, and it stays that
+ *  way until the container is recreated. Nothing about the compose file is
+ *  wrong; only the container running from it, which is why the remedy is a
+ *  recreate and not an edit. */
+const mountRemedy = () => (envStr('DASH_HOST_PLATFORM', 'pi') === 'windows'
+  ? 'recreate the container from PowerShell (.\\scripts\\xl1ctl.ps1 restart)'
+  : 'xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)')
+
 // Empty is a real setting: no token required.
 const TOKEN = process.env.DASH_TOKEN ?? ''
 const CHAIN_POLL_MS = envNum('DASH_CHAIN_POLL_MS', 15_000, 1000)
@@ -246,13 +265,12 @@ async function persistTrend() {
         trendError = undefined
         return
       } catch {
-        trendError = `${dirname(TREND_FILE)} does not exist and cannot be created`
-          + ' — xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)'
+        trendError = `${dirname(TREND_FILE)} does not exist and cannot be created — ${mountRemedy()}`
         return
       }
     }
     trendError = error.code === 'EACCES' || error.code === 'EROFS'
-      ? `${dirname(TREND_FILE)} is mounted read-only — update xl1-dashboard.service and daemon-reload`
+      ? `${dirname(TREND_FILE)} is mounted read-only — ${mountRemedy()}`
       : error.message?.slice(0, 160)
   }
 }
@@ -604,13 +622,12 @@ async function persistPeers(force = false) {
         await mkdir(dirname(PEERS_FILE), { recursive: true })
         peersError = undefined
       } catch {
-        peersError = `${dirname(PEERS_FILE)} does not exist and cannot be created`
-          + ' — xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)'
+        peersError = `${dirname(PEERS_FILE)} does not exist and cannot be created — ${mountRemedy()}`
       }
       return
     }
     peersError = error.code === 'EACCES' || error.code === 'EROFS'
-      ? `${dirname(PEERS_FILE)} is mounted read-only — update xl1-dashboard.service and daemon-reload`
+      ? `${dirname(PEERS_FILE)} is mounted read-only — ${mountRemedy()}`
       : error.message?.slice(0, 160)
   }
 }
@@ -1041,10 +1058,33 @@ async function pollNode() {
     state.node = {
       ok: false,
       error: error.code === 'ENOENT'
-        ? `collector has not written ${STATUS_FILE} yet`
+        ? await missingStatusReason()
         : error.message?.slice(0, 200),
     }
   }
+}
+
+/** Two different faults reach this container as the same ENOENT, and only one
+ *  of them is about the collector. A collector that has not run yet leaves the
+ *  rest of the state directory behind it — the trend store, the scan cursors.
+ *  A state directory holding nothing at all is not an idle collector: it is a
+ *  bind mount that is no longer attached to the directory the collector writes
+ *  to, and every panel fed from that file goes blank while the host side is
+ *  perfectly healthy. Sending an operator to look at the collector for that one
+ *  costs an afternoon, so say both things and let the empty directory be the
+ *  evidence. */
+async function missingStatusReason(file = STATUS_FILE) {
+  try {
+    const dir = dirname(file)
+    const entries = await readdir(dir)
+    if (entries.length === 0) {
+      return `${dir} is empty — either the collector has never run, or the state`
+        + ` bind mount is not attached to the directory it writes to: ${mountRemedy()}`
+    }
+  } catch {
+    // Cannot list it either. The plain missing-file wording is still true.
+  }
+  return `collector has not written ${file} yet`
 }
 
 // --------------------------------------------------------------- system source
@@ -1660,7 +1700,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

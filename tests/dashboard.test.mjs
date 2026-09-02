@@ -136,6 +136,43 @@ test('a collector that never wrote a snapshot is reported', () => {
   )
 })
 
+test('an empty state directory is not blamed on the collector alone', async () => {
+  // The two faults arrive as the same ENOENT. A state directory with the rest
+  // of the collector's files in it is a collector that has not written yet; one
+  // with nothing in it at all is a bind mount that came loose from the host —
+  // on Windows, after Docker Desktop restarted a container before WSL was up.
+  // Reporting the first for the second sends an operator to inspect a collector
+  // that is writing every thirty seconds.
+  const { mkdtemp: mt, writeFile: wf } = await import('node:fs/promises')
+  const empty = await mt(join(tmpdir(), 'xl1-mount-'))
+  const populated = await mt(join(tmpdir(), 'xl1-mount-'))
+  await wf(join(populated, '.collect-cursor'), '582000\n')
+
+  const detached = await m.missingStatusReason(join(empty, 'producer-status.json'))
+  assert.match(detached, /is empty/)
+  assert.match(detached, /bind mount/, 'an empty directory has to name the mount as a suspect')
+
+  const idle = await m.missingStatusReason(join(populated, 'producer-status.json'))
+  assert.match(idle, /collector has not written/)
+  assert.doesNotMatch(idle, /bind mount/, 'a populated directory is a quiet collector, not a lost mount')
+})
+
+test('the mount remedy is the one for the host it is printed on', () => {
+  // Same source runs on both bundles. A Windows operator told to daemon-reload
+  // a systemd unit goes looking for a file that is not on their machine.
+  const was = process.env.DASH_HOST_PLATFORM
+  try {
+    delete process.env.DASH_HOST_PLATFORM
+    assert.match(m.mountRemedy(), /systemctl daemon-reload/, 'unset means the Pi')
+    process.env.DASH_HOST_PLATFORM = 'windows'
+    assert.match(m.mountRemedy(), /xl1ctl\.ps1 restart/)
+    assert.doesNotMatch(m.mountRemedy(), /systemctl/)
+  } finally {
+    if (was === undefined) delete process.env.DASH_HOST_PLATFORM
+    else process.env.DASH_HOST_PLATFORM = was
+  }
+})
+
 test('a blocked producer surfaces every real fault', async () => {
   baselineHealthyState()
   await loadSnapshot('blocked.json')

@@ -46,14 +46,14 @@ test('cards are ordered by what an operator needs, not by build order', () => {
   assert.deepEqual(order, [
     'Producer cannot produce',
     'Producer',
-    'Software & host',      // tied to Producer: what is running, is it right
+    'Raspberry Pi',         // the process, and the machine under it
     'Candidate race',
     'Latency',
     'Operations',
     'Chain',
-    'Raspberry Pi',
-    'Rewards',
     'Trends',
+    'Rewards',
+    'Software & host',
     'Producer standings',   // full width, so second to last
     'Producer log — newest first (40 lines)',
   ])
@@ -72,10 +72,10 @@ test('paired cards become one grid item so the second sits below the first', () 
   const items = layout()
   const stacked = items.filter((h) => h.startsWith('<div class="stack">')).map(titlesOf)
   assert.deepEqual(stacked, [
-    ['Producer', 'Software & host'],
+    ['Producer', 'Raspberry Pi'],
     ['Candidate race', 'Latency'],
-    ['Chain', 'Raspberry Pi'],
-    ['Rewards', 'Trends'],
+    ['Chain', 'Trends'],
+    ['Rewards', 'Software & host'],
   ])
   assert.equal(items.length, ALL.length - 4, 'each pair collapses two cards into one grid item')
 })

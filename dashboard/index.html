@@ -955,15 +955,15 @@ function render(d) {
   const CARD_RANK = {
     'Producer cannot produce': 0,
     Producer: 1,
-    'Software & host': 2,
+    'Raspberry Pi': 2,
+    Host: 2,
     'Candidate race': 3,
     Latency: 4,
     Operations: 5,
     Chain: 6,
-    'Raspberry Pi': 7,
-    Host: 7,
+    Trends: 7,
     Rewards: 8,
-    Trends: 9,
+    'Software & host': 9,
     'Producer standings': 10,
     'Producer log': 11,
   }
@@ -991,11 +991,11 @@ function render(d) {
   // making the grid ragged: eleven cards of wildly different length left holes
   // wherever a short one sat beside a tall one.
   const PAIRS = [
-    ['Producer', 'Software & host'],   // what is running, and is it the right version
+    ['Producer', 'Raspberry Pi'],      // the process, and the machine under it
+    ['Producer', 'Host'],              // same, when the host is not a Pi
     ['Candidate race', 'Latency'],     // are we winning, and is speed why not
-    ['Chain', 'Raspberry Pi'],         // the chain, and the box keeping up with it
-    ['Chain', 'Host'],                 // same, when the host is not a Pi
-    ['Rewards', 'Trends'],             // what came in, and is it rising
+    ['Chain', 'Trends'],               // the chain now, and the chain over days
+    ['Rewards', 'Software & host'],    // the earnings, and the build earning them
   ]
   const titleOf = (html) => {
     const m = html.match(/<h2[^>]*>(?:\s*<span[^>]*>[^<]*<\/span>)?\s*([^<]+)/)

@@ -66,6 +66,10 @@ if [[ ! -d "${SDK}" ]]; then
   printf '  %susing a stubbed SDK (real one not installed)%s\n' "${DIM}" "${RESET}"
 fi
 if node --test "${HERE}/dashboard.test.mjs"; then ok "dashboard tests passed"; else bad "dashboard tests failed"; fi
+# Layout is asserted separately: it lives in index.html, needs no SDK, and
+# breaks silently — a new card lands wherever it was written and a pair quietly
+# unpairs, with nothing failing until someone looks at a screenshot.
+if node --test "${HERE}/layout.test.mjs"; then ok "layout tests passed"; else bad "layout tests failed"; fi
 (( STUBBED )) && rm -rf "${ROOT}/dashboard/node_modules"
 
 step "Panel resilience"

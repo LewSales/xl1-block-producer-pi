@@ -37,7 +37,13 @@
   .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
   .pill.degraded { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
   .pill.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 32%, transparent); }
-  main { padding: 20px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); max-width: 1400px; }
+  /* align-items: start, not the default stretch. Grid rows are as tall as the
+     tallest card in them, and stretching made a short card — Software & host is
+     five rows — grow into a bordered box mostly full of nothing next to a tall
+     Producer. Cards now end where their content does; the leftover is grid gap
+     rather than empty card. */
+  main { padding: 20px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+         align-items: start; max-width: 1400px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
   section h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
   dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; align-items: baseline; }
@@ -128,6 +134,9 @@
   .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
   .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
   .wide { grid-column: 1 / -1; }
+  /* One grid item holding two cards, stacked. align-content: start so the pair
+     ends at its content like every other card rather than stretching. */
+  .stack { display: grid; gap: 16px; align-content: start; }
 
   /* Per-card accent. One hue per subject, carried by the heading, the rule
      under it and that card's sparkline, so a glance finds the right panel
@@ -832,19 +841,28 @@ function render(d) {
   // Where each of those actually goes. Kept separate from the match list so the
   // matching order (longest-prefix-first) cannot be confused with the display
   // order, which is the bug that would put the log second.
+  //
+  // Pairs sit next to each other because they answer one question between them:
+  // Producer with Software & host (what is running, is it the right version),
+  // Candidate race with Latency (are we winning, and is speed why not), Rewards
+  // with Trends (what came in, and is it rising).
+  //
+  // The last two are the full-width ones. Standings is a seven-row table and the
+  // log is a scroll box; both stretch edge to edge, so anything after them would
+  // read as an afterthought below a wall. Standings second to last, log last.
   const CARD_RANK = {
     'Producer cannot produce': 0,
     Producer: 1,
     'Software & host': 2,
     'Candidate race': 3,
-    Operations: 4,
-    Chain: 5,
-    Latency: 6,
-    'Producer standings': 7,
-    Rewards: 8,
+    Latency: 4,
+    Operations: 5,
+    Chain: 6,
+    Rewards: 7,
+    Trends: 8,
     'Raspberry Pi': 9,
     Host: 9,
-    Trends: 10,
+    'Producer standings': 10,
     'Producer log': 11,
   }
   const rankOf = (html) => {
@@ -856,11 +874,35 @@ function render(d) {
     return key === undefined ? 50 : CARD_RANK[key]
   }
   // Stable sort, so cards sharing a rank keep the order they were built in.
-  $('grid').innerHTML = cards
+  const ordered = cards
     .map((html, i) => [rankOf(html), i, html])
     .sort((a, b) => a[0] - b[0] || a[1] - b[1])
     .map(([, , html]) => html)
-    .join('')
+
+  // Ordering alone only makes a pair adjacent, and on a wide grid adjacent means
+  // side by side. To actually put Latency UNDER Candidate race at every width,
+  // the two are wrapped in one grid item and stacked inside it. Deterministic,
+  // and each card keeps its own header rather than being merged into one.
+  const PAIRS = [['Candidate race', 'Latency'], ['Rewards', 'Trends']]
+  const titleOf = (html) => {
+    const m = html.match(/<h2[^>]*>(?:\s*<span[^>]*>[^<]*<\/span>)?\s*([^<]+)/)
+    return m ? m[1].replaceAll('&amp;', '&').trim() : ''
+  }
+  const out = []
+  for (let i = 0; i < ordered.length; i++) {
+    const a = titleOf(ordered[i])
+    const b = i + 1 < ordered.length ? titleOf(ordered[i + 1]) : ''
+    // Only pair when BOTH are present. A card hidden for want of data must not
+    // leave its partner wrapped in a stack of one, which would column it oddly.
+    const pair = PAIRS.find(([x, y]) => a.startsWith(x) && b.startsWith(y))
+    if (pair) {
+      out.push(`<div class="stack">${ordered[i]}${ordered[i + 1]}</div>`)
+      i++
+    } else {
+      out.push(ordered[i])
+    }
+  }
+  $('grid').innerHTML = out.join('')
   $('foot').innerHTML = (d.problems?.length
     ? `<ul class="problems">${d.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`
     : '')

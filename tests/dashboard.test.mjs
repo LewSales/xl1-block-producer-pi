@@ -907,3 +907,31 @@ test('a balance that has never moved reports no payout at all', () => {
   m.history.reward.push({ t: now - 600_000, v: 50 }, { t: now, v: 50 })
   assert.equal(m.derived().lastPayoutSeconds, undefined)
 })
+
+// Blocks split by window. A cumulative total cannot tell a node earning
+// steadily from one that earned everything yesterday and has stopped.
+
+test('the hour is withheld until the ring actually covers most of one', () => {
+  // Twenty minutes of ring reporting "this hour" would state a third of the
+  // window as if it were the whole of it.
+  const now = Date.now()
+  m.production.recent = [
+    { n: 1, mine: true, t: now - 1_200_000 },
+    { n: 2, mine: true, t: now - 60_000 },
+  ]
+  const bw = m.derived().blocksByWindow
+  assert.equal(bw.hour, undefined, 'a partial window must not be reported as an hour')
+  assert.ok(bw.hourCoverageSeconds >= 1190, 'but the coverage is stated so the gap is visible')
+})
+
+test('a full hour of ring reports the blocks inside it', () => {
+  const now = Date.now()
+  m.production.recent = [
+    { n: 1, mine: true, t: now - 4_000_000 },   // 66 minutes: outside the hour
+    { n: 2, mine: true, t: now - 1_800_000 },
+    { n: 3, mine: false, t: now - 900_000 },
+    { n: 4, mine: true, t: now - 60_000 },
+  ]
+  const bw = m.derived().blocksByWindow
+  assert.equal(bw.hour, 2, 'only ours, only inside the hour')
+})

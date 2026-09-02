@@ -151,8 +151,24 @@
   .trendbar-n { font-size: 10px; color: var(--muted); text-align: center; margin-top: 3px;
                 font-variant-numeric: tabular-nums; }
   .brand { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+  /* On a phone the header wrapped into "title + chip", then "chain id + build",
+     then the status pill — which buried our own version next to a chain hash it
+     has nothing to do with. Narrow screens put the build on its own line
+     directly under the title, where it reads as the version OF this thing. */
+  @media (max-width: 720px) {
+    header { align-items: flex-start; gap: 8px 10px; }
+    header h1 { order: 0; }
+    header .chip { order: 1; }
+    header .brand { order: 2; flex-basis: 100%; margin-top: -2px; }
+    header .net { order: 3; }
+    header .spacer { display: none; }
+    header .pill { order: 4; }
+  }
   .brand a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--line); }
   .brand a:hover, .brand a:focus-visible { color: var(--fg); border-bottom-color: currentColor; }
+  .credits { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line);
+             display: grid; gap: 4px; line-height: 1.45; }
+  .credits a { color: var(--accent); }
   .origin { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
   .brand svg { flex: none; }
   .wide { column-span: all; }
@@ -265,9 +281,16 @@ const MARK_OXYON = `<svg viewBox="0 0 48 48" width="12" height="12" aria-hidden=
   </g>
   <rect x="9" y="22" width="12" height="4" fill="#c99a3b"/>
   <rect x="27" y="22" width="12" height="4" fill="#c99a3b"/></svg>`
-const origin = (kind) => kind === 'official'
-  ? `<span class="origin" title="xl1-cli is XYO's own software, running unmodified in the container">${MARK_XYO} official</span>`
-  : `<span class="origin" title="This dashboard is an independent project — not built, endorsed, or supported by XYO">${MARK_OXYON} unofficial</span>`
+const origin = (kind, b = {}) => {
+  const link = (href, title, inner) => href
+    ? `<a class="origin" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${inner}</a>`
+    : `<span class="origin" title="${esc(title)}">${inner}</span>`
+  return kind === 'official'
+    ? link(b.upstreamUrl, `xl1-cli is ${b.upstreamName ?? 'XYO'}'s own software, running unmodified in the container`,
+        `${MARK_XYO} official`)
+    : link(b.brandUrl, `This dashboard is an independent project by ${b.brandName ?? 'the operator'} — not built, endorsed, or supported by XYO`,
+        `${MARK_OXYON} unofficial`)
+}
 
 const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
 const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v, n]) =>
@@ -452,6 +475,7 @@ function render(d) {
   // Rewards
   const b = d.chain?.balances ?? {}
   // Addresses link straight into the explorer — the lookup an operator does most.
+  const bw = dv.blocksByWindow
   const addrCell = (x) => x?.url
     ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.address)}</a>`
     : `<span class="mono">${esc(x?.address)}</span>`
@@ -477,6 +501,19 @@ function render(d) {
           b.producer && !dv.rewardEqualsProducer && ['Producer address', addrCell(b.producer)],
         ])}
       </details>
+      <div class="sub" style="margin-top:7px" title="At step 0 the block reward is 500 XL1 and the producer share is 10%. Only accepted blocks pay — a published candidate that loses its race earns nothing.">
+        Each accepted block pays <strong>~50 XL1</strong> — 10% of the 500 XL1 block reward.
+      </div>
+      ${bw ? tiles([
+        // One cumulative total cannot tell a node earning steadily from one that
+        // earned it all yesterday. The hour is withheld until the ring covers
+        // most of one, rather than reporting a partial window as a whole.
+        ['This hour', bw.hour !== undefined ? num(bw.hour) : '—',
+          bw.hour !== undefined ? 'blocks' : `${Math.round((bw.hourCoverageSeconds ?? 0) / 60)}m observed`],
+        ['Today', num(bw.today), 'blocks'],
+        ['7 days', num(bw.week), 'blocks'],
+        ['All time', bw.total !== undefined ? num(bw.total) : '—', 'since scanning began'],
+      ]) : ''}
       ${sparkDelta(d.history?.reward, 'ok', (total, active, intervals, max) =>
         // The chain pays ~50 XL1 per block, so each bar is a win and the count
         // of non-empty intervals is how many times this node was paid.
@@ -520,7 +557,7 @@ function render(d) {
       <div class="big">${esc(rel.installed ?? '—')}</div>
       <div class="sub">xl1&#8209;cli in the running container</div>
       ${dl([
-        ['CLI version', `${lagCell} ${origin('official')}`],
+        ['CLI version', `${lagCell} ${origin('official', d.build)}`],
         rel.ok === false && !rel.disabled && ['Registry', `<span class="warn">${esc(rel.error ?? 'unreachable')}</span>`],
         osi && ['Host updates', osi.updates > 0 ? `<span class="warn">${num(osi.updates)} pending</span>` : '<span class="ok">none pending</span>'],
         osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],
@@ -540,9 +577,16 @@ function render(d) {
             ? ` · ${d.build.commitUrl
                 ? `<a href="${esc(d.build.commitUrl)}" target="_blank" rel="noopener noreferrer">${esc(d.build.commit)}</a>`
                 : `<span title="built from uncommitted changes — this hash is not on GitHub">${esc(d.build.commit)}</span>`}`
-            : ''}</span> ${origin('unofficial')}`],
+            : ''}</span> ${origin('unofficial', d.build)}`],
       ])}
       ${!osi ? '<div class="sub" style="margin-top:8px">host package check off or not yet run</div>' : ''}
+      ${d.build ? `<div class="sub credits">
+        <span>${MARK_XYO} <a href="${esc(d.build.upstreamUrl)}" target="_blank" rel="noopener noreferrer">${esc(d.build.upstreamName)}</a>
+          — the XL1 chain and the <span class="mono">xl1-cli</span> this node runs</span>
+        <span>${MARK_OXYON} <a href="${esc(d.build.brandUrl)}" target="_blank" rel="noopener noreferrer">${esc(d.build.brandName)}</a>
+          — this dashboard, independent and
+          <a href="${esc(d.build.source)}" target="_blank" rel="noopener noreferrer">open</a></span>
+      </div>` : ''}
     </section>`)
   }
 

@@ -1227,6 +1227,33 @@ function derived() {
     observedSeconds,
     samples: history.height.length,
 
+    // Blocks this node produced, split by window. A single cumulative count
+    // cannot distinguish a node that earned steadily from one that earned it all
+    // yesterday and has done nothing since.
+    //
+    // Each window comes from the source that can answer it honestly. The hour is
+    // the recent-blocks ring, which is chain truth but only reaches back as far
+    // as it reaches — so the span it actually covers is reported beside it and
+    // the number is withheld until it covers most of an hour. Today and the week
+    // come from the day buckets, which are the same blocks the standings count.
+    blocksByWindow: (() => {
+      const ring = (production.recent ?? []).filter((b) => Number.isFinite(b.t))
+      const board = peerBoard()
+      const hourAgo = Date.now() - 3_600_000
+      const inHour = ring.filter((b) => b.t >= hourAgo)
+      const coverage = ring.length > 1
+        ? Math.round((Date.now() - Math.max(ring[0].t, hourAgo)) / 1000) : 0
+      return {
+        // Withheld rather than understated: a ring covering twenty minutes would
+        // report a third of the hour's blocks as if it were the hour's total.
+        hour: coverage >= 3000 ? inHour.filter((b) => b.mine).length : undefined,
+        hourCoverageSeconds: coverage,
+        today: board.windows?.today?.self?.blocks ?? 0,
+        week: board.windows?.week?.self?.blocks ?? 0,
+        total: board.self?.blocks,
+      }
+    })(),
+
     // Age of the newest block seen, from the block's own $epoch. The chain
     // height alone cannot say whether the chain is moving — a stalled chain and
     // a healthy one show the same number until you watch it for a while.
@@ -1525,6 +1552,12 @@ const snapshot = () => ({
       builtAt: envStr('DASH_BUILT_AT', 'unknown'),
       source,
       commitUrl: clean ? `${source}/commit/${commit}` : undefined,
+      // Who wrote each half. Configurable rather than hardcoded so a fork does
+      // not end up crediting someone else's brand for its own dashboard.
+      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
+      upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
     }
   })(),
   ...state,

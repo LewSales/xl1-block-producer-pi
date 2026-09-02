@@ -822,6 +822,30 @@ test('the snapshot carries a build identity', () => {
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
   assert.equal(b.builtAt, 'unknown')
+  assert.ok(b.source?.startsWith('https://github.com/'), 'a build must say where its source lives')
+  assert.equal(b.commitUrl, undefined, 'an unknown commit has no commit to link to')
+})
+
+test('a dirty build links to the repository but never to its own hash', () => {
+  // A hash built from uncommitted changes is not on GitHub. Linking it lands on
+  // a 404, and an invitation to verify the code that 404s is worse than none.
+  const prev = { c: process.env.DASH_COMMIT, s: process.env.DASH_SOURCE_URL }
+  process.env.DASH_COMMIT = 'abc12345-dirty'
+  process.env.DASH_SOURCE_URL = 'https://github.com/example/repo/'
+  const b = m.snapshot().build
+  assert.equal(b.commit, 'abc12345-dirty')
+  assert.equal(b.commitUrl, undefined, 'a dirty hash must not be linked')
+  assert.equal(b.source, 'https://github.com/example/repo', 'a trailing slash would double up in the commit path')
+  process.env.DASH_COMMIT = prev.c; process.env.DASH_SOURCE_URL = prev.s
+})
+
+test('a clean build links straight at the commit it was built from', () => {
+  const prev = { c: process.env.DASH_COMMIT, s: process.env.DASH_SOURCE_URL }
+  process.env.DASH_COMMIT = 'abc12345'
+  process.env.DASH_SOURCE_URL = 'https://github.com/example/repo'
+  const b = m.snapshot().build
+  assert.equal(b.commitUrl, 'https://github.com/example/repo/commit/abc12345')
+  process.env.DASH_COMMIT = prev.c; process.env.DASH_SOURCE_URL = prev.s
 })
 
 // A cycle over budget is only a fault if it is costing work. Escalating on the

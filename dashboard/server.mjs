@@ -1508,11 +1508,25 @@ const snapshot = () => ({
   // string before and after every deploy, so without this a redeploy can only
   // be confirmed by watching some number change and hoping it was ours.
   // Read from the environment the image baked in — no filesystem, no cost.
-  build: {
-    version: DASH_VERSION,
-    commit: envStr('DASH_COMMIT', 'unknown'),
-    builtAt: envStr('DASH_BUILT_AT', 'unknown'),
-  },
+  build: (() => {
+    const commit = envStr('DASH_COMMIT', 'unknown')
+    // Where this build's source lives. Configurable because the same file runs
+    // two dashboards from two repositories, and the footer had the Pi's URL
+    // hardcoded — so the Windows page has been pointing at the wrong source.
+    const source = envStr('DASH_SOURCE_URL', 'https://github.com/LewSales/xl1-block-producer-pi')
+      .replace(/\/+$/, '')
+    // A dirty build is not on GitHub. Linking its hash would land on a 404, and
+    // an invitation to "verify the code" that 404s is worse than no link — so
+    // the commit link only exists when the tree it was built from was clean.
+    const clean = commit !== 'unknown' && !commit.endsWith('-dirty')
+    return {
+      version: DASH_VERSION,
+      commit,
+      builtAt: envStr('DASH_BUILT_AT', 'unknown'),
+      source,
+      commitUrl: clean ? `${source}/commit/${commit}` : undefined,
+    }
+  })(),
   ...state,
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   derived: derived(),

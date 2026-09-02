@@ -1266,6 +1266,36 @@ function derived() {
       const inHour = ring.filter((b) => b.t >= hourAgo)
       const coverage = ring.length > 1
         ? Math.round((Date.now() - Math.max(ring[0].t, hourAgo)) / 1000) : 0
+      // A rolling 24 hours, from the trend store rather than the day buckets.
+      //
+      // "Today" is a calendar day and collapses at local midnight: at 00:10 it
+      // reads 2 while the rolling hour beside it reads 12, which looks broken
+      // and is merely two different windows. A producer restart does the same
+      // thing to anything counted in-process. This number does neither — cblocks
+      // is chain-derived and cumulative, sampled every five minutes and kept for
+      // thirty days, so it survives a restart of the producer, the dashboard, or
+      // both, and it never resets at a wall-clock boundary.
+      const day = (() => {
+        if (trend.length < 2) return {}
+        const cutoff = Date.now() - 86_400_000
+        const withC = trend.filter((r) => Number.isFinite(r.cblocks))
+        if (withC.length < 2) return {}
+        // The oldest sample still inside the window, or the oldest we have.
+        const first = withC.find((r) => r.t >= cutoff) ?? withC[0]
+        const last = withC.at(-1)
+        const spanSeconds = Math.round((last.t - first.t) / 1000)
+        const delta = last.cblocks - first.cblocks
+        return {
+          // Negative means the underlying counter was reset — peers.json lost or
+          // rebuilt — and a negative block count is nonsense, so say nothing.
+          day24h: delta >= 0 ? delta : undefined,
+          day24hSpanSeconds: spanSeconds,
+          // Below about twenty hours this is a partial window wearing a
+          // twenty-four hour label, so the page says how much it actually covers.
+          day24hComplete: spanSeconds >= 72_000,
+        }
+      })()
+
       return {
         // Withheld rather than understated: a ring covering twenty minutes would
         // report a third of the hour's blocks as if it were the hour's total.
@@ -1274,6 +1304,7 @@ function derived() {
         today: board.windows?.today?.self?.blocks ?? 0,
         week: board.windows?.week?.self?.blocks ?? 0,
         total: board.self?.blocks,
+        ...day,
       }
     })(),
 

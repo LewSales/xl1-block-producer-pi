@@ -523,9 +523,14 @@ function render(d) {
         // earned it all yesterday. The hour is withheld until the ring covers
         // most of one, rather than reporting a partial window as a whole.
         ['This hour', bw.hour !== undefined ? num(bw.hour) : '—',
-          bw.hour !== undefined ? 'blocks' : `${Math.round((bw.hourCoverageSeconds ?? 0) / 60)}m observed`],
-        ['Today', num(bw.today), 'blocks'],
-        ['7 days', num(bw.week), 'blocks'],
+          bw.hour !== undefined ? 'rolling' : `${Math.round((bw.hourCoverageSeconds ?? 0) / 60)}m observed`],
+        // Rolling, not calendar. "Today" alone collapses at local midnight — it
+        // reads 2 while the hour beside it reads 12 — and a producer restart
+        // does the same to anything counted in-process. This survives both.
+        ['24 hours', bw.day24h !== undefined ? num(bw.day24h) : '—',
+          bw.day24h === undefined ? 'collecting'
+            : bw.day24hComplete ? 'rolling' : `${Math.round((bw.day24hSpanSeconds ?? 0) / 3600)}h so far`],
+        ['Today', num(bw.today), `since local midnight`],
         ['All time', bw.total !== undefined ? num(bw.total) : '—', 'since scanning began'],
       ]) : ''}
       ${sparkDelta(d.history?.reward, 'ok', (total, active, intervals, max) =>

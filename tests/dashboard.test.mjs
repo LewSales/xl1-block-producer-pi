@@ -659,3 +659,76 @@ test('a producer that reported no timings shows no latency panel at all', () => 
   }
   assert.equal(m.derived().latency, undefined)
 })
+
+// ------------------------------------------------------------ candidate race
+//
+// The mixed sourcing is the whole risk here. Losses come from the log, wins
+// come from the chain, and the reason they cannot be swapped is that
+// "Published block" means submitted — the mistake that once had this dashboard
+// reporting zero for a node that was producing.
+
+function raceState({ race, recent }) {
+  m.state.node = { ok: true, container: { name: 'xl1-producer', running: true }, race }
+  m.production.recent = recent ?? []
+}
+
+test('wins come from the chain, never from the log', () => {
+  // The log claims eight builds. The chain says two of the last six are ours,
+  // and the chain is what the card must report.
+  raceState({
+    race: { windowSeconds: 3600, observedSeconds: 1800, built: 8, retries: 3, lost: {} },
+    recent: [
+      { n: 1, mine: false, t: 1000 }, { n: 2, mine: true, t: 2000 },
+      { n: 3, mine: false, t: 3000 }, { n: 4, mine: false, t: 4000 },
+      { n: 5, mine: true, t: 5000 }, { n: 6, mine: false, t: 6000 },
+    ],
+  })
+  const r = m.derived().race
+  assert.equal(r.won, 2, 'wins are the chain count, not the eight builds')
+  assert.equal(r.built, 8)
+  assert.equal(r.chainBlocks, 6)
+  assert.deepEqual(r.pulse, [0, 1, 0, 0, 1, 0], 'pulse is chain order, oldest first')
+  assert.equal(r.chainWindowSeconds, 5, 'span comes from block timestamps')
+})
+
+test('loss reasons are ranked as a share of losses, not of builds', () => {
+  raceState({
+    race: {
+      windowSeconds: 3600, observedSeconds: 3600, built: 100, retries: 4,
+      lost: { txAlreadyFinalized: 4, behindFinalizedHead: 12, blockNumberMismatch: 4 },
+    },
+    recent: [],
+  })
+  const r = m.derived().race
+  assert.equal(r.lostTotal, 20)
+  // 12 of 20 losses, not 12 of 100 builds: the question is "when we lose, why".
+  assert.equal(r.reasons[0].key, 'behindFinalizedHead')
+  assert.equal(r.reasons[0].percent, 60)
+  assert.equal(r.reasons.reduce((a, x) => a + x.count, 0), 20)
+})
+
+test('nothing lost yet reads as no reasons rather than three zeroes', () => {
+  raceState({
+    race: {
+      windowSeconds: 3600, observedSeconds: 600, built: 12, retries: 0,
+      lost: { txAlreadyFinalized: 0, behindFinalizedHead: 0, blockNumberMismatch: 0 },
+    },
+    recent: [],
+  })
+  assert.deepEqual(m.derived().race.reasons, [])
+})
+
+test('an older collector with no race data hides the card, it does not show zeroes', () => {
+  raceState({ race: undefined, recent: [] })
+  assert.equal(m.derived().race, undefined)
+})
+
+test('the scan records chain order for the pulse, including blocks we lost', async () => {
+  resetScan()
+  const now = Date.now()
+  const chain = { 1: [PEER_A], 2: [SELF], 3: [PEER_A], 4: [SELF] }
+  m.production.cursor = 0
+  await m.scanProduction(fakeViewer(chain, { epochFor: () => now }), 4)
+  assert.deepEqual(m.production.recent.map((b) => b.mine), [false, true, false, true])
+  assert.equal(m.derived().race.won, 2)
+})

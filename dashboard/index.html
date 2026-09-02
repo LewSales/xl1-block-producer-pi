@@ -66,6 +66,22 @@
   /* Four columns stretched across a 1280px card put the name and its numbers at
      opposite edges, which is a lot of eye travel to compare two rows. */
   table.board { max-width: 760px; }
+  /* Candidate race. The pulse is one cell per chain block, oldest left, so the
+     eye reads recency rightward the way the log does. Sized to stay legible at
+     64 cells on a phone without a media query. */
+  .pulse { display: flex; gap: 2px; align-items: flex-end; margin: 6px 0 2px; }
+  .pulse > i { flex: 1 1 0; min-width: 2px; height: 14px; border-radius: 1px;
+               background: color-mix(in srgb, var(--line) 80%, transparent); }
+  .pulse > i.win { background: var(--accent); height: 20px; }
+  /* Colour is not the only signal: a win is also taller. */
+  .reason { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; margin-top: 6px; }
+  .reason-bar { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .reason-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--warn) 65%, transparent); }
+  .lat-row { display: grid; grid-template-columns: 5.5em 5em 1fr; gap: 4px 8px; align-items: center; margin-top: 5px; }
+  .lat-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .lat-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-chain) 70%, transparent); }
+  .lat-bar.wire > i { background: color-mix(in srgb, var(--ok) 70%, transparent); }
+  .lat-bar.tail > i { background: color-mix(in srgb, var(--warn) 70%, transparent); }
   .peer-bar { height: 7px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 60px; }
   .peer-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-peers) 70%, transparent); }
   table.board tr.self .peer-bar > i { background: var(--accent); }
@@ -423,6 +439,49 @@ function render(d) {
     </section>`)
   }
 
+  // Candidate race — why blocks are being lost, from telemetry already collected.
+  //
+  // The counters are mixed-source on purpose and the card says so. Losses and
+  // retries are the producer's own log, the only place that records WHY a
+  // candidate died. Wins are the chain scan, because "Published block" in the
+  // log means submitted, not accepted — treating it as success is the bug that
+  // once had this dashboard reporting zero blocks for a node producing several
+  // every ten minutes.
+  const race = dv.race
+  if (race && (race.built !== undefined || race.chainBlocks)) {
+    const mins = (sec) => (sec >= 3600 ? `${(sec / 3600).toFixed(1)}h` : `${Math.round(sec / 60)}m`)
+    // The pulse reads oldest-left. A win is taller AND accented, so the strip
+    // survives greyscale and colour-blindness.
+    const pulse = (race.pulse ?? []).length > 0
+      ? `<div class="pulse" role="img" aria-label="${num(race.won)} of the last ${num(race.chainBlocks)} chain blocks were produced by this node">
+           ${race.pulse.map((w) => `<i class="${w ? 'win' : ''}"></i>`).join('')}
+         </div>
+         <div class="sub">last ${num(race.chainBlocks)} chain blocks${race.chainWindowSeconds ? ` · ${mins(race.chainWindowSeconds)}` : ''} · <span class="ok">${num(race.won)} won</span></div>`
+      : ''
+
+    // Share of losses, not of builds: the question is "when we lose, why".
+    const reasons = (race.reasons ?? []).length > 0
+      ? `<div class="sub" style="margin-top:10px">Why candidates lost${race.observedSeconds ? ` · last ${mins(race.observedSeconds)}` : ''}</div>`
+        + race.reasons.map((r) => `<div class="reason">
+             <span>${esc(r.label)}</span><span class="mono">${num(r.count)} · ${r.percent}%</span>
+             <span class="reason-bar"><i style="width:${Math.max(2, r.percent)}%"></i></span>
+           </div>`).join('')
+      : '<div class="sub" style="margin-top:10px">No candidates rejected in the window.</div>'
+
+    cards.push(`<section style="--c: var(--c-producer)">
+      <h2><span class="ico" aria-hidden="true">⚔️</span>Candidate race</h2>
+      <div class="big">${race.won !== undefined ? num(race.won) : '—'} <span style="font-size:14px;color:var(--muted)">won</span></div>
+      <div class="sub">of ${num(race.chainBlocks)} recent blocks · wins counted from the chain, not the log</div>
+      ${pulse}
+      ${tiles([
+        ['Built', race.built !== undefined ? num(race.built) : '—', race.observedSeconds ? mins(race.observedSeconds) : 'log window'],
+        ['Lost', race.lostTotal !== undefined ? num(race.lostTotal) : '—', 'rejected locally'],
+        ['Retries', race.retries !== undefined ? num(race.retries) : '—', 'rebuilt and resubmitted'],
+      ])}
+      ${reasons}
+    </section>`)
+  }
+
   // Latency — the question "is it laggy?" answered without guessing.
   //
   // Every number here was already computed by the producer: ProducerActor times
@@ -444,13 +503,27 @@ function render(d) {
       <h2><span class="ico" aria-hidden="true">📡</span>Latency</h2>
       <div class="big">${num(lat.typicalMs)} <span style="font-size:14px;color:var(--muted)">ms typical</span></div>
       <div class="sub">head fetch, ${localPart}</div>
-      ${dl([
-        ['Wire floor', lat.wireFloorMs !== undefined ? `${num(lat.wireFloorMs)} ms` : '—'],
-        ['Typical (p50)', `${num(lat.typicalMs)} ms`],
-        ['Slow tail (p95)', lat.p95Ms !== undefined ? `${num(lat.p95Ms)} ms` : '—'],
-        ['Cycle p50 / p95', (lat.cycleP50Ms !== undefined && lat.cycleP95Ms !== undefined)
-          ? `${num(lat.cycleP50Ms)} / ${num(lat.cycleP95Ms)} ms` : '—'],
-      ])}
+      ${(() => {
+        // Bars share one scale so the comparison is honest — the eye is being
+        // asked to judge proportion, and per-row scaling would make the wire
+        // floor look the same size as a 2.4s cycle.
+        const rows = [
+          ['wire', 'Wire', lat.wireFloorMs, 'the network itself: the fastest head fetch seen'],
+          ['', 'p50', lat.typicalMs, 'half of head fetches were faster than this'],
+          ['tail', 'p95', lat.p95Ms, 'the slow 5% — what a bad moment costs'],
+          ['tail', 'Cycle', lat.cycleP95Ms, 'a whole production cycle at p95, budget is 1000ms'],
+        ].filter(([, , v]) => Number.isFinite(v))
+        const top = Math.max(...rows.map(([, , v]) => v), 1)
+        return rows.map(([cls, label, v, tip]) => `<div class="lat-row" title="${esc(tip)}">
+          <span class="sub">${esc(label)}</span>
+          <span class="mono">${num(v)} ms</span>
+          <span class="lat-bar ${cls}"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
+        </div>`).join('')
+      })()}
+      ${lat.localMs !== undefined ? `<div class="sub" style="margin-top:8px">
+        Overhead above the wire: <strong>+${num(lat.localMs)} ms</strong> — parsing and
+        validating the answer, which is this machine, not the network.
+      </div>` : ''}
       <div class="sub" style="margin-top:8px">
         Measured by the producer over ${num(lat.samples)} head fetches. Costs no
         extra requests — these counters exist whether or not this page is open.

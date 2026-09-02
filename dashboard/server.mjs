@@ -309,7 +309,18 @@ const production = {
   // Highest block already read. Lives here rather than in a module-local so the
   // scan's entire state is one object — inspectable, resettable, persistable.
   cursor: undefined,
+  // The last N blocks in chain order: { n, mine, t }. Two things need it and
+  // neither can come from the log — the pulse strip, and how many blocks this
+  // node actually WON in a window. "Published block" in the log means submitted,
+  // not accepted; only the chain says who won, and this repo has already been
+  // wrong once by trusting the log for exactly that.
+  recent: [],
 }
+
+// About an hour of chain at sequence's ~58s cadence, which is the window the
+// collector totals losses over. Kept small deliberately: it is persisted, and a
+// pulse strip nobody can read at a glance is not worth the bytes.
+const RECENT_BLOCKS = envNum('DASH_RECENT_BLOCKS', 64, 8)
 
 // ------------------------------------------------------------ peer producers
 //
@@ -506,6 +517,9 @@ async function loadPeers() {
     }
     pruneDays()
     production.daysFrom = Number.isFinite(Number(doc.daysFrom)) ? Number(doc.daysFrom) : undefined
+    production.recent = Array.isArray(doc.recent)
+      ? doc.recent.filter((r) => Number.isFinite(Number(r?.n))).slice(-RECENT_BLOCKS)
+      : []
     const self = PRODUCER_ADDRESS || REWARD_ADDRESS
     if (self) production.counted = peers.get(self) ?? 0
     peersError = undefined
@@ -532,6 +546,10 @@ async function persistPeers(force = false) {
     // tell a backfill that finished from one that never ran, and the standings
     // would re-read the same history on every boot forever.
     daysFrom: production.daysFrom,
+    // Persisted so the pulse is populated on the first paint after a restart.
+    // Rebuilding it from the scan alone would take an hour of chain to refill,
+    // during which the strip would understate this node for no reason.
+    recent: production.recent.slice(-RECENT_BLOCKS),
     days: Object.fromEntries([...days.entries()].sort().map(([key, day]) => [key, {
       scanned: day.scanned,
       counts: Object.fromEntries([...day.counts.entries()].sort((a, b) => b[1] - a[1])),
@@ -626,12 +644,22 @@ async function scanProduction(viewer, currentNum) {
           production.undated = (production.undated ?? 0) + 1
         }
 
+        production.recent.push({ n, mine: Boolean(self && signers.has(self)), t: epoch || undefined })
+
         // Our own figure comes out of the same pass, over the same definition
         // of "produced", so the headline and the table can never disagree.
         if (self && signers.has(self)) {
           production.counted += 1
           if (production.lastBlock === undefined || n > production.lastBlock) production.lastBlock = n
         }
+      }
+
+      // blocksByNumber answers newest-first, so pushing in iteration order would
+      // build the pulse strip backwards — it reads oldest-left, like the chain.
+      // Sorted after the batch rather than per block: 64 entries, once a poll.
+      production.recent.sort((a, b) => a.n - b.n)
+      if (production.recent.length > RECENT_BLOCKS) {
+        production.recent.splice(0, production.recent.length - RECENT_BLOCKS)
       }
 
       production.cursor = top
@@ -1187,6 +1215,58 @@ function derived() {
       ? Number(((nodeRate / chainRate) * 100).toFixed(3)) : undefined,
     observedSeconds,
     samples: history.height.length,
+
+    // The candidate race: why blocks are being lost, and how often.
+    //
+    // Deliberately mixed-source, and the sources are not interchangeable.
+    // Losses and retries come from the producer's log, which is the only place
+    // that says WHY a candidate died. Wins come from the chain scan, because a
+    // log line saying "Published block" means submitted, not accepted — the
+    // distinction this repo already got wrong once, when a dashboard reported
+    // zero blocks for a node producing several every ten minutes.
+    //
+    // The two windows differ and are reported separately rather than blended:
+    // the log window is whatever the collector totalled, the chain window is
+    // however far the recent-blocks ring reaches back.
+    race: (() => {
+      const r = state.node?.race
+      const lost = r?.lost ?? {}
+      const reasons = [
+        ['behindFinalizedHead', 'head advanced first', lost.behindFinalizedHead],
+        ['txAlreadyFinalized', 'tx already finalized', lost.txAlreadyFinalized],
+        ['blockNumberMismatch', 'built on another head', lost.blockNumberMismatch],
+      ].filter(([, , n]) => Number.isFinite(n))
+      const lostTotal = reasons.reduce((a, [, , n]) => a + n, 0)
+
+      // Wins over the ring, which is chain truth. Reported with the span it
+      // covers so it is never mistaken for the log window's hour.
+      const ring = production.recent ?? []
+      const timed = ring.filter((b) => Number.isFinite(b.t))
+      const chainWindowSeconds = timed.length > 1
+        ? Math.round((timed.at(-1).t - timed[0].t) / 1000) : undefined
+
+      if (!r && ring.length === 0) return undefined
+      return {
+        windowSeconds: r?.windowSeconds,
+        observedSeconds: r?.observedSeconds,
+        built: r?.built,
+        retries: r?.retries,
+        lostTotal: reasons.length > 0 ? lostTotal : undefined,
+        // Share of losses, not of builds: this answers "when we lose, why",
+        // which is the question. Omitted entirely rather than shown as 0% each
+        // when nothing has been lost yet.
+        reasons: lostTotal > 0
+          ? reasons
+            .map(([key, label, n]) => ({ key, label, count: n, percent: Math.round((n / lostTotal) * 100) }))
+            .sort((a, b) => b.count - a.count)
+          : [],
+        won: ring.length > 0 ? ring.filter((b) => b.mine).length : undefined,
+        chainBlocks: ring.length || undefined,
+        chainWindowSeconds,
+        // The strip itself: chain order, oldest first, one entry per block.
+        pulse: ring.map((b) => (b.mine ? 1 : 0)),
+      }
+    })(),
 
     // Latency, split into the two things an operator is actually guessing
     // between. headFetch runs on every check, so its min is the wire floor to

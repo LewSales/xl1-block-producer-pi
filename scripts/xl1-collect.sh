@@ -34,6 +34,8 @@ OS_UPDATE_INTERVAL="${XL1_OS_UPDATE_INTERVAL:-21600}"   # 6h when nothing pendin
 OS_PENDING_INTERVAL="${XL1_OS_PENDING_INTERVAL:-900}"   # 15m while something is
 CLI_CACHE="${STATE_DIR}/.cli-version"
 HEALTH_PORT="${XL1_HEALTH_CHECK_PORT:-9099}"
+RACE_WINDOW="${XL1_RACE_WINDOW:-3600}"          # 1h of candidate-race history
+RACE_STATE="${STATE_DIR}/.race-buckets"
 OS_CACHE="${STATE_DIR}/.os-updates"
 
 mkdir -p "${STATE_DIR}"
@@ -148,6 +150,43 @@ elif [[ -s "${STATE_DIR}/.last-published" ]]; then
 fi
 
 ERRORS="$(printf '%s' "${NEW_LOG}" | grep -c -iE '\b(error|fatal|unhandled|exception)\b' || true)"
+
+# ------------------------------------------------------------ candidate race
+#
+# Why candidates lose, counted from the log slice this run already read. No
+# extra `docker logs` call: NEW_LOG is everything since the last cursor, so the
+# counters accumulate 30 seconds at a time into a rolling window instead of
+# re-reading an hour of log every run.
+#
+# The anchor line matters. `behind-finalized-head` and `block-number-mismatch`
+# are each logged twice — once by the validation viewer and once by the runner —
+# while `tx-already-finalized` is logged once. Counting the bracketed tag would
+# therefore report 52 losses where 26 happened. "No candidate block can be
+# appended" is emitted exactly once per rejected candidate and carries the tag,
+# so it is the only honest thing to count.
+#
+# Wins are deliberately NOT counted here. A log line saying "Published block"
+# means submitted, not accepted, and treating it as success is the mistake this
+# repo already made once. The dashboard takes wins from the chain scan instead.
+race_anchor() { printf '%s' "${NEW_LOG}" | grep -F 'No candidate block can be appended' | grep -cF "[$1]" || true; }
+
+R_BUILT="$(printf '%s' "${NEW_LOG}" | grep -cE 'Building block [0-9]+$' || true)"
+R_RETRY="$(printf '%s' "${NEW_LOG}" | grep -cF '(retry' || true)"
+R_TXFIN="$(race_anchor tx-already-finalized)"
+R_BEHIND="$(race_anchor behind-finalized-head)"
+R_MISMATCH="$(race_anchor block-number-mismatch)"
+
+NOW_EPOCH="$(date -u +%s)"
+printf '%s %s %s %s %s %s\n' "${NOW_EPOCH}" "${R_BUILT:-0}" "${R_RETRY:-0}" "${R_TXFIN:-0}" "${R_BEHIND:-0}" "${R_MISMATCH:-0}" >> "${RACE_STATE}"
+
+# Prune to the window and total it in one pass. Rewritten whole then renamed so
+# a kill mid-write cannot leave a half-line that poisons every later sum.
+RACE_SUM="$(awk -v cutoff="$(( NOW_EPOCH - RACE_WINDOW ))" -v tmp="${RACE_STATE}.tmp" \
+  'NF == 6 && $1 >= cutoff { print > tmp; b += $2; r += $3; t += $4; h += $5; m += $6; if (first == "") first = $1 }
+   END { printf "%d %d %d %d %d %d", b, r, t, h, m, (first == "" ? 0 : first) }' \
+  "${RACE_STATE}" 2>/dev/null || true)"
+[[ -s "${RACE_STATE}.tmp" ]] && mv "${RACE_STATE}.tmp" "${RACE_STATE}" || rm -f "${RACE_STATE}.tmp"
+read -r W_BUILT W_RETRY W_TXFIN W_BEHIND W_MISMATCH W_FIRST <<< "${RACE_SUM:-0 0 0 0 0 0}"
 
 # ------------------------------------------------- did this run ever produce?
 #
@@ -430,6 +469,11 @@ CYC_P95="$(statz_num productionCycle p95Ms)"
   fi
   printf '"errorCount":%s,' "${ERRORS:-0}"
   printf '"buildsThisRun":%s,' "${BUILDS:-0}"
+  if [[ "${W_BUILT}" =~ ^[0-9]+$ ]]; then
+    printf '"race":{"windowSeconds":%s,"observedSeconds":%s,"built":%s,"retries":%s,"lost":{"txAlreadyFinalized":%s,"behindFinalizedHead":%s,"blockNumberMismatch":%s}},' \
+      "${RACE_WINDOW}" "$(( W_FIRST > 0 ? NOW_EPOCH - W_FIRST : 0 ))" \
+      "${W_BUILT}" "${W_RETRY}" "${W_TXFIN}" "${W_BEHIND}" "${W_MISMATCH}"
+  fi
   [[ "${RUN_SECONDS}" =~ ^[0-9]+$ ]] && printf '"runSeconds":%s,' "${RUN_SECONDS}"
 
   # Absence is a real answer here and is reported as absence, not as a zero or a

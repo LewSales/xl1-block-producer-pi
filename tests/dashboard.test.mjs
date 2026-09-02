@@ -619,3 +619,43 @@ test('day buckets are pruned to the retention limit', async () => {
   assert.ok(!m.days.has(m.dayKey(now - 39 * DAY)), 'the oldest does not')
   assert.equal(m.peers.get(PEER_A), 40, 'pruning history does not touch the totals')
 })
+
+// ------------------------------------------------------------------ latency
+//
+// The split between wire and local is the whole value of this panel: one
+// round-trip number cannot tell an operator whether the gateway is slow or
+// their own box is. These pin the arithmetic and the absence case.
+
+test('latency separates the wire floor from local work', () => {
+  // state.node is assigned the way loadSnapshot does it: STATUS_FILE is captured
+  // at import, so driving pollNode from a temp file would read the fixture path
+  // instead and quietly assert nothing.
+  m.state.node = {
+    ok: true,
+    container: { name: 'xl1-producer', state: 'running', running: true },
+    latency: {
+      headFetchMinMs: 103, headFetchP50Ms: 238, headFetchP95Ms: 386,
+      samples: 13398, cycleP50Ms: 508, cycleP95Ms: 2309,
+    },
+  }
+
+  const l = m.derived().latency
+  assert.equal(l.wireFloorMs, 103)
+  assert.equal(l.typicalMs, 238)
+  // 238 typical against a 103 floor is 135ms this machine spends parsing and
+  // validating — the number that says the box is slow rather than the network.
+  assert.equal(l.localMs, 135)
+  assert.equal(l.p95Ms, 386)
+  assert.equal(l.samples, 13398)
+  assert.equal(l.cycleP95Ms, 2309)
+})
+
+test('a producer that reported no timings shows no latency panel at all', () => {
+  // An older collector, or a status server that did not answer. Reporting zero
+  // here would read as "instant" — the one wrong answer available.
+  m.state.node = {
+    ok: true,
+    container: { name: 'xl1-producer', state: 'running', running: true },
+  }
+  assert.equal(m.derived().latency, undefined)
+})

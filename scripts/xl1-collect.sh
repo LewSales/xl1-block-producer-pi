@@ -33,6 +33,7 @@ CLI_CHECK_INTERVAL="${XL1_CLI_CHECK_INTERVAL:-21600}"   # 6h
 OS_UPDATE_INTERVAL="${XL1_OS_UPDATE_INTERVAL:-21600}"   # 6h when nothing pending
 OS_PENDING_INTERVAL="${XL1_OS_PENDING_INTERVAL:-900}"   # 15m while something is
 CLI_CACHE="${STATE_DIR}/.cli-version"
+HEALTH_PORT="${XL1_HEALTH_CHECK_PORT:-9099}"
 OS_CACHE="${STATE_DIR}/.os-updates"
 
 mkdir -p "${STATE_DIR}"
@@ -376,6 +377,41 @@ if (( OS_UPDATE_INTERVAL > 0 )); then
   fi
 fi
 
+# ---------------------------------------------------------------- latency
+#
+# The producer already measures this. ProducerActor times every stage and the
+# status server hands the whole snapshot over on the health port, so the numbers
+# below cost one request to 127.0.0.1 against in-memory counters — no chain RPC,
+# no work the node was not doing anyway. That matters: a dashboard that pinged
+# the gateway itself would add load to the shared endpoint this node is judged
+# on, to answer a question the node had already answered.
+#
+# headFetch is the honest latency signal. It runs on every single check, and its
+# min is the wire floor to the gateway while its p50 includes the local work of
+# parsing and validating what came back — so the two together separate "the
+# network is slow" from "this box is slow", which is the thing an operator is
+# actually guessing at.
+#
+# --max-time keeps a wedged status server from stalling the whole snapshot; a
+# failed read omits the field rather than reporting a zero that reads as "fast".
+STATZ="$(curl -fsS --max-time 2 "http://127.0.0.1:${HEALTH_PORT}/statz" 2>/dev/null || true)"
+
+# One stage's object out of the compact JSON, then one number out of that. Each
+# stage name occurs once, so the greedy match cannot cross into a neighbour.
+statz_num() {
+  [[ -z "${STATZ}" ]] && return 0
+  printf '%s' "${STATZ}" \
+    | sed -n "s/.*\"$1\":{\([^}]*\)}.*/\1/p" \
+    | sed -n "s/.*\"$2\":\([0-9][0-9.]*\).*/\1/p"
+}
+
+HF_MIN="$(statz_num headFetch minMs)"
+HF_P50="$(statz_num headFetch p50Ms)"
+HF_P95="$(statz_num headFetch p95Ms)"
+HF_N="$(statz_num headFetch count)"
+CYC_P50="$(statz_num productionCycle p50Ms)"
+CYC_P95="$(statz_num productionCycle p95Ms)"
+
 {
   printf '{'
   printf '"collectedAt":"%s",' "${COLLECTED_AT}"
@@ -383,6 +419,15 @@ fi
     "$(json_escape "${CONTAINER}")" "$(json_escape "${STATE}")" "${RUNNING}" \
     "$(json_escape "${UPTIME}")" "${RESTARTS}" "$(json_escape "${IMAGE}")" "$(json_escape "${HEALTH}")"
   printf '"blocksPublished":%s,' "${TOTAL}"
+  # Every field or none: a partial latency object would leave the page deciding
+  # what a missing percentile means.
+  if [[ "${HF_P50}" =~ ^[0-9.]+$ && "${HF_P95}" =~ ^[0-9.]+$ && "${HF_N}" =~ ^[0-9]+$ ]]; then
+    printf '"latency":{"headFetchMinMs":%s,"headFetchP50Ms":%s,"headFetchP95Ms":%s,"samples":%s' \
+      "${HF_MIN:-null}" "${HF_P50}" "${HF_P95}" "${HF_N}"
+    [[ "${CYC_P50}" =~ ^[0-9.]+$ ]] && printf ',"cycleP50Ms":%s' "${CYC_P50}"
+    [[ "${CYC_P95}" =~ ^[0-9.]+$ ]] && printf ',"cycleP95Ms":%s' "${CYC_P95}"
+    printf '},'
+  fi
   printf '"errorCount":%s,' "${ERRORS:-0}"
   printf '"buildsThisRun":%s,' "${BUILDS:-0}"
   [[ "${RUN_SECONDS}" =~ ^[0-9]+$ ]] && printf '"runSeconds":%s,' "${RUN_SECONDS}"

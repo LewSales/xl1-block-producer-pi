@@ -423,6 +423,41 @@ function render(d) {
     </section>`)
   }
 
+  // Latency — the question "is it laggy?" answered without guessing.
+  //
+  // Every number here was already computed by the producer: ProducerActor times
+  // headFetch on every check and the collector reads the snapshot off the health
+  // port. No ping of our own, deliberately. A dashboard that probed the gateway
+  // itself would add requests to the shared endpoint this node competes on, to
+  // re-derive a figure the node had already measured on the path that matters.
+  //
+  // The split is the point. The floor is what the wire costs; the gap above it
+  // is this machine parsing and validating what came back. One of those is
+  // XYO's problem and the other is yours, and a single round-trip number cannot
+  // tell you which you have.
+  const lat = dv.latency
+  if (lat) {
+    const localPart = lat.localMs !== undefined && lat.wireFloorMs !== undefined
+      ? `${num(lat.localMs)} ms of it local`
+      : 'local share unknown'
+    cards.push(`<section style="--c: var(--c-chain)">
+      <h2><span class="ico" aria-hidden="true">📡</span>Latency</h2>
+      <div class="big">${num(lat.typicalMs)} <span style="font-size:14px;color:var(--muted)">ms typical</span></div>
+      <div class="sub">head fetch, ${localPart}</div>
+      ${dl([
+        ['Wire floor', lat.wireFloorMs !== undefined ? `${num(lat.wireFloorMs)} ms` : '—'],
+        ['Typical (p50)', `${num(lat.typicalMs)} ms`],
+        ['Slow tail (p95)', lat.p95Ms !== undefined ? `${num(lat.p95Ms)} ms` : '—'],
+        ['Cycle p50 / p95', (lat.cycleP50Ms !== undefined && lat.cycleP95Ms !== undefined)
+          ? `${num(lat.cycleP50Ms)} / ${num(lat.cycleP95Ms)} ms` : '—'],
+      ])}
+      <div class="sub" style="margin-top:8px">
+        Measured by the producer over ${num(lat.samples)} head fetches. Costs no
+        extra requests — these counters exist whether or not this page is open.
+      </div>
+    </section>`)
+  }
+
   // Producer standings — who else is signing blocks, and where we sit.
   //
   // Counted from the same scan that produces "Blocks produced" above, so the

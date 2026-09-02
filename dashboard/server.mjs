@@ -1187,6 +1187,32 @@ function derived() {
       ? Number(((nodeRate / chainRate) * 100).toFixed(3)) : undefined,
     observedSeconds,
     samples: history.height.length,
+
+    // Latency, split into the two things an operator is actually guessing
+    // between. headFetch runs on every check, so its min is the wire floor to
+    // the gateway and its p50 includes the local work of parsing and validating
+    // the answer. Their difference is this box's own contribution — the number
+    // that says "the network is slow" or "this machine is slow" rather than
+    // leaving both on the table.
+    //
+    // Measured by the producer itself and read off its health port, so nothing
+    // here costs a chain request.
+    latency: (() => {
+      const l = state.node?.latency
+      if (!l || l.headFetchP50Ms === undefined) return undefined
+      const wire = l.headFetchMinMs
+      const typical = l.headFetchP50Ms
+      return {
+        wireFloorMs: wire,
+        typicalMs: typical,
+        p95Ms: l.headFetchP95Ms,
+        localMs: (typeof wire === 'number' && typeof typical === 'number')
+          ? Math.round(typical - wire) : undefined,
+        cycleP50Ms: l.cycleP50Ms,
+        cycleP95Ms: l.cycleP95Ms,
+        samples: l.samples,
+      }
+    })(),
     rewardEqualsProducer: Boolean(b?.reward && b?.producer && b.reward.address === b.producer.address),
 
     // The last block this node actually landed, and how far the chain has moved

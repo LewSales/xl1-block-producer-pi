@@ -432,6 +432,20 @@ function render(d) {
             : `<span class="bad">${esc(d.node.eligibility.reason)}</span>`)
         : `<span class="ok">no complaint in ${esc(d.node.eligibility.window)}</span>`],
     ])}
+    ${tiles([
+      // Rate, not total. These lived in Rewards, three cards down, which meant
+      // the question this card exists to answer — how is it doing right now —
+      // needed a scroll. They are about the producer, so they belong here; the
+      // balance and the addresses stay with Rewards.
+      ['Blocks/hr', dv.blocksPerHourNode !== undefined ? `${num(dv.blocksPerHourNode)}` : '—', 'produced by this node'],
+      ['XL1/hr', dv.rewardPerHour !== undefined ? `${num(dv.rewardPerHour)}` : '—', 'observed'],
+      ['XL1/day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—',
+        dv.rewardPerDay !== undefined ? 'extrapolated' : `needs ${Math.max(0, 15 - Math.round((dv.observedSeconds ?? 0) / 60))}m more`],
+      // Balance says how much; this says how recently. A node that stopped
+      // earning an hour ago has exactly the same balance as one still earning.
+      ['Last payout', dv.lastPayoutSeconds !== undefined ? dur(dv.lastPayoutSeconds) + ' ago' : '—',
+        dv.lastPayoutXl1 !== undefined ? `+${num(dv.lastPayoutXl1)} XL1` : 'none seen yet'],
+    ])}
     ${d.node?.ok === false ? `<div class="err" style="margin-top:8px">${esc(d.node.error)}</div>` : ''}
     ${d.node?.stale ? `<div class="err" style="margin-top:8px">collector data ${d.node.ageSeconds}s old</div>` : ''}
   </section>`)
@@ -520,16 +534,7 @@ function render(d) {
         total > 0
           ? `+${num(Number(total.toFixed(4)))} XL1 · ${num(active)} payout(s)`
           : `no reward movement in ${num(intervals)} intervals`)}
-      ${tiles([
-        ['Per hour', dv.rewardPerHour !== undefined ? `${num(dv.rewardPerHour)}` : '—', 'XL1 observed'],
-        ['Per day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—',
-          dv.rewardPerDay !== undefined ? 'extrapolated' : `needs ${Math.max(0, 15 - Math.round((dv.observedSeconds ?? 0) / 60))}m more`],
-        ['Blocks/hr', dv.blocksPerHourNode !== undefined ? `${num(dv.blocksPerHourNode)}` : '—', 'produced by this node'],
-        // Balance says how much; this says how recently. A node that stopped
-        // earning an hour ago has the same balance as one still earning.
-        ['Last payout', dv.lastPayoutSeconds !== undefined ? dur(dv.lastPayoutSeconds) + ' ago' : '—',
-          dv.lastPayoutXl1 !== undefined ? `+${num(dv.lastPayoutXl1)} XL1` : 'none seen yet'],
-      ])}
+
     </section>`)
   }
 

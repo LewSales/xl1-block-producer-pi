@@ -11,10 +11,22 @@ FROM node:${NODE_VERSION}-bookworm-slim
 LABEL org.opencontainers.image.title="XL1 Pi Dashboard" \
   org.opencontainers.image.description="Status dashboard for an XL1 block producer on Raspberry Pi"
 
+# Build stamp. Passed at build time so the running page can say which build it
+# is — "xl1-dashboard:local" is the same tag before and after every deploy, and
+# without this there is no way to tell a redeploy landed except by watching a
+# number change and hoping. Defaults keep an argument-less `docker build`
+# working; build-images.sh and Build.ps1 fill them in.
+ARG DASH_COMMIT=unknown
+ARG DASH_BUILT_AT=unknown
 ENV NODE_ENV=production \
     DASH_PORT=8088 \
     DASH_BIND=0.0.0.0 \
+    DASH_COMMIT=${DASH_COMMIT} \
+    DASH_BUILT_AT=${DASH_BUILT_AT} \
     NODE_OPTIONS=--max-old-space-size=192
+
+LABEL org.opencontainers.image.revision="${DASH_COMMIT}" \
+      org.opencontainers.image.created="${DASH_BUILT_AT}"
 
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules

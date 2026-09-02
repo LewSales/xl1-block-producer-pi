@@ -80,7 +80,16 @@ popd >/dev/null
 # --------------------------------------------------------- dashboard image
 
 log "Dashboard image"
-docker build --platform "${PLATFORM}" -t "xl1-dashboard:local-${TARGET_ARCH}" "${HERE}/dashboard"
+# Stamp the build so the running page can identify itself. --dirty matters: a
+# dashboard built from uncommitted edits must not claim to be the commit it was
+# branched from, or a deploy that shipped something else looks identical to one
+# that did not.
+DASH_COMMIT="$(git -C "${HERE}" describe --always --dirty --abbrev=8 2>/dev/null || echo unknown)"
+DASH_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker build --platform "${PLATFORM}" \
+  --build-arg "DASH_COMMIT=${DASH_COMMIT}" \
+  --build-arg "DASH_BUILT_AT=${DASH_BUILT_AT}" \
+  -t "xl1-dashboard:local-${TARGET_ARCH}" "${HERE}/dashboard"
 
 # ------------------------------------------------------------------ export
 

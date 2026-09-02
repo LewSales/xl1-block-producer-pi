@@ -807,3 +807,19 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
   assert.equal(o.sinceWin, 2, 'two blocks since #3')
   assert.equal(o.longestGap, 2)
 })
+
+// ------------------------------------------------------------- build stamp
+//
+// The image tag is the same string before and after every deploy, so this is
+// the only thing that says which build answered. It must degrade to "unknown"
+// rather than throwing or, worse, claiming a version it is not.
+
+test('the snapshot carries a build identity', () => {
+  const b = m.snapshot().build
+  assert.ok(b, 'every snapshot must identify the build serving it')
+  assert.equal(b.version, '1.0.0', 'read from package.json, not hardcoded')
+  // Unstamped in the test environment, which is exactly the fallback path an
+  // argument-less `docker build` takes.
+  assert.equal(b.commit, 'unknown')
+  assert.equal(b.builtAt, 'unknown')
+})

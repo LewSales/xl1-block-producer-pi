@@ -359,6 +359,10 @@ function render(d) {
         osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],
         osi && ['apt lists', ageCell],
         osi?.rebootRequired && ['Reboot', '<span class="bad">required</span>'],
+        // Ours, not XYO's. The tag never changes across deploys, so this is the
+        // only thing on the page that says which dashboard build is answering.
+        d.build && ['Dashboard', `<span class="mono" title="built ${esc(d.build.builtAt)}">${esc(d.build.version)}${
+          d.build.commit && d.build.commit !== 'unknown' ? ` · ${esc(d.build.commit)}` : ''}</span>`],
       ])}
       ${!osi ? '<div class="sub" style="margin-top:8px">host package check off or not yet run</div>' : ''}
     </section>`)
@@ -733,6 +737,7 @@ function render(d) {
     ? `<ul class="problems">${d.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`
     : '')
     + `<div style="margin-top:8px">updated ${new Date(d.generatedAt).toLocaleTimeString()} · dashboard up since ${new Date(d.dashboardStartedAt).toLocaleString()} · <a href="/api/status${location.search}">JSON</a></div>`
+    + (d.build ? `<div>build ${esc(d.build.version)}${d.build.commit && d.build.commit !== 'unknown' ? ` · ${esc(d.build.commit)}` : ''}${d.build.builtAt && d.build.builtAt !== 'unknown' ? ` · built ${new Date(d.build.builtAt).toLocaleString()}` : ''}</div>` : '')
     // Said plainly, on every page, rather than left to be inferred. Someone
     // shown a screenshot of this should not come away thinking XYO shipped it.
     + `<div class="whose">

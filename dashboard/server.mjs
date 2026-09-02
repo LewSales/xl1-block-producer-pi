@@ -9,7 +9,7 @@
 import { readFile, appendFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createServer } from 'node:http'
-import { statfs } from 'node:fs'
+import { statfs, readFileSync } from 'node:fs'
 import { promisify } from 'node:util'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
@@ -48,6 +48,17 @@ const PORT = envNum('DASH_PORT', 8088)
 const BIND = envStr('DASH_BIND', '0.0.0.0')
 const HEALTH_URL = envStr('XL1_HEALTH_URL', 'http://127.0.0.1:9099')
 const STATUS_FILE = envStr('XL1_STATUS_FILE', '/var/lib/xl1/producer-status.json')
+
+// Read once at import rather than per request. Falls back rather than throwing:
+// a dashboard that will not start because it cannot find its own version number
+// is a worse outcome than one that says "unknown".
+const DASH_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
 // statfs('/') inside a container reports the overlay filesystem, not the SD
 // card. Point this at a host bind-mount so the disk figure is the real one.
 const DISK_PATH = envStr('DASH_DISK_PATH', '/var/lib/xl1')
@@ -1443,6 +1454,15 @@ const snapshot = () => ({
   ...overall(),
   generatedAt: new Date().toISOString(),
   dashboardStartedAt: state.startedAt,
+  // Which build of this dashboard is answering. The image tag is the same
+  // string before and after every deploy, so without this a redeploy can only
+  // be confirmed by watching some number change and hoping it was ours.
+  // Read from the environment the image baked in — no filesystem, no cost.
+  build: {
+    version: DASH_VERSION,
+    commit: envStr('DASH_COMMIT', 'unknown'),
+    builtAt: envStr('DASH_BUILT_AT', 'unknown'),
+  },
   ...state,
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   derived: derived(),

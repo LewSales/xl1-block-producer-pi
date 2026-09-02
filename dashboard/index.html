@@ -858,10 +858,10 @@ function render(d) {
     Latency: 4,
     Operations: 5,
     Chain: 6,
-    Rewards: 7,
-    Trends: 8,
-    'Raspberry Pi': 9,
-    Host: 9,
+    'Raspberry Pi': 7,
+    Host: 7,
+    Rewards: 8,
+    Trends: 9,
     'Producer standings': 10,
     'Producer log': 11,
   }
@@ -883,7 +883,18 @@ function render(d) {
   // side by side. To actually put Latency UNDER Candidate race at every width,
   // the two are wrapped in one grid item and stacked inside it. Deterministic,
   // and each card keeps its own header rather than being merged into one.
-  const PAIRS = [['Candidate race', 'Latency'], ['Rewards', 'Trends']]
+  // Each pair becomes ONE grid item with the two cards stacked inside, so the
+  // second sits under the first at every width and the accent colours still
+  // separate them. Pairing also evens the item heights out, which is what was
+  // making the grid ragged: eleven cards of wildly different length left holes
+  // wherever a short one sat beside a tall one.
+  const PAIRS = [
+    ['Producer', 'Software & host'],   // what is running, and is it the right version
+    ['Candidate race', 'Latency'],     // are we winning, and is speed why not
+    ['Chain', 'Raspberry Pi'],         // the chain, and the box keeping up with it
+    ['Chain', 'Host'],                 // same, when the host is not a Pi
+    ['Rewards', 'Trends'],             // what came in, and is it rising
+  ]
   const titleOf = (html) => {
     const m = html.match(/<h2[^>]*>(?:\s*<span[^>]*>[^<]*<\/span>)?\s*([^<]+)/)
     return m ? m[1].replaceAll('&amp;', '&').trim() : ''

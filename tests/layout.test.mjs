@@ -51,9 +51,9 @@ test('cards are ordered by what an operator needs, not by build order', () => {
     'Latency',
     'Operations',
     'Chain',
+    'Raspberry Pi',
     'Rewards',
     'Trends',
-    'Raspberry Pi',
     'Producer standings',   // full width, so second to last
     'Producer log — newest first (40 lines)',
   ])
@@ -71,15 +71,20 @@ test('the log sorts last despite starting with the word Producer', () => {
 test('paired cards become one grid item so the second sits below the first', () => {
   const items = layout()
   const stacked = items.filter((h) => h.startsWith('<div class="stack">')).map(titlesOf)
-  assert.deepEqual(stacked, [['Candidate race', 'Latency'], ['Rewards', 'Trends']])
-  assert.equal(items.length, ALL.length - 2, 'each pair collapses two cards into one grid item')
+  assert.deepEqual(stacked, [
+    ['Producer', 'Software & host'],
+    ['Candidate race', 'Latency'],
+    ['Chain', 'Raspberry Pi'],
+    ['Rewards', 'Trends'],
+  ])
+  assert.equal(items.length, ALL.length - 4, 'each pair collapses two cards into one grid item')
 })
 
 test('a card missing for want of data does not leave its partner in a stack of one', () => {
   // Latency hides when the collector reports no timings. Candidate race must
   // then stand alone rather than being wrapped in a one-card stack.
   const items = layout(ALL.filter((t) => t !== 'Latency'))
-  assert.equal(items.filter((h) => h.startsWith('<div class="stack">')).length, 1, 'only Rewards+Trends remain paired')
+  assert.equal(items.filter((h) => h.startsWith('<div class="stack">')).length, 3, 'the other three pairs survive')
   assert.ok(items.some((h) => !h.startsWith('<div') && titlesOf(h)[0] === 'Candidate race'))
 })
 

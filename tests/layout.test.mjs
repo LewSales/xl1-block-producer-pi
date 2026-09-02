@@ -88,9 +88,13 @@ test('a card missing for want of data does not leave its partner in a stack of o
   assert.ok(items.some((h) => !h.startsWith('<div') && titlesOf(h)[0] === 'Candidate race'))
 })
 
-test('rows do not stretch short cards into tall empty boxes', () => {
-  // The grid defaults to align-items: stretch, which grew a five-row card into a
-  // bordered box mostly full of nothing beside a tall neighbour.
+test('cards pack into columns rather than wrapping onto a ragged row', () => {
+  // A row grid is as tall as its tallest card and strands a leftover card on a
+  // row of its own — five items across four columns left one card beside three
+  // empty columns. Multi-column balances instead, so there is no leftover row.
   const main = html.match(/main \{[^}]*\}/)[0]
-  assert.match(main, /align-items:\s*start/, 'the card grid must not stretch its rows')
+  assert.match(main, /columns:\s*4\s+310px/, 'the card area must be a balanced multi-column layout')
+  assert.doesNotMatch(main, /display:\s*grid/, 'a row grid reintroduces the stranded-card gap')
+  assert.match(html, /main > \* \{[^}]*break-inside:\s*avoid/, 'cards must not split across a column boundary')
+  assert.match(html, /\.wide \{ column-span: all; \}/, 'full-width cards must span the columns')
 })

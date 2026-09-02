@@ -37,13 +37,17 @@
   .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
   .pill.degraded { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
   .pill.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 32%, transparent); }
-  /* align-items: start, not the default stretch. Grid rows are as tall as the
-     tallest card in them, and stretching made a short card — Software & host is
-     five rows — grow into a bordered box mostly full of nothing next to a tall
-     Producer. Cards now end where their content does; the leftover is grid gap
-     rather than empty card. */
-  main { padding: 20px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
-         align-items: start; max-width: 1400px; }
+  /* Columns, not grid rows.
+     A row grid is as tall as its tallest card and wraps a leftover card onto a
+     row of its own — five items across four columns left one card beside three
+     columns of nothing. Balancing that by hand only holds until a card hides
+     for want of data and the count changes again.
+     Multi-column packs top to bottom and balances the column heights itself, so
+     there is no leftover row and no hole under a short card. break-inside keeps
+     a card whole; column-span lets the two full-width cards break out. */
+  main { padding: 20px; max-width: 1400px; margin: 0 auto;
+         columns: 4 310px; column-gap: 16px; }
+  main > * { break-inside: avoid; margin: 0 0 16px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
   section h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
   dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; align-items: baseline; }
@@ -133,10 +137,11 @@
   .spark path.area { fill: color-mix(in srgb, var(--accent) 13%, transparent); stroke: none; }
   .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
   .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
-  .wide { grid-column: 1 / -1; }
-  /* One grid item holding two cards, stacked. align-content: start so the pair
-     ends at its content like every other card rather than stretching. */
-  .stack { display: grid; gap: 16px; align-content: start; }
+  .wide { column-span: all; }
+  /* One block holding two cards, stacked, kept whole by break-inside above.
+     The pairing survives the column layout: a stack is a single item, so its
+     two cards cannot be split across a column boundary. */
+  .stack { display: flex; flex-direction: column; gap: 16px; }
 
   /* Per-card accent. One hue per subject, carried by the heading, the rule
      under it and that card's sparkline, so a glance finds the right panel
@@ -497,14 +502,28 @@ function render(d) {
     // provision time and the hard limit is 85 °C, so 65 °C was amber for a
     // machine that was working exactly as configured.
     const tempCls = s.cpuTempC >= 80 ? 'bad' : s.cpuTempC >= 75 ? 'warn' : 'ok'
+    // The headline is whatever this machine can actually measure. A Pi throttles
+    // on heat, so temperature is the number that matters and it has a sensor for
+    // it. Windows exposes no CPU temperature without vendor drivers and has no
+    // load average at all, so printing "—°C" and "load undefined" was the card
+    // describing a Pi it was not running on.
+    const hasTemp = Number.isFinite(s.cpuTempC)
+    const hasLoad = Array.isArray(s.loadAverage) && s.loadAverage.length > 0
+    const headline = hasTemp
+      ? `<div class="big ${tempCls}">${s.cpuTempC}°C</div><div class="sub">CPU temperature</div>`
+      : Number.isFinite(s.cpuPercent)
+        ? `<div class="big">${s.cpuPercent}<span style="font-size:14px;color:var(--muted)">% CPU</span></div>
+           <div class="sub">across ${num(s.cpuCount)} cores</div>`
+        : `<div class="big">${s.memory.usedPercent}<span style="font-size:14px;color:var(--muted)">% RAM</span></div>
+           <div class="sub">memory in use</div>`
     cards.push(`<section style="--c: var(--c-pi)">
       <h2><span class="ico" aria-hidden="true">${s.platform === 'windows' ? '🖥️' : '🍓'}</span>${s.platform === 'windows' ? 'Host' : 'Raspberry Pi'}</h2>
-      <div class="big ${tempCls}">${s.cpuTempC ?? '—'}°C</div>
-      <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)} · load ${s.loadAverage?.join(' ')}</div>
-      ${s.cpuTempC !== undefined ? spark(d.history?.tempC) : ''}
+      ${headline}
+      <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)}${hasLoad ? ` · load ${s.loadAverage.join(' ')}` : ''}</div>
+      ${hasTemp ? spark(d.history?.tempC) : ''}
       ${tiles([
         ['RAM', `${s.memory.usedPercent}%`, `${bytes(s.memory.totalBytes - s.memory.availableBytes)} of ${bytes(s.memory.totalBytes)}`],
-        ['Swap', `${s.swap.usedPercent}%`, `${bytes(s.swap.usedBytes)} of ${bytes(s.swap.totalBytes)}`],
+        s.swap?.totalBytes > 0 && ['Swap', `${s.swap.usedPercent}%`, `${bytes(s.swap.usedBytes)} of ${bytes(s.swap.totalBytes)}`],
         s.disk && ['Disk', `${s.disk.usedPercent}%`, `${bytes(s.disk.freeBytes)} free`],
         s.cpuPercent !== undefined
           ? ['CPU', `${s.cpuPercent}%`, `${s.cpuCount} cores`]

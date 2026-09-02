@@ -333,6 +333,77 @@ const PEERS_TOP = envNum('DASH_PEERS_TOP', 12, 1)
 // than issuing hundreds of requests in one.
 const PEERS_CATCHUP = envNum('DASH_PRODUCTION_CATCHUP', 1000, 200)
 
+// ------------------------------------------------------------- day buckets
+//
+// A cumulative total answers "who has produced most since this dashboard
+// started", which is not the question being asked when one node was offline for
+// two days and another was not. "We are 200 behind today but 700 up overall" is
+// two different measurements, and only the first one says anything about how
+// the node is running right now.
+//
+// Every BoundWitness carries `$epoch` in milliseconds, so the scan that already
+// reads the signer list can bucket the block by its own day at no extra cost.
+// Bucketing by arrival time instead would have been simpler and wrong: a
+// dashboard catching up after an outage would file yesterday's blocks under
+// today and invent a spike on every restart.
+const DAYS_KEPT = envNum('DASH_PEERS_DAYS', 35, 2)
+// Days are local to whoever reads the page. "Today" is a human word, and on a
+// UTC container an operator in Denver would watch it roll over at 18:00. The
+// container's own clock stays UTC — only the bucket key is zoned.
+const DAY_TZ = envStr('DASH_DAY_TZ', 'UTC')
+
+let dayTzError
+const dayFormatter = (() => {
+  const build = (tz) => new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  })
+  try {
+    return build(DAY_TZ)
+  } catch {
+    // An unusable zone must not take the standings down with it, but silently
+    // falling back to UTC would leave "today" wrong with nothing on the page to
+    // explain why the day rolls over six hours early.
+    dayTzError = `DASH_DAY_TZ="${DAY_TZ}" is not a known time zone — bucketing by UTC instead`
+    return build('UTC')
+  }
+})()
+
+/** epoch ms → 'YYYY-MM-DD' in DAY_TZ. en-CA is ISO order by definition. */
+function dayKey(epochMs) {
+  return dayFormatter.format(new Date(epochMs))
+}
+
+/** 'YYYY-MM-DD' for today, and the N keys ending today, newest first. */
+function todayKey() { return dayKey(Date.now()) }
+function recentKeys(n) {
+  const out = []
+  const now = Date.now()
+  for (let i = 0; i < n; i++) out.push(dayKey(now - i * 86_400_000))
+  return out
+}
+
+/** day key → { scanned, counts: Map(address → blocks) }. Same blocks as the
+ *  cumulative tally, split by the day the block says it was made. */
+const days = new Map()
+
+function bucket(dayKeyStr, signers) {
+  let day = days.get(dayKeyStr)
+  if (!day) {
+    day = { scanned: 0, counts: new Map() }
+    days.set(dayKeyStr, day)
+  }
+  day.scanned += 1
+  for (const addr of signers) day.counts.set(addr, (day.counts.get(addr) ?? 0) + 1)
+}
+
+/** Drop buckets older than DAYS_KEPT so the file cannot grow without bound.
+ *  Keyed by string comparison, which is date order for ISO dates. */
+function pruneDays() {
+  if (days.size <= DAYS_KEPT) return
+  const keep = new Set([...days.keys()].sort().slice(-DAYS_KEPT))
+  for (const k of [...days.keys()]) if (!keep.has(k)) days.delete(k)
+}
+
 // Names for addresses, so the standings read as producers rather than hex.
 //
 //   DASH_PEER_LABELS=a1b2c3d4e5f6...=Alice,9f3ac210=Bob
@@ -421,6 +492,20 @@ async function loadPeers() {
     // Re-scanning would double-count every block in the overlap, inflating both
     // our total and everyone else's by however long the dashboard was down.
     if (Number.isFinite(Number(doc.scannedTo))) production.cursor = Number(doc.scannedTo)
+    // v1 files carry no day buckets. Left empty rather than seeded from the
+    // totals: there is no honest way to split a cumulative number across the
+    // days it came from, and backfillDays re-reads those blocks instead.
+    days.clear()
+    for (const [key, day] of Object.entries(doc.days ?? {})) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) continue
+      const counts = new Map()
+      for (const [addr, n] of Object.entries(day?.counts ?? {})) {
+        if (typeof n === 'number' && Number.isFinite(n) && n > 0) counts.set(addr, n)
+      }
+      if (counts.size > 0) days.set(key, { scanned: Number(day.scanned) || 0, counts })
+    }
+    pruneDays()
+    production.daysFrom = Number.isFinite(Number(doc.daysFrom)) ? Number(doc.daysFrom) : undefined
     const self = PRODUCER_ADDRESS || REWARD_ADDRESS
     if (self) production.counted = peers.get(self) ?? 0
     peersError = undefined
@@ -435,7 +520,7 @@ async function persistPeers(force = false) {
 
   peersSince ??= new Date().toISOString()
   const doc = {
-    v: 1,
+    v: 2,
     since: peersSince,
     updatedAt: new Date().toISOString(),
     scannedFrom: production.scannedFrom,
@@ -443,6 +528,14 @@ async function persistPeers(force = false) {
     scanned: production.scanned,
     multiSigner: production.multiSigner,
     counts: Object.fromEntries([...peers.entries()].sort((a, b) => b[1] - a[1])),
+    // Lowest block represented in the day buckets. Without it a restart cannot
+    // tell a backfill that finished from one that never ran, and the standings
+    // would re-read the same history on every boot forever.
+    daysFrom: production.daysFrom,
+    days: Object.fromEntries([...days.entries()].sort().map(([key, day]) => [key, {
+      scanned: day.scanned,
+      counts: Object.fromEntries([...day.counts.entries()].sort((a, b) => b[1] - a[1])),
+    }])),
   }
 
   try {
@@ -520,6 +613,19 @@ async function scanProduction(viewer, currentNum) {
         production.scanned += 1
         for (const addr of signers) peers.set(addr, (peers.get(addr) ?? 0) + 1)
 
+        // $epoch is the block's own millisecond timestamp. A block without one
+        // is counted in the totals and left out of every day window rather than
+        // filed under an invented date; the count is surfaced so a chain that
+        // stopped carrying $epoch shows up as undated blocks instead of as days
+        // that quietly stop adding up.
+        const epoch = Number(bw?.$epoch)
+        if (Number.isFinite(epoch) && epoch > 0) {
+          bucket(dayKey(epoch), signers)
+          if (production.daysFrom === undefined || n < production.daysFrom) production.daysFrom = n
+        } else {
+          production.undated = (production.undated ?? 0) + 1
+        }
+
         // Our own figure comes out of the same pass, over the same definition
         // of "produced", so the headline and the table can never disagree.
         if (self && signers.has(self)) {
@@ -535,10 +641,64 @@ async function scanProduction(viewer, currentNum) {
       if (!production.error) production.error = undefined
     }
     if (from > currentNum) production.error = undefined
+    pruneDays()
     production.behind = Math.max(0, currentNum - (production.scannedTo ?? currentNum))
   } catch (error) {
     // Leave the cursor alone so the same range is retried rather than skipped.
     production.error = error.message?.slice(0, 160)
+  }
+}
+
+/** Fill day buckets for blocks the totals already contain.
+ *
+ *  Upgrading from a v1 file leaves the standings with two days of totals and no
+ *  history to split them by, so the windows would read zero while the total read
+ *  three thousand. This walks the already-counted range backwards, bucketing
+ *  only — it never touches `peers` or `production.scanned`, because those blocks
+ *  are counted there already and adding them twice is exactly the failure the
+ *  cursor logic exists to prevent.
+ *
+ *  Runs after the forward scan and shares its per-poll budget, so catching up on
+ *  the head always wins over reconstructing the past. */
+async function backfillDays(viewer) {
+  if (production.scannedFrom === undefined || production.daysFrom === undefined) return
+  let to = production.daysFrom - 1
+  if (to < production.scannedFrom) return
+
+  let budget = PEERS_CATCHUP
+  try {
+    while (to >= production.scannedFrom && budget > 0) {
+      const from = Math.max(production.scannedFrom, to - 199)
+      const limit = to - from + 1
+      const blocks = await viewer.block.blocksByNumber(to, limit)
+      if (!blocks?.length) {
+        // Same reasoning as the forward scan: an empty answer is the gateway
+        // declining, and moving daysFrom past it would mark those days filled.
+        production.daysError = `gateway returned no blocks for ${from}-${to}`
+        break
+      }
+
+      for (const entry of blocks) {
+        const bw = Array.isArray(entry) ? entry[0] : entry
+        const n = Number(bw?.block)
+        if (!Number.isFinite(n) || n < from || n > to) continue
+        const epoch = Number(bw?.$epoch)
+        if (!Number.isFinite(epoch) || epoch <= 0) continue
+        const signers = new Set((bw?.addresses ?? [])
+          .map((a) => String(a).replace(/^0x/i, '').toLowerCase())
+          .filter(Boolean))
+        if (signers.size === 0) continue
+        bucket(dayKey(epoch), signers)
+      }
+
+      production.daysFrom = from
+      to = from - 1
+      budget -= limit
+      production.daysError = undefined
+    }
+    pruneDays()
+  } catch (error) {
+    production.daysError = error.message?.slice(0, 160)
   }
 }
 
@@ -550,19 +710,67 @@ function peerBoard() {
   const scanned = production.scanned || 0
   const { byAddress: labels, ambiguous, unmatched } = resolveLabels([...peers.keys()])
 
-  const rows = [...peers.entries()]
-    .map(([address, blocks]) => ({
-      address,
-      blocks,
-      sharePercent: scanned > 0 ? Number(((blocks / scanned) * 100).toFixed(2)) : undefined,
-      isSelf: Boolean(self) && address === self,
-      label: labels.get(address),
-      url: explorerAddress(address),
-    }))
-    // Ties broken by address so the order does not jitter between polls.
-    .sort((a, b) => b.blocks - a.blocks || a.address.localeCompare(b.address))
+  /** One ranked table over one tally. Every window is built by this, so a row
+   *  means the same thing whichever column it is read from. */
+  const rank = (counts, denominator) => {
+    const rows = [...counts.entries()]
+      .map(([address, blocks]) => ({
+        address,
+        blocks,
+        sharePercent: denominator > 0 ? Number(((blocks / denominator) * 100).toFixed(2)) : undefined,
+        isSelf: Boolean(self) && address === self,
+        label: labels.get(address),
+        url: explorerAddress(address),
+      }))
+      // Ties broken by address so the order does not jitter between polls.
+      .sort((a, b) => b.blocks - a.blocks || a.address.localeCompare(b.address))
+    rows.forEach((r, i) => { r.rank = i + 1 })
+    // The gap to this node, which is the number actually being asked for when
+    // one producer is chasing another. Positive means they are ahead of us.
+    const mineHere = rows.find((r) => r.isSelf)
+    if (mineHere) for (const r of rows) r.vsSelf = r.blocks - mineHere.blocks
+    return rows
+  }
 
-  rows.forEach((r, i) => { r.rank = i + 1 })
+  /** Sum a set of day buckets into one tally. */
+  const over = (keys) => {
+    const counts = new Map()
+    let denominator = 0
+    let covered = 0
+    for (const key of keys) {
+      const day = days.get(key)
+      if (!day) continue
+      covered += 1
+      denominator += day.scanned
+      for (const [addr, n] of day.counts) counts.set(addr, (counts.get(addr) ?? 0) + n)
+    }
+    return { counts, denominator, covered }
+  }
+
+  /** A window as the page consumes it: ranked rows plus what they rest on. */
+  const windowOf = (keys) => {
+    const { counts, denominator, covered } = over(keys)
+    const rows = rank(counts, denominator)
+    const mineHere = rows.find((r) => r.isSelf)
+    return {
+      days: keys.length,
+      daysWithData: covered,
+      from: keys.at(-1),
+      to: keys[0],
+      scannedBlocks: denominator,
+      producers: rows.length,
+      selfRank: mineHere?.rank,
+      self: mineHere,
+      leader: rows[0],
+      top: rows.slice(0, PEERS_TOP),
+      // Every address in the window, not just the visible top. The page lists
+      // rows in total order and reads each one's window figure out of this, so
+      // a producer ranked 3rd overall and 1st today still shows both numbers.
+      blocksByAddress: Object.fromEntries(rows.map((r) => [r.address, r.blocks])),
+    }
+  }
+
+  const rows = rank(peers, scanned)
   const mine = rows.find((r) => r.isSelf)
 
   return {
@@ -578,6 +786,27 @@ function peerBoard() {
     selfRank: mine?.rank,
     self: mine,
     top: rows.slice(0, PEERS_TOP),
+    // Windows over the same blocks as the total above, split by the day each
+    // block reports. A producer that was offline for two days is behind on the
+    // total and level for today, and only one of those is news.
+    windows: {
+      today: windowOf([todayKey()]),
+      week: windowOf(recentKeys(7)),
+    },
+    dayTz: DAY_TZ,
+    dayTzError,
+    daysKept: DAYS_KEPT,
+    daysStored: days.size,
+    // How far back the day buckets reach, against how far the totals do. While
+    // a backfill is still running these differ, and a week window that is quietly
+    // missing its oldest days would otherwise read as a producer having a quiet
+    // week.
+    daysFrom: production.daysFrom,
+    daysComplete: production.daysFrom !== undefined
+      && production.scannedFrom !== undefined
+      && production.daysFrom <= production.scannedFrom,
+    daysError: production.daysError,
+    undated: production.undated,
     // Labels that could not be applied. Surfaced rather than dropped: a name
     // silently missing from the table looks identical to a producer who has
     // stopped, and the operator would go looking at the wrong thing.
@@ -639,6 +868,7 @@ async function pollChain() {
     }
 
     await scanProduction(viewer, currentNum)
+    await backfillDays(viewer)
 
     sample('height', currentNum)
     sample('blocks', production.counted)
@@ -1037,7 +1267,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, peers, production }
+export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

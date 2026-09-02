@@ -453,10 +453,26 @@ function render(d) {
     // chain, every bar against a fixed 100 would be a stub and the ranking —
     // the thing this table exists to show — would be invisible.
     const lead = Math.max(...rows.map((r) => r.sharePercent ?? 0), (pb.self?.sharePercent ?? 0), 0.0001)
+
+    // Window figures are looked up per address rather than re-ranked, so a row
+    // keeps its place in the overall table while showing what it did today.
+    // A producer with no blocks in a window is a real zero, not missing data —
+    // but only once that window has been filled, hence the dash while a
+    // backfill is still walking backwards.
+    const wToday = pb.windows?.today
+    const wWeek = pb.windows?.week
+    const cell = (w, addr) => {
+      if (!w) return '—'
+      const v = w.blocksByAddress?.[addr]
+      return num(v ?? 0)
+    }
+
     const tr_ = (r, cls = '') => `<tr class="${cls}${r.isSelf ? ' self' : ''}">
       <td>${num(r.rank)}</td>
       <td>${nameCell(r)}</td>
       <td class="barcell"><div class="peer-bar"><i style="width:${Math.max(r.sharePercent ? 2 : 0, ((r.sharePercent ?? 0) / lead) * 100)}%"></i></div></td>
+      <td>${cell(wToday, r.address)}</td>
+      <td>${cell(wWeek, r.address)}</td>
       <td>${num(r.blocks)}</td>
       <td>${r.sharePercent !== undefined ? `${r.sharePercent}%` : '—'}</td>
     </tr>`
@@ -466,10 +482,26 @@ function render(d) {
     // The comparison an operator actually wants: not the raw count, but how far
     // off the top this node is. Same-rank-1 says so instead of printing "0
     // behind", which reads like a deficit.
+    // Said per window, because they routinely disagree and the disagreement is
+    // the point: a node that was offline for two days is far behind on the
+    // total and even for today, and only the second number describes how it is
+    // running now.
+    const standing = (w, label) => {
+      if (!w?.self || !w.leader) return ''
+      const gap = w.leader.blocks - w.self.blocks
+      const runnerUp = w.top?.[1]
+      const text = w.self.rank === 1
+        ? `leading by ${num(w.self.blocks - (runnerUp?.blocks ?? w.self.blocks))}`
+        : `${num(gap)} behind the leader`
+      return `<div class="sub">${label}: #${num(w.self.rank)} of ${num(w.producers)} · ${num(w.self.blocks)} block(s) · ${text}</div>`
+    }
+
     const gapLine = (!mine || !leader) ? ''
-      : mine.rank === 1
-        ? `<div class="sub">leading by ${num(leader.blocks - (rows[1]?.blocks ?? leader.blocks))} block(s)</div>`
-        : `<div class="sub">${num(leader.blocks - mine.blocks)} block(s) behind the leader</div>`
+      : `${mine.rank === 1
+          ? `<div class="sub">overall: leading by ${num(leader.blocks - (rows[1]?.blocks ?? leader.blocks))} block(s)</div>`
+          : `<div class="sub">overall: ${num(leader.blocks - mine.blocks)} block(s) behind the leader</div>`}
+         ${standing(wToday, 'today')}
+         ${standing(wWeek, '7 days')}`
 
     cards.push(`<section class="wide" style="--c: var(--c-peers)">
       <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
@@ -481,7 +513,7 @@ function render(d) {
       ${pb.error ? `<div class="err" style="margin-top:8px">${esc(pb.error)}</div>` : ''}
       <div class="board-wrap">
         <table class="board">
-          <thead><tr><th>#</th><th>Producer</th><th></th><th>Blocks</th><th>Share</th></tr></thead>
+          <thead><tr><th>#</th><th>Producer</th><th></th><th>Today</th><th>7d</th><th>Total</th><th>Share</th></tr></thead>
           <tbody>
             ${rows.map((r) => tr_(r)).join('')}
             ${outside ? tr_(outside, 'gap ') : ''}
@@ -490,8 +522,14 @@ function render(d) {
       </div>
       <div class="sub" style="margin-top:8px">
         ${num(pb.scannedBlocks)} blocks sampled${pb.scannedFrom !== undefined ? ` (#${num(pb.scannedFrom)}–#${num(pb.scannedTo)})` : ''}${pb.since ? ` · since ${new Date(pb.since).toLocaleDateString()}` : ''}.
-        Totals persist across restarts.
+        Totals persist across restarts. Days are ${esc(pb.dayTz ?? 'UTC')}, kept for ${num(pb.daysKept ?? 0)} days.
       </div>
+      ${pb.dayTzError ? `<div class="sub warn">${esc(pb.dayTzError)}</div>` : ''}
+      ${pb.daysError ? `<div class="sub warn">day history: ${esc(pb.daysError)}</div>` : ''}
+      ${pb.daysComplete === false
+        ? `<div class="sub warn">Day history still filling in — it reaches back to #${num(pb.daysFrom)} of #${num(pb.scannedFrom)}, so older windows undercount until it finishes.</div>`
+        : ''}
+      ${pb.undated ? `<div class="sub warn">${num(pb.undated)} block(s) carried no timestamp and are in the totals only.</div>` : ''}
       ${pb.multiSigner ? `<div class="sub">Some blocks carry more than one signer, so the share column can total over 100%.</div>` : ''}
       ${(pb.labels?.rejected ?? []).map((x) => `<div class="sub warn">DASH_PEER_LABELS: ${esc(x)}</div>`).join('')}
       ${(pb.labels?.ambiguous ?? []).map((x) => `<div class="sub warn">Label “${esc(x.name)}” (${esc(x.key)}) ${

@@ -451,6 +451,20 @@ HF_N="$(statz_num headFetch count)"
 CYC_P50="$(statz_num productionCycle p50Ms)"
 CYC_P95="$(statz_num productionCycle p95Ms)"
 
+# Where a cycle's time goes. Same STATZ payload already in hand — no second
+# request — pulled out per stage so the dashboard can show the split instead of
+# a single number.
+#
+# These stages do NOT sum to productionCycle, and the dashboard says so rather
+# than quietly normalising. generateTimePayload and the reward diviner's
+# divine() both sit on the producing path and appear in no ProducerTimingNames
+# entry, so the remainder is real work that the producer does not time. Pretending
+# the parts add up would invent precision the instrumentation does not have.
+BP_P50="$(statz_num blockProduction p50Ms)"
+MPT_P50="$(statz_num mempoolPendingTransactionsFetch p50Ms)"
+MPB_P50="$(statz_num mempoolPendingBlocksFetch p50Ms)"
+SUB_P50="$(statz_num mempoolSubmitBlock p50Ms)"
+
 {
   printf '{'
   printf '"collectedAt":"%s",' "${COLLECTED_AT}"
@@ -465,7 +479,16 @@ CYC_P95="$(statz_num productionCycle p95Ms)"
       "${HF_MIN:-null}" "${HF_P50}" "${HF_P95}" "${HF_N}"
     [[ "${CYC_P50}" =~ ^[0-9.]+$ ]] && printf ',"cycleP50Ms":%s' "${CYC_P50}"
     [[ "${CYC_P95}" =~ ^[0-9.]+$ ]] && printf ',"cycleP95Ms":%s' "${CYC_P95}"
-    printf '},'
+    printf ',"stages":{'
+    STAGE_FIRST=1
+    for pair in "headFetch:${HF_P50}" "blockProduction:${BP_P50}" \
+                "mempoolTx:${MPT_P50}" "mempoolBlocks:${MPB_P50}" "submit:${SUB_P50}"; do
+      v="${pair#*:}"; k="${pair%%:*}"
+      [[ "${v}" =~ ^[0-9.]+$ ]] || continue
+      [[ ${STAGE_FIRST} -eq 1 ]] && STAGE_FIRST=0 || printf ','
+      printf '"%s":%s' "${k}" "${v}"
+    done
+    printf '}},'
   fi
   printf '"errorCount":%s,' "${ERRORS:-0}"
   printf '"buildsThisRun":%s,' "${BUILDS:-0}"

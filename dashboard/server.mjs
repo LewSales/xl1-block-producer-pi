@@ -1216,6 +1216,122 @@ function derived() {
     observedSeconds,
     samples: history.height.length,
 
+    // Operator summaries, all of them arithmetic over data already in this
+    // payload. No new request, no new telemetry, no work in the producer.
+    operations: (() => {
+      const race = state.node?.race
+      const lat = state.node?.latency
+      const board = peerBoard()
+      const ring = production.recent ?? []
+
+      // -- efficiency score ------------------------------------------------
+      //
+      // Transparent by construction: every component is published beside the
+      // total, and the total is the mean of whichever components could be
+      // computed. A score whose parts are hidden is a vanity number, and a
+      // score that silently treats a missing part as zero is worse than none.
+      //
+      // Thresholds are stated here rather than tuned to flatter this node:
+      //  - latency: the producer's own produceBlock budget is 1000ms. A cycle
+      //    at or under half the budget is full marks; at twice the budget, zero.
+      //  - race health: the share of builds that were NOT rejected locally.
+      //  - win rate: measured against an even split of the chain, not against
+      //    100% — with seven producers, parity is 1/7 and that is what 100 means.
+      //  - reliability: restarts and errors seen in the collector's window.
+      const clamp = (n) => Math.max(0, Math.min(100, Math.round(n)))
+      const components = []
+
+      if (Number.isFinite(lat?.cycleP50Ms)) {
+        components.push(['Latency', clamp(100 * (2000 - lat.cycleP50Ms) / 1500), `cycle p50 ${lat.cycleP50Ms}ms vs a 1000ms budget`])
+      }
+      if (Number.isFinite(race?.built) && race.built > 0) {
+        const lost = Object.values(race.lost ?? {}).reduce((a, b) => a + b, 0)
+        components.push(['Race health', clamp(100 * (1 - lost / race.built)), `${lost} of ${race.built} builds rejected locally`])
+      }
+      const producers = board.producers || 0
+      const ourShare = board.self?.sharePercent
+      if (producers > 0 && Number.isFinite(ourShare)) {
+        const fair = 100 / producers
+        components.push(['Win rate', clamp(100 * (ourShare / fair)), `${ourShare}% of the chain against a ${fair.toFixed(1)}% even split`])
+      }
+      const restarts = Number(state.node?.container?.restartCount)
+      if (Number.isFinite(restarts)) {
+        components.push(['Reliability', clamp(100 - restarts * 10), restarts === 0 ? 'no container restarts' : `${restarts} container restart(s)`])
+      }
+
+      const score = components.length > 0
+        ? Math.round(components.reduce((a, [, v]) => a + v, 0) / components.length)
+        : undefined
+
+      // -- streaks, from the persisted ring --------------------------------
+      const sinceWin = (() => {
+        for (let i = ring.length - 1, gap = 0; i >= 0; i--, gap++) if (ring[i].mine) return gap
+        return undefined   // no win inside the ring at all — not "zero"
+      })()
+      let longestGap
+      if (ring.some((b) => b.mine)) {
+        let run = 0
+        longestGap = 0
+        for (const b of ring) {
+          if (b.mine) { longestGap = Math.max(longestGap, run); run = 0 } else run++
+        }
+        longestGap = Math.max(longestGap, run)
+      }
+
+      // -- network competition ---------------------------------------------
+      const shares = (board.top ?? []).map((r) => r.sharePercent).filter(Number.isFinite).sort((a, b) => b - a)
+      const median = shares.length > 0 ? shares[Math.floor(shares.length / 2)] : undefined
+      const competition = shares.length > 0 ? {
+        producers,
+        leaderShare: shares[0],
+        topThreeShare: Number(shares.slice(0, 3).reduce((a, b) => a + b, 0).toFixed(2)),
+        ourShare,
+        medianShare: median,
+        vsMedian: Number.isFinite(ourShare) && Number.isFinite(median)
+          ? Number((ourShare - median).toFixed(2)) : undefined,
+        vsLeader: Number.isFinite(ourShare) ? Number((ourShare - shares[0]).toFixed(2)) : undefined,
+      } : undefined
+
+      // -- bottleneck: one statement, derived, never guessed ----------------
+      const bottleneck = (() => {
+        const lost = race?.lost ?? {}
+        const lostTotal = Object.values(lost).reduce((a, b) => a + b, 0)
+        if (lostTotal >= 5) {
+          const pct = (n) => Math.round((n / lostTotal) * 100)
+          if (pct(lost.txAlreadyFinalized ?? 0) >= 50) {
+            return { key: 'mempool', text: `Stale mempool data caused ${pct(lost.txAlreadyFinalized)}% of rejected candidates.` }
+          }
+          if (pct(lost.behindFinalizedHead ?? 0) >= 50) {
+            return { key: 'competition', text: `Head advanced first on ${pct(lost.behindFinalizedHead)}% of rejections — we are being outrun, not failing.` }
+          }
+        }
+        if (Number.isFinite(lat?.localMs) && Number.isFinite(lat?.wireFloorMs) && lat.localMs > lat.wireFloorMs) {
+          return { key: 'local', text: `Local work dominates: ${lat.localMs}ms of a ${lat.typicalMs}ms head fetch is this machine, not the network.` }
+        }
+        if (Number.isFinite(lat?.cycleP95Ms) && lat.cycleP95Ms > 2000) {
+          return { key: 'cycle', text: `Cycle p95 is ${lat.cycleP95Ms}ms against a 1000ms budget.` }
+        }
+        if (!race && !lat) return { key: 'unknown', text: 'Insufficient data.' }
+        return { key: 'none', text: 'No local performance constraint detected.' }
+      })()
+
+      return {
+        score,
+        components: components.map(([label, value, why]) => ({ label, value, why })),
+        sinceWin,
+        longestGap,
+        ringBlocks: ring.length || undefined,
+        competition,
+        bottleneck,
+        // Stage timings are p50s of separate, NESTED distributions — cycle
+        // contains headFetch and blockProduction, and blockProduction contains
+        // the mempool calls. They deliberately are not rendered as a waterfall
+        // summing to 100%, because they do not sum and saying they do would
+        // invent a decomposition the instrumentation cannot support.
+        stages: lat?.stages ?? state.node?.latency?.stages,
+      }
+    })(),
+
     // The candidate race: why blocks are being lost, and how often.
     //
     // Deliberately mixed-source, and the sources are not interchangeable.

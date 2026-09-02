@@ -77,6 +77,12 @@
   .reason { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; margin-top: 6px; }
   .reason-bar { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
   .reason-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--warn) 65%, transparent); }
+  .score-row { display: grid; grid-template-columns: 7.5em 2.5em 1fr; gap: 3px 8px; align-items: center; margin-top: 5px; }
+  .score-bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .score-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--ok) 65%, transparent); }
+  .score-bar.mid > i { background: color-mix(in srgb, var(--warn) 65%, transparent); }
+  .score-bar.low > i { background: color-mix(in srgb, var(--bad) 65%, transparent); }
+  .conf { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
   .lat-row { display: grid; grid-template-columns: 5.5em 5em 1fr; gap: 4px 8px; align-items: center; margin-top: 5px; }
   .lat-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
   .lat-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-chain) 70%, transparent); }
@@ -436,6 +442,70 @@ function render(d) {
               : 'full clock'],
       ])}
       ${bar(s.memory.usedPercent)}
+    </section>`)
+  }
+
+  // Operations — score, bottleneck, competition. All arithmetic over data that
+  // is already in this payload; the card issues no request of its own.
+  const ops = dv.operations
+  if (ops && (ops.score !== undefined || ops.bottleneck)) {
+    // Confidence is shown wherever a number could be read as more solid than it
+    // is. A percentile over 19 samples and one over 13,000 look identical
+    // otherwise, and only one of them is worth acting on.
+    const conf = (n, warm = 30, high = 300) => {
+      if (!Number.isFinite(n)) return ''
+      const label = n >= high ? `high confidence · ${num(n)}` : n >= warm ? `limited · ${num(n)}` : `warming up · ${num(n)}`
+      return `<span class="conf" title="calculated from ${num(n)} samples">${label}</span>`
+    }
+    const cls = (v) => (v >= 75 ? '' : v >= 50 ? 'mid' : 'low')
+
+    const comp = ops.competition
+    cards.push(`<section style="--c: var(--c-producer)">
+      <h2><span class="ico" aria-hidden="true">🎯</span>Operations</h2>
+      ${ops.score !== undefined
+        ? `<div class="big">${num(ops.score)} <span style="font-size:14px;color:var(--muted)">/ 100</span></div>
+           <div class="sub">mean of ${num(ops.components.length)} measured component(s) — every one shown below</div>
+           ${ops.components.map((c) => `<div class="score-row" title="${esc(c.why)}">
+              <span class="sub">${esc(c.label)}</span><span class="mono">${num(c.value)}</span>
+              <span class="score-bar ${cls(c.value)}"><i style="width:${Math.max(2, c.value)}%"></i></span>
+            </div>`).join('')}`
+        : '<div class="sub">Not enough measured components for a score yet.</div>'}
+
+      ${ops.bottleneck ? `<div class="sub" style="margin-top:10px">Bottleneck</div>
+        <div class="${ops.bottleneck.key === 'none' ? 'ok' : ops.bottleneck.key === 'unknown' ? 'sub' : 'warn'}">
+          ${ops.bottleneck.key === 'none' ? '✓ ' : ops.bottleneck.key === 'unknown' ? '' : '! '}${esc(ops.bottleneck.text)}
+        </div>` : ''}
+
+      ${comp ? `<div class="sub" style="margin-top:10px">Field of ${num(comp.producers)}</div>
+        ${dl([
+          ['Our share', Number.isFinite(comp.ourShare) ? `${comp.ourShare}%` : '—'],
+          ['Leader', `${comp.leaderShare}%`],
+          ['Top 3 combined', `${comp.topThreeShare}%`],
+          ['vs median', Number.isFinite(comp.vsMedian)
+            ? `<span class="${comp.vsMedian >= 0 ? 'ok' : 'warn'}">${comp.vsMedian >= 0 ? '↑' : '↓'} ${Math.abs(comp.vsMedian)} pts</span>` : '—'],
+          ['vs leader', Number.isFinite(comp.vsLeader) ? `${comp.vsLeader} pts` : '—'],
+        ])}` : ''}
+
+      ${(ops.sinceWin !== undefined || ops.longestGap !== undefined) ? tiles([
+        ['Since last win', ops.sinceWin !== undefined ? `${num(ops.sinceWin)}` : '—', 'blocks'],
+        ['Longest gap', ops.longestGap !== undefined ? `${num(ops.longestGap)}` : '—', `in last ${num(ops.ringBlocks)}`],
+      ]) : ''}
+
+      ${ops.stages ? `<div class="sub" style="margin-top:10px">Where a cycle spends its time ${conf(dv.latency?.samples)}</div>
+        ${(() => {
+          const rows = Object.entries(ops.stages).filter(([, v]) => Number.isFinite(v))
+          const top = Math.max(...rows.map(([, v]) => v), 1)
+          const names = { headFetch: 'head fetch', blockProduction: 'build', mempoolTx: 'mempool tx', mempoolBlocks: 'mempool blocks', submit: 'submit' }
+          return rows.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="lat-row">
+            <span class="sub">${esc(names[k] ?? k)}</span><span class="mono">${num(v)} ms</span>
+            <span class="lat-bar"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
+          </div>`).join('')
+        })()}
+        <div class="sub" style="margin-top:6px">
+          Typical (p50) per stage. These nest — a cycle contains the head fetch and
+          the build, and the build contains the mempool calls — so they are not a
+          waterfall and do not sum to the cycle.
+        </div>` : ''}
     </section>`)
   }
 

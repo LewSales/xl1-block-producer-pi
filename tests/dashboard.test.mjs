@@ -732,3 +732,78 @@ test('the scan records chain order for the pulse, including blocks we lost', asy
   assert.deepEqual(m.production.recent.map((b) => b.mine), [false, true, false, true])
   assert.equal(m.derived().race.won, 2)
 })
+
+// ------------------------------------------------------------- operations
+//
+// The score is the risky one: a number out of 100 invites trust, so these pin
+// that it never hides a missing component, never scores a component it could
+// not measure, and never rates "winning" against 100% when parity is 1/n.
+
+function opsState({ race, latency, restartCount = 0, recent = [], peers } = {}) {
+  m.state.node = { ok: true, container: { name: 'xl1-producer', running: true, restartCount }, race, latency }
+  m.production.recent = recent
+  m.peers.clear()
+  if (peers) for (const [addr, n] of Object.entries(peers)) m.peers.set(addr, n)
+  m.production.scanned = peers ? Object.values(peers).reduce((a, b) => a + b, 0) : 0
+}
+
+test('the score is the mean of measured components only, never of assumed zeroes', () => {
+  // Only latency and reliability are measurable here. A missing component must
+  // shrink the denominator, not drag the score down as a zero.
+  opsState({ latency: { cycleP50Ms: 500 }, restartCount: 0 })
+  const o = m.derived().operations
+  assert.equal(o.components.length, 2)
+  assert.deepEqual(o.components.map((c) => c.label).sort(), ['Latency', 'Reliability'])
+  assert.equal(o.components.find((c) => c.label === 'Latency').value, 100, '500ms is half the budget: full marks')
+  assert.equal(o.score, 100, 'two perfect components average to 100, not 50')
+})
+
+test('win rate is scored against an even split, not against the whole chain', () => {
+  // Four producers, we hold 25% — that is parity, and parity is 100.
+  opsState({
+    peers: { [SELF]: 25, [PEER_A]: 25, [PEER_B]: 25, '3333333333333333333333333333333333333333': 25 },
+  })
+  const win = m.derived().operations.components.find((c) => c.label === 'Win rate')
+  assert.equal(win.value, 100)
+  assert.match(win.why, /25% of the chain against a 25.0% even split/)
+})
+
+test('race health is the share of builds that survived, and it is stated', () => {
+  opsState({ race: { built: 100, retries: 0, lost: { txAlreadyFinalized: 10, behindFinalizedHead: 10, blockNumberMismatch: 0 } } })
+  const rh = m.derived().operations.components.find((c) => c.label === 'Race health')
+  assert.equal(rh.value, 80, '20 of 100 builds rejected')
+  assert.match(rh.why, /20 of 100 builds rejected locally/)
+})
+
+test('the bottleneck names the dominant loss reason rather than guessing', () => {
+  opsState({ race: { built: 50, retries: 5, lost: { txAlreadyFinalized: 14, behindFinalizedHead: 5, blockNumberMismatch: 1 } } })
+  const b = m.derived().operations.bottleneck
+  assert.equal(b.key, 'mempool')
+  assert.match(b.text, /70% of rejected candidates/)
+})
+
+test('too few losses to be meaningful does not produce a confident diagnosis', () => {
+  // Three rejections is noise. It must fall through to a latency statement or
+  // to "none", never to "stale mempool caused 100%".
+  opsState({
+    race: { built: 40, retries: 0, lost: { txAlreadyFinalized: 3, behindFinalizedHead: 0, blockNumberMismatch: 0 } },
+    latency: { wireFloorMs: 100, typicalMs: 150, localMs: 50, cycleP95Ms: 900 },
+  })
+  const b = m.derived().operations.bottleneck
+  assert.notEqual(b.key, 'mempool')
+  assert.equal(b.key, 'none')
+})
+
+test('no win inside the ring reports no streak rather than a zero-block gap', () => {
+  opsState({ recent: [{ n: 1, mine: false }, { n: 2, mine: false }] })
+  const o = m.derived().operations
+  assert.equal(o.sinceWin, undefined, 'zero would read as "won the last block"')
+  assert.equal(o.longestGap, undefined)
+})
+
+test('streaks count blocks since the last win, oldest-first ring', () => {
+  opsState({ recent: [{ n: 1, mine: true }, { n: 2, mine: false }, { n: 3, mine: true }, { n: 4, mine: false }, { n: 5, mine: false }] })
+  const o = m.derived().operations
+  assert.equal(o.sinceWin, 2, 'two blocks since #3')
+  assert.equal(o.longestGap, 2)
+})

@@ -28,7 +28,12 @@ die() { printf '  %s✗%s %s\n' "${RED}" "${RESET}" "$*" >&2; exit 1; }
 # baked into whatever image is underneath, which is a wrong answer rather than a
 # missing one. --dirty is deliberate: a build from uncommitted changes must not
 # claim a commit that is on GitHub.
-COMMIT="$(git -C "${HERE}" describe --always --dirty --abbrev=8 2>/dev/null || echo unknown)"
+# The bare short sha, NOT `git describe`. describe prefers the nearest tag and
+# produces "pre-bindmount-2.2.2-1-g8864863", which GitHub cannot resolve as a
+# commit — so the "go read the code" link 404s the moment anyone tags a release.
+# The sha is the identifier, and it is what makes that link work.
+COMMIT="$(git -C "${HERE}" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+git -C "${HERE}" diff --quiet 2>/dev/null || COMMIT="${COMMIT}-dirty"
 VERSION="$(node -e "process.stdout.write(require('${HERE}/dashboard/package.json').version)" 2>/dev/null || echo unknown)"
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STAMP="$(printf '{"version":"%s","commit":"%s","builtAt":"%s"}' "${VERSION}" "${COMMIT}" "${BUILT_AT}")"

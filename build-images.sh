@@ -84,7 +84,11 @@ log "Dashboard image"
 # dashboard built from uncommitted edits must not claim to be the commit it was
 # branched from, or a deploy that shipped something else looks identical to one
 # that did not.
-DASH_COMMIT="$(git -C "${HERE}" describe --always --dirty --abbrev=8 2>/dev/null || echo unknown)"
+# Bare short sha, not `git describe`: describe prefers the nearest tag and yields
+# something GitHub cannot resolve as a commit, which breaks the dashboard's own
+# "read the code" link as soon as a release is tagged.
+DASH_COMMIT="$(git -C "${HERE}" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+git -C "${HERE}" diff --quiet 2>/dev/null || DASH_COMMIT="${DASH_COMMIT}-dirty"
 DASH_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker build --platform "${PLATFORM}" \
   --build-arg "DASH_COMMIT=${DASH_COMMIT}" \

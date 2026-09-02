@@ -732,7 +732,63 @@ function render(d) {
     </section>`)
   }
 
-  $('grid').innerHTML = cards.join('')
+  // Card order is a product decision, not an artefact of the order the code
+  // happens to build them in. Sorted here so a new card can be written wherever
+  // it fits in the file and still land where an operator expects it.
+  //
+  // Ranked by what is asked first: is it alive and what is it running, is it
+  // winning, how is it performing, then the chain, then money, then the host,
+  // then history and raw output. Software & host sits directly under Producer
+  // because they answer one question between them — what is running, and is it
+  // the right version.
+  const CARD_ORDER = [
+    'Producer cannot produce',   // the banner, when it exists, always first
+    'Producer log',              // matched before 'Producer' — startsWith would
+                                 // otherwise claim it for the producer card
+    'Producer standings',
+    'Producer',
+    'Software & host',
+    'Candidate race',
+    'Operations',
+    'Chain',
+    'Latency',
+    'Rewards',
+    'Raspberry Pi',
+    'Host',
+    'Trends',
+  ]
+  // Where each of those actually goes. Kept separate from the match list so the
+  // matching order (longest-prefix-first) cannot be confused with the display
+  // order, which is the bug that would put the log second.
+  const CARD_RANK = {
+    'Producer cannot produce': 0,
+    Producer: 1,
+    'Software & host': 2,
+    'Candidate race': 3,
+    Operations: 4,
+    Chain: 5,
+    Latency: 6,
+    'Producer standings': 7,
+    Rewards: 8,
+    'Raspberry Pi': 9,
+    Host: 9,
+    Trends: 10,
+    'Producer log': 11,
+  }
+  const rankOf = (html) => {
+    const m = html.match(/<h2[^>]*>(?:\s*<span[^>]*>[^<]*<\/span>)?\s*([^<]+)/)
+    const title = m ? m[1].replaceAll('&amp;', '&').trim() : ''
+    const key = CARD_ORDER.find((t) => title.startsWith(t))
+    // An unrecognised card keeps its position rather than being flung to one
+    // end: a card added later should look misplaced, not disappear.
+    return key === undefined ? 50 : CARD_RANK[key]
+  }
+  // Stable sort, so cards sharing a rank keep the order they were built in.
+  $('grid').innerHTML = cards
+    .map((html, i) => [rankOf(html), i, html])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+    .map(([, , html]) => html)
+    .join('')
   $('foot').innerHTML = (d.problems?.length
     ? `<ul class="problems">${d.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`
     : '')

@@ -817,9 +817,28 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '1.0.0', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.1.0', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
   assert.equal(b.builtAt, 'unknown')
+})
+
+// A cycle over budget is only a fault if it is costing work. Escalating on the
+// threshold alone put an amber "!" on a node sitting 3rd of 7 with nothing
+// measurably wrong, which trains an operator to ignore the card.
+
+test('a slow cycle costing nothing is reported without crying fault', () => {
+  opsState({ latency: { cycleP95Ms: 2319, skippedChecks: 0, rejectedPublishes: 0 } })
+  const b = m.derived().operations.bottleneck
+  assert.equal(b.key, 'none', 'no skipped check and no rejected publish is not a fault')
+  assert.match(b.text, /2319ms/, 'the number is still stated, not hidden')
+  assert.match(b.text, /costing nothing measurable/)
+})
+
+test('the same cycle escalates once it actually costs work', () => {
+  opsState({ latency: { cycleP95Ms: 2319, skippedChecks: 3, rejectedPublishes: 1 } })
+  const b = m.derived().operations.bottleneck
+  assert.equal(b.key, 'cycle')
+  assert.match(b.text, /3 check\(s\) skipped, 1 publish\(es\) rejected/)
 })

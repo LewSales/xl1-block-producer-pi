@@ -1319,8 +1319,32 @@ function derived() {
         if (Number.isFinite(lat?.localMs) && Number.isFinite(lat?.wireFloorMs) && lat.localMs > lat.wireFloorMs) {
           return { key: 'local', text: `Local work dominates: ${lat.localMs}ms of a ${lat.typicalMs}ms head fetch is this machine, not the network.` }
         }
+        // A cycle over budget only matters if it is costing something, and the
+        // producer publishes exactly that: a check skipped because the previous
+        // one was still running, or a publish the chain refused. With both at
+        // zero this is a characteristic of the hardware, not a fault — the
+        // producer's own log agrees, warning only at 10x. Saying "bottleneck"
+        // in amber over a node sitting 3rd of 7 trains an operator to ignore
+        // the card, which costs more than the milliseconds do.
+        //
+        // p95 also mixes two populations: ~88% of checks are idle at a few
+        // hundred ms, and the tail is producing cycles, which are inherently
+        // longer. That is stated rather than smoothed away.
         if (Number.isFinite(lat?.cycleP95Ms) && lat.cycleP95Ms > 2000) {
-          return { key: 'cycle', text: `Cycle p95 is ${lat.cycleP95Ms}ms against a 1000ms budget.` }
+          const skipped = Number(state.node?.latency?.skippedChecks)
+          const rejected = Number(state.node?.latency?.rejectedPublishes)
+          const strained = (Number.isFinite(skipped) && skipped > 0) || (Number.isFinite(rejected) && rejected > 0)
+          return strained
+            ? {
+              key: 'cycle',
+              text: `Cycle p95 is ${lat.cycleP95Ms}ms against a 1000ms budget, and it is costing work: `
+                + `${skipped || 0} check(s) skipped, ${rejected || 0} publish(es) rejected.`,
+            }
+            : {
+              key: 'none',
+              text: `Cycle p95 is ${lat.cycleP95Ms}ms against a 1000ms budget — the producing tail, not the typical `
+                + `cycle. No check skipped and no publish rejected, so it is costing nothing measurable.`,
+            }
         }
         if (!race && !lat) return { key: 'unknown', text: 'Insufficient data.' }
         return { key: 'none', text: 'No local performance constraint detected.' }

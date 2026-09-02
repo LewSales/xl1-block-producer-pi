@@ -460,6 +460,11 @@ CYC_P95="$(statz_num productionCycle p95Ms)"
 # divine() both sit on the producing path and appear in no ProducerTimingNames
 # entry, so the remainder is real work that the producer does not time. Pretending
 # the parts add up would invent precision the instrumentation does not have.
+# Whether the node is actually keeping up, which is what decides if a slow
+# cycle matters. Both live in the same STATZ payload. "counts" has no nested
+# object, so the same extractor reaches them.
+SKIPPED="$(statz_num counts concurrentChecksSkipped)"
+REJECTED="$(statz_num counts rejectedPublishes)"
 BP_P50="$(statz_num blockProduction p50Ms)"
 MPT_P50="$(statz_num mempoolPendingTransactionsFetch p50Ms)"
 MPB_P50="$(statz_num mempoolPendingBlocksFetch p50Ms)"
@@ -488,7 +493,10 @@ SUB_P50="$(statz_num mempoolSubmitBlock p50Ms)"
       [[ ${STAGE_FIRST} -eq 1 ]] && STAGE_FIRST=0 || printf ','
       printf '"%s":%s' "${k}" "${v}"
     done
-    printf '}},'
+    printf '}'
+    [[ "${SKIPPED}" =~ ^[0-9]+$ ]] && printf ',"skippedChecks":%s' "${SKIPPED}"
+    [[ "${REJECTED}" =~ ^[0-9]+$ ]] && printf ',"rejectedPublishes":%s' "${REJECTED}"
+    printf '},'
   fi
   printf '"errorCount":%s,' "${ERRORS:-0}"
   printf '"buildsThisRun":%s,' "${BUILDS:-0}"

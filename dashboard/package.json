@@ -1,11 +1,17 @@
 {
   "name": "xl1-pi-dashboard",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "description": "Local status dashboard for an XL1 block producer on a Raspberry Pi",
   "main": "server.mjs",
-  "scripts": { "start": "node server.mjs" },
-  "dependencies": { "@xyo-network/xl1-sdk": "5.4.1" },
-  "engines": { "node": ">=24" }
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@xyo-network/xl1-sdk": "5.4.1"
+  },
+  "engines": {
+    "node": ">=24"
+  }
 }

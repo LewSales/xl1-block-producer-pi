@@ -137,6 +137,8 @@
   .spark path.area { fill: color-mix(in srgb, var(--accent) 13%, transparent); stroke: none; }
   .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
   .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
+  .brand { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+  .brand svg { flex: none; }
   .wide { column-span: all; }
   /* One block holding two cards, stacked, kept whole by break-inside above.
      The pairing survives the column layout: a stack is a single item, so its
@@ -198,6 +200,23 @@
   <span class="chip" title="An independent project. Not built, endorsed, or supported by XYO.">unofficial</span>
   <span class="net" id="net">—</span>
   <span class="spacer"></span>
+  <!-- Build identity, next to the mark. Inline SVG rather than an image file:
+       one less request, scales at any size, and it takes its colour from the
+       theme instead of shipping two versions. currentColor for the ring so it
+       reads in light and dark; the gold bars are the only fixed colour. -->
+  <span class="brand" id="brand" hidden>
+    <svg viewBox="0 0 48 48" width="18" height="18" role="img" aria-label="brand mark">
+      <g fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="butt">
+        <path d="M23 5 A19 19 0 0 0 23 43"/>
+        <path d="M25 5 A19 19 0 0 1 25 43"/>
+        <path d="M11.5 16 L21 24 L11.5 32"/>
+        <path d="M36.5 16 L27 24 L36.5 32"/>
+      </g>
+      <rect x="9" y="22" width="12" height="4" fill="#c99a3b"/>
+      <rect x="27" y="22" width="12" height="4" fill="#c99a3b"/>
+    </svg>
+    <span class="mono" id="build">—</span>
+  </span>
   <span class="pill" id="overall">connecting…</span>
 </header>
 <main id="grid"></main>
@@ -285,6 +304,22 @@ function render(d) {
   $('overall').textContent = d.status === 'ok' ? 'healthy' : d.status
   $('overall').className = `pill ${d.status}`
   $('net').textContent = d.chain?.ok ? `${d.chain.networkName} · chain ${d.chain.chainId.slice(0, 10)}…` : 'chain unreachable'
+
+  // Build identity in the header, beside the mark. Hidden until there is one to
+  // show, so an older dashboard that reports no build does not render an empty
+  // badge next to a logo.
+  const brand = $('brand')
+  if (d.build?.version) {
+    $('build').textContent = d.build.commit && d.build.commit !== 'unknown'
+      ? `${d.build.version} · ${d.build.commit}`
+      : d.build.version
+    brand.title = d.build.builtAt && d.build.builtAt !== 'unknown'
+      ? `build ${d.build.version} · ${d.build.commit} · built ${new Date(d.build.builtAt).toLocaleString()}`
+      : `build ${d.build.version}`
+    brand.hidden = false
+  } else {
+    brand.hidden = true
+  }
 
   const cards = []
   const dv = d.derived ?? {}

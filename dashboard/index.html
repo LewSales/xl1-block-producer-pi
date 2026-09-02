@@ -88,6 +88,17 @@
   .lat-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-chain) 70%, transparent); }
   .lat-bar.wire > i { background: color-mix(in srgb, var(--ok) 70%, transparent); }
   .lat-bar.tail > i { background: color-mix(in srgb, var(--warn) 70%, transparent); }
+  /* Identity disclosure. <details> rather than a JS toggle: it is keyboard
+     reachable, works with the page's own find-in-page, and costs no script. */
+  details.ident { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+  details.ident > summary { cursor: pointer; color: var(--muted); font-size: 12px; list-style: none; }
+  details.ident > summary::-webkit-details-marker { display: none; }
+  details.ident > summary::before { content: '▸ '; }
+  details.ident[open] > summary::before { content: '▾ '; }
+  details.ident > summary:hover, details.ident > summary:focus-visible { color: var(--fg); }
+  details.ident dl { margin-top: 6px; }
+  .spark rect { fill: color-mix(in srgb, var(--c) 70%, transparent); }
+  .spark.ok rect { fill: color-mix(in srgb, var(--ok) 70%, transparent); }
   .peer-bar { height: 7px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 60px; }
   .peer-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-peers) 70%, transparent); }
   table.board tr.self .peer-bar > i { background: var(--accent); }
@@ -197,6 +208,42 @@ const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}<
 const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v, n]) =>
   `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div>${n ? `<div class="n">${n}</div>` : ''}</div>`).join('')}</div>`
 
+/** A sparkline of the CHANGE between samples, for series that only ever rise.
+ *
+ *  Height and reward balance are cumulative counters, so plotting the value
+ *  draws a line that goes up and to the right no matter what the node did —
+ *  the same picture whether it won ten blocks or none, because the axis
+ *  rescales. The delta answers the question actually being asked: WHEN did
+ *  something happen, and how much.
+ *
+ *  It reads especially well for rewards, where the chain pays in fixed 50 XL1
+ *  steps: every bar is a block won, and the gaps between bars are the dry
+ *  spells. `summary` turns the same numbers into one line of plain language,
+ *  because a bar chart with no scale is still just a shape.
+ */
+const sparkDelta = (series, cls = '', summary) => {
+  const pts = (series ?? []).map((p) => Number(p.v)).filter((v) => !Number.isNaN(v))
+  if (pts.length < 3) return `<div class="sub" style="margin-top:10px">collecting — needs a few more samples</div>`
+  // Negative steps mean a restart or a reset, not a loss. Clamped rather than
+  // drawn, so one counter reset cannot invert the whole chart.
+  const deltas = []
+  for (let i = 1; i < pts.length; i++) deltas.push(Math.max(0, pts[i] - pts[i - 1]))
+  const max = Math.max(...deltas) || 1
+  const total = deltas.reduce((a, b) => a + b, 0)
+  const active = deltas.filter((d) => d > 0).length
+  const W = 100, H = 40
+  const bw = W / deltas.length
+  const bars = deltas.map((v, i) => {
+    // A zero stays visibly zero; anything above it gets at least a sliver so a
+    // small step is not indistinguishable from nothing happening.
+    const h = v === 0 ? 0 : Math.max(1.5, (v / max) * H)
+    return `<rect x="${(i * bw).toFixed(2)}" y="${(H - h).toFixed(2)}" width="${Math.max(0.6, bw * 0.8).toFixed(2)}" height="${h.toFixed(2)}"/>`
+  }).join('')
+  const fmt = (v) => Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Number(v.toFixed(2)).toLocaleString()
+  return `<svg class="spark ${cls}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${bars}</svg>
+    <div class="sparkfoot"><span>${summary ? summary(total, active, deltas.length, max) : `+${fmt(total)}`}</span><span>${deltas.length} intervals</span></div>`
+}
+
 /** A sparkline from a history series. Says "collecting" rather than drawing a
  *  flat line from one point — an empty chart that looks like a dead one is
  *  worse than an honest label. */
@@ -261,11 +308,15 @@ function render(d) {
       dv.lastBlock !== undefined && ['Last produced', dv.lastBlockUrl
         ? `<a href="${esc(dv.lastBlockUrl)}" target="_blank" rel="noopener noreferrer">#${num(dv.lastBlock)}</a>`
         : `#${num(dv.lastBlock)}`],
-      dv.blocksSinceLast !== undefined && ['Blocks since', `${num(dv.blocksSinceLast)} ago`],
+      dv.blocksSinceLast !== undefined && ['Last win', dv.blocksSinceLast === 0
+        ? '<span class="ok">this block</span>'
+        : `${num(dv.blocksSinceLast)} block${dv.blocksSinceLast === 1 ? '' : 's'} ago`],
       dv.lastBlock === undefined && dv.producedObserved === 0 &&
         ['Last produced', '<span class="sub">none in the observed range</span>'],
       dv.productionError && ['Block scan', `<span class="warn">${esc(dv.productionError)}</span>`],
-      d.node?.errorCount !== undefined && ['Log errors', `<span class="${d.node.errorCount > 0 ? 'warn' : ''}">${num(d.node.errorCount)}</span>`],
+      d.node?.errorCount !== undefined && ['Log errors', d.node.errorCount > 0
+        ? `<span class="warn">${num(d.node.errorCount)} error${d.node.errorCount === 1 ? '' : 's'}</span>`
+        : '<span class="ok">none</span>'],
       d.node?.eligibility && ['Eligibility', d.node.eligibility.blocked
         ? (d.node.eligibilityIgnored
             ? `<span class="sub">${esc(d.node.eligibility.reason)}</span> <span class="ok">· ${esc(d.node.eligibilityNote ?? 'not enforced here')}</span>`
@@ -284,11 +335,18 @@ function render(d) {
       <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
       ${dl([
         ['Finalization lag', `${num(d.chain.finalizationLag)} blocks`],
-        ['Chain ID', `<span class="mono">${esc(d.chain.chainId)}</span>`],
-        ['Matches preset', d.chain.chainIdMatchesPreset ? '<span class="ok">yes</span>' : '<span class="bad">NO</span>'],
+
+
         ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener noreferrer">open</a>`],
       ])}
-      ${spark(d.history?.height)}
+      <details class="ident"><summary>Chain identity</summary>
+        ${dl([
+          ['Chain ID', `<span class="mono" style="word-break:break-all">${esc(d.chain.chainId)}</span>`],
+          ['Matches preset', d.chain.chainIdMatchesPreset ? '<span class="ok">✓ yes</span>' : '<span class="bad">! NO</span>'],
+        ])}
+      </details>
+      ${sparkDelta(d.history?.height, '', (total, active, intervals) =>
+        `${num(total)} block(s) · ${total > 0 ? `${(dv.observedSeconds / total).toFixed(0)}s each` : 'chain idle'}`)}
       ${tiles([
         ['Block time', dv.secondsPerBlock ? `${dv.secondsPerBlock}s` : '—', 'observed'],
         ['Chain rate', dv.blocksPerHourChain !== undefined ? `${num(dv.blocksPerHourChain)}/h` : '—', 'blocks per hour'],
@@ -306,6 +364,11 @@ function render(d) {
   const addrCell = (x) => x?.url
     ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.address)}</a>`
     : `<span class="mono">${esc(x?.address)}</span>`
+  // Forty hex characters twice over dominated this card for something an
+  // operator verifies once and then never reads again. Demoted behind a
+  // disclosure — still one click away, still linked, still selectable, and
+  // still the full string rather than a truncation you cannot check.
+  const shortAddr = (a) => `${String(a ?? '').slice(0, 6)}…${String(a ?? '').slice(-4)}`
   if (b.reward || b.producer) {
     cards.push(`<section style="--c: var(--c-rewards)">
       <h2><span class="ico" aria-hidden="true">💰</span>Rewards</h2>
@@ -313,13 +376,22 @@ function render(d) {
         <div class="sub">reward address balance</div>` : ''}
       ${dl([
         b.reward?.sinceStart && ['Since dashboard start', `${esc(b.reward.sinceStart.xl1)} XL1`],
-        b.reward && ['Reward address', addrCell(b.reward)],
         b.reward?.error && ['Reward lookup', `<span class="bad">${esc(b.reward.error)}</span>`],
         b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
-        b.producer && ['Producer address', addrCell(b.producer)],
-        dv.rewardEqualsProducer && ['Signer', '<span class="ok">same as reward address</span>'],
+        dv.rewardEqualsProducer && ['Signer', '<span class="ok">✓ same as reward address</span>'],
       ])}
-      ${spark(d.history?.reward, 'ok')}
+      <details class="ident"><summary>Addresses ${b.reward ? `· ${esc(shortAddr(b.reward.address))}` : ''}</summary>
+        ${dl([
+          b.reward && ['Reward address', addrCell(b.reward)],
+          b.producer && !dv.rewardEqualsProducer && ['Producer address', addrCell(b.producer)],
+        ])}
+      </details>
+      ${sparkDelta(d.history?.reward, 'ok', (total, active, intervals, max) =>
+        // The chain pays ~50 XL1 per block, so each bar is a win and the count
+        // of non-empty intervals is how many times this node was paid.
+        total > 0
+          ? `+${num(Number(total.toFixed(4)))} XL1 · ${num(active)} payout(s)`
+          : `no reward movement in ${num(intervals)} intervals`)}
       ${tiles([
         ['Per hour', dv.rewardPerHour !== undefined ? `${num(dv.rewardPerHour)}` : '—', 'XL1 observed'],
         ['Per day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—',

@@ -12,6 +12,23 @@ Type=simple
 Restart=always
 RestartSec=10
 
+# The three source files are bind-mounted from /srv/xl1-dashboard. Deploying the
+# dashboard used to mean cross-building a 110 MB arm64 image and pushing it over
+# the tunnel — ten to fifteen minutes, and three times it exited zero having
+# copied nothing, leaving the Pi silently running an older build. The code is
+# three files; shipping three files takes a second.
+#
+# The image is still the source of truth for everything else — node_modules, the
+# runtime, the healthcheck — and it keeps its own copies of these three, so the
+# mount only shadows them. Remove the mounts and the image runs as before, which
+# is the rollback.
+#
+# Docker creates a DIRECTORY when a bind-mount source is missing, and a directory
+# mounted over server.mjs makes the container fail to start in a way that reads
+# like a code fault. Refuse to start instead, with a message naming the file.
+ExecStartPre=/usr/bin/test -f /srv/xl1-dashboard/server.mjs
+ExecStartPre=/usr/bin/test -f /srv/xl1-dashboard/index.html
+ExecStartPre=/usr/bin/test -f /srv/xl1-dashboard/build.json
 ExecStartPre=-/usr/bin/docker rm -f xl1-dashboard
 
 # --network host so the dashboard can reach the producer's loopback health port
@@ -22,6 +39,9 @@ ExecStart=/usr/bin/docker run --rm --name xl1-dashboard \
   --read-only --tmpfs /tmp \
   -v /var/lib/xl1:/var/lib/xl1:ro \
   -v /var/lib/xl1/dashboard:/var/lib/xl1/dashboard:rw \
+  -v /srv/xl1-dashboard/server.mjs:/app/server.mjs:ro \
+  -v /srv/xl1-dashboard/index.html:/app/index.html:ro \
+  -v /srv/xl1-dashboard/build.json:/app/build.json:ro \
   --memory 256m \
   --log-driver json-file --log-opt max-size=5m --log-opt max-file=2 \
   xl1-dashboard:local

@@ -59,6 +59,29 @@ const DASH_VERSION = (() => {
     return 'unknown'
   }
 })()
+
+// The build stamp can also travel as a file beside server.mjs, and when it does
+// it wins over the environment.
+//
+// This exists because of how the code is deployed. Baking the stamp into the
+// image works only while the image and the code are the same thing. Once
+// server.mjs and index.html are bind-mounted over the image — which is the
+// difference between a 110 MB transfer and a 200 KB one — the code changes and
+// the image's environment does not, so the page would confidently report the
+// commit of whichever image happened to be underneath it. That is worse than no
+// stamp: it is a wrong answer to "which build am I looking at", on the one
+// panel built to answer exactly that.
+//
+// Absent file, absent field, malformed JSON: each falls through to the
+// environment rather than failing, so an image-only deploy behaves as before.
+const BUILD_STAMP = (() => {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('./build.json', import.meta.url), 'utf8'))
+    return (raw && typeof raw === 'object') ? raw : {}
+  } catch {
+    return {}
+  }
+})()
 // statfs('/') inside a container reports the overlay filesystem, not the SD
 // card. Point this at a host bind-mount so the disk figure is the real one.
 const DISK_PATH = envStr('DASH_DISK_PATH', '/var/lib/xl1')
@@ -1536,7 +1559,7 @@ const snapshot = () => ({
   // be confirmed by watching some number change and hoping it was ours.
   // Read from the environment the image baked in — no filesystem, no cost.
   build: (() => {
-    const commit = envStr('DASH_COMMIT', 'unknown')
+    const commit = BUILD_STAMP.commit ?? envStr('DASH_COMMIT', 'unknown')
     // Where this build's source lives. Configurable because the same file runs
     // two dashboards from two repositories, and the footer had the Pi's URL
     // hardcoded — so the Windows page has been pointing at the wrong source.
@@ -1547,9 +1570,9 @@ const snapshot = () => ({
     // the commit link only exists when the tree it was built from was clean.
     const clean = commit !== 'unknown' && !commit.endsWith('-dirty')
     return {
-      version: DASH_VERSION,
+      version: BUILD_STAMP.version ?? DASH_VERSION,
       commit,
-      builtAt: envStr('DASH_BUILT_AT', 'unknown'),
+      builtAt: BUILD_STAMP.builtAt ?? envStr('DASH_BUILT_AT', 'unknown'),
       source,
       commitUrl: clean ? `${source}/commit/${commit}` : undefined,
       // Who wrote each half. Configurable rather than hardcoded so a fork does

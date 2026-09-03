@@ -29,6 +29,7 @@ const ALL = [
   'Producer cannot produce', 'Producer', 'Chain', 'Rewards', 'Software &amp; host', 'Trends',
   'Raspberry Pi', 'Operations', 'Candidate race', 'Latency', 'Producer standings',
   'Producer log — newest first (40 lines)',
+  'Alerts', 'XL1 Network', 'Block time', 'Producer movement',
 ]
 
 function layout(titles = ALL) {
@@ -47,6 +48,7 @@ test('cards are ordered by what an operator needs, not by build order', () => {
     'Producer cannot produce',
     'Producer',
     'Raspberry Pi',         // the process, and the machine under it
+    'Alerts',               // is it healthy, and would anything say if it stopped
     'Candidate race',
     'Latency',
     'Operations',
@@ -54,6 +56,9 @@ test('cards are ordered by what an operator needs, not by build order', () => {
     'Trends',
     'Rewards',
     'Software & host',
+    'XL1 Network',          // the chain, once every card about this node is done
+    'Block time',
+    'Producer movement',
     'Producer standings',   // full width, so second to last
     'Producer log — newest first (40 lines)',
   ])

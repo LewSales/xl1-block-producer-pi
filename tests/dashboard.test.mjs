@@ -1009,3 +1009,242 @@ test('a full hour of ring reports the blocks inside it', () => {
   const bw = m.derived().blocksByWindow
   assert.equal(bw.hour, 2, 'only ours, only inside the hour')
 })
+
+// ----------------------------------------------------------- network metrics
+//
+// Every number in the XL1 Network section is arithmetic over blocks the scan
+// already read, which makes it exactly the kind of thing that can be quietly
+// wrong for weeks. Synthetic datasets here, so each answer is one a reader can
+// work out by hand and check.
+
+/** Reset the observation state so one test's chain cannot leak into the next. */
+function resetChain() {
+  m.peers.clear()
+  m.days.clear()
+  m.production.scanned = 0
+  m.production.scannedFrom = undefined
+  m.production.scannedTo = undefined
+  m.chainObs.gaps.buckets = m.GAP_EDGES.map(() => 0)
+  m.chainObs.gaps.count = 0
+  m.chainObs.gaps.sum = 0
+  m.chainObs.gaps.min = undefined
+  m.chainObs.gaps.max = undefined
+  m.chainObs.gaps.rejected = { nonPositive: 0, nonConsecutive: 0, undated: 0 }
+  m.chainObs.last = undefined
+}
+
+const tally = (pairs) => new Map(pairs)
+
+test('the Nakamoto coefficient needs a strict majority, not half', () => {
+  // Two producers at exactly 50% each. Half is not a majority, so it takes
+  // both — an off-by-one here would report the chain as controllable by one.
+  assert.equal(m.concentration(tally([['a', 50], ['b', 50]])).nakamoto, 2)
+  // One producer over the line on its own.
+  assert.equal(m.concentration(tally([['a', 60], ['b', 40]])).nakamoto, 1)
+  // Four equal producers: 25+25 is exactly half and not a majority, so the
+  // third is required. This is the shape the strict comparison exists for.
+  assert.equal(m.concentration(tally([['a', 25], ['b', 25], ['c', 25], ['d', 25]])).nakamoto, 3)
+  // And a leader large enough to pair into a majority needs only the two.
+  assert.equal(m.concentration(tally([['a', 30], ['b', 25], ['c', 25], ['d', 20]])).nakamoto, 2)
+})
+
+test('concentration divides by blocks signed, not blocks scanned', () => {
+  // Shares must total 100 even when a block carries two signers, which is the
+  // case that would otherwise understate decentralisation.
+  const c = m.concentration(tally([['a', 30], ['b', 30], ['c', 40]]))
+  assert.equal(c.blocks, 100)
+  assert.equal(c.leaderShare, 40)
+  assert.equal(c.top3Share, 100)
+  assert.equal(c.evenShare, 33.33)
+  assert.equal(c.producers, 3)
+})
+
+test('an empty tally yields no concentration rather than a divide by zero', () => {
+  assert.equal(m.concentration(tally([])), undefined)
+  assert.equal(m.concentration(tally([['a', 0]])), undefined)
+})
+
+test('block times are measured only between consecutive blocks', () => {
+  resetChain()
+  const t0 = Date.UTC(2026, 8, 1)
+  // 100 → 101 → 102 are consecutive; the jump to 200 is a range the scan never
+  // read, and counting it would put the dashboard's own downtime in a chart
+  // about the chain's block time.
+  m.observeBatch([
+    { n: 100, t: t0 },
+    { n: 101, t: t0 + 60_000 },
+    { n: 102, t: t0 + 120_000 },
+    { n: 200, t: t0 + 9_000_000 },
+  ])
+  assert.equal(m.chainObs.gaps.count, 2, 'two intervals, not three')
+  assert.equal(m.chainObs.gaps.rejected.nonConsecutive, 1)
+  assert.equal(m.chainObs.gaps.max, 60, 'the two-and-a-half hour scan gap is not the slowest block')
+})
+
+test('blocks arriving newest-first are still measured forwards', () => {
+  resetChain()
+  const t0 = Date.UTC(2026, 8, 1)
+  // blocksByNumber answers newest-first. Unsorted, every interval would look
+  // like it ran backwards and the histogram would be empty.
+  m.observeBatch([
+    { n: 12, t: t0 + 120_000 },
+    { n: 11, t: t0 + 60_000 },
+    { n: 10, t: t0 },
+  ])
+  assert.equal(m.chainObs.gaps.count, 2)
+  assert.equal(m.chainObs.gaps.rejected.nonPositive, 0)
+})
+
+test('a re-read range is not counted twice', () => {
+  resetChain()
+  const t0 = Date.UTC(2026, 8, 1)
+  m.observeBatch([{ n: 10, t: t0 }, { n: 11, t: t0 + 60_000 }])
+  assert.equal(m.chainObs.gaps.count, 1)
+  m.observeBatch([{ n: 10, t: t0 }, { n: 11, t: t0 + 60_000 }])
+  assert.equal(m.chainObs.gaps.count, 1, 'the same two blocks cannot add a second interval')
+})
+
+test('a block dated before the one it follows is refused, not clamped', () => {
+  resetChain()
+  const t0 = Date.UTC(2026, 8, 1)
+  m.observeBatch([{ n: 10, t: t0 }])
+  m.observeBatch([{ n: 11, t: t0 - 5_000 }])
+  assert.equal(m.chainObs.gaps.count, 0, 'no interval')
+  assert.equal(m.chainObs.gaps.rejected.nonPositive, 1)
+  // A clamped zero reads as an instant block, and this chain does not make those.
+  assert.equal(m.chainObs.gaps.buckets.reduce((a, b) => a + b, 0), 0)
+})
+
+test('percentiles come off the histogram and report the bucket floor', () => {
+  resetChain()
+  const t0 = Date.UTC(2026, 8, 1)
+  // 99 intervals of 60s, then one of 600s. The median sits in the 60s bucket
+  // and the p99 out in the tail.
+  let t = t0
+  const batch = [{ n: 0, t }]
+  for (let i = 1; i <= 99; i++) { t += 60_000; batch.push({ n: i, t }) }
+  t += 600_000
+  batch.push({ n: 100, t })
+  m.observeBatch(batch)
+  assert.equal(m.chainObs.gaps.count, 100)
+  assert.equal(m.gapPercentile(0.5), 60, 'the median bucket floor')
+  assert.equal(m.gapPercentile(0.99), 60, '99 of 100 intervals are still the 60s bucket')
+  assert.equal(m.gapPercentile(1), 600, 'the slowest lands in the tail bucket')
+  // Mean is exact rather than bucketed, so the outlier shows.
+  assert.equal(Number((m.chainObs.gaps.sum / m.chainObs.gaps.count).toFixed(2)), 65.4)
+})
+
+test('every observation lands in a bucket, however extreme', () => {
+  resetChain()
+  const t0 = Date.UTC(2026, 8, 1)
+  m.observeBatch([{ n: 1, t: t0 }, { n: 2, t: t0 + 86_400_000 }])
+  const total = m.chainObs.gaps.buckets.reduce((a, b) => a + b, 0)
+  assert.equal(total, 1, 'a day-long gap is counted, in the last bucket')
+  assert.equal(m.chainObs.gaps.buckets.at(-1), 1)
+})
+
+test('share drift refuses to compare two windows it cannot fill', () => {
+  resetChain()
+  const today = m.dayKey(Date.now())
+  m.days.set(today, { scanned: 10, counts: new Map([['a', 6], ['b', 4]]) })
+  const drift = m.shareDrift(new Map())
+  assert.equal(drift.comparable, false, 'one day is not two weeks')
+  assert.equal(drift.rows.length, 2, 'the rows still exist, only the comparison is withheld')
+})
+
+test('share drift reports the move between this week and the one before', () => {
+  resetChain()
+  const day = (back) => m.dayKey(Date.now() - back * 86_400_000)
+  // Last week: a is half. This week: a is a quarter. b picks up the rest.
+  for (const back of [0, 1, 2]) {
+    m.days.set(day(back), { scanned: 100, counts: new Map([['a', 25], ['b', 75]]) })
+  }
+  for (const back of [7, 8, 9]) {
+    m.days.set(day(back), { scanned: 100, counts: new Map([['a', 50], ['b', 50]]) })
+  }
+  const drift = m.shareDrift(new Map())
+  assert.equal(drift.comparable, true)
+  const a = drift.rows.find((r) => r.address === 'a')
+  const b = drift.rows.find((r) => r.address === 'b')
+  assert.equal(a.sharePercent, 25)
+  assert.equal(a.previousSharePercent, 50)
+  assert.equal(a.deltaPercent, -25)
+  assert.equal(b.deltaPercent, 25)
+  assert.equal(drift.rows[0].address, 'b', 'sorted by movement, gainers first')
+})
+
+test('churn separates newly observed from gone quiet', () => {
+  resetChain()
+  const day = (back) => m.dayKey(Date.now() - back * 86_400_000)
+  // `old` produced a fortnight ago and nothing since. `fresh` only appeared
+  // this week. `steady` is in both.
+  m.days.set(day(14), { scanned: 20, counts: new Map([['old', 10], ['steady', 10]]) })
+  m.days.set(day(1), { scanned: 20, counts: new Map([['fresh', 10], ['steady', 10]]) })
+  const churn = m.producerChurn(new Map())
+  assert.deepEqual(churn.arrived.map((r) => r.address), ['fresh'])
+  assert.deepEqual(churn.quiet.map((r) => r.address), ['old'])
+  assert.equal(churn.seenThisWeek, 2, 'fresh and steady')
+  const old = churn.quiet[0]
+  assert.equal(old.lastSeen, day(14), 'when it was last seen, not a claim that it stopped')
+})
+
+test('the network view is memoised so a browser refresh recomputes nothing', () => {
+  resetChain()
+  m.peers.set('a', 10)
+  m.production.scanned = 10
+  const first = m.networkView(m.peerBoard())
+  const second = m.networkView(m.peerBoard())
+  assert.equal(first, second, 'the same object, not merely an equal one')
+  // A block arriving must invalidate it, or the page would freeze at boot.
+  m.observeBatch([{ n: 1, t: Date.UTC(2026, 8, 1) }, { n: 2, t: Date.UTC(2026, 8, 1) + 60_000 }])
+  assert.notEqual(m.networkView(m.peerBoard()), first, 'new observations invalidate the cache')
+})
+
+test('the network view never claims to have seen the whole chain', () => {
+  resetChain()
+  m.peers.set('a', 10)
+  m.production.scanned = 10
+  const v = m.networkView(m.peerBoard())
+  assert.equal(v.observed.complete, false,
+    'a windowed scan must not present itself as a protocol-wide census')
+  assert.equal(v.observed.blocks, 10)
+})
+
+// ------------------------------------------------------------- alert reading
+
+test('an absent alert state file is not an error, it is an absent alerter', async () => {
+  process.env.DASH_ALERT_STATE_FILE = join(here, 'fixtures', 'no-such-alert-state')
+  const fresh = await import(`../dashboard/server.mjs?alerts=${Date.now()}`)
+  await fresh.pollAlerts()
+  assert.equal(fresh.state.alerts.ok, true, 'not having set alerting up is not a fault')
+  assert.equal(fresh.state.alerts.installed, false)
+})
+
+test('a state file is parsed into conditions, and junk lines are counted not shown', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'xl1-alerts-'))
+  const file = join(dir, '.alert-state')
+  const since = Math.floor(Date.now() / 1000) - 300
+  await writeFile(file, `ineligible\t${since}\nnot-producing\t${since - 60}\ngarbage-line\nbroken\tnotanumber\n`)
+  process.env.DASH_ALERT_STATE_FILE = file
+  const fresh = await import(`../dashboard/server.mjs?alerts=${Date.now()}b`)
+  await fresh.pollAlerts()
+  const a = fresh.state.alerts
+  assert.equal(a.installed, true)
+  assert.equal(a.active.length, 2)
+  assert.equal(a.malformed, 2, 'unreadable lines are reported rather than rendered as conditions')
+  assert.equal(a.active[0].key, 'not-producing', 'oldest first — it has been wrong the longest')
+  assert.equal(a.active[0].label, 'Not landing blocks', 'keys are given words for the panel')
+  assert.ok(a.running, 'a file just written means the alerter is alive')
+})
+
+test('an empty state file means all clear, which is not the same as no alerter', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'xl1-alerts-'))
+  const file = join(dir, '.alert-state')
+  await writeFile(file, '')
+  process.env.DASH_ALERT_STATE_FILE = file
+  const fresh = await import(`../dashboard/server.mjs?alerts=${Date.now()}c`)
+  await fresh.pollAlerts()
+  assert.equal(fresh.state.alerts.installed, true, 'the alerter ran and found nothing')
+  assert.equal(fresh.state.alerts.active.length, 0)
+  assert.equal(fresh.state.alerts.running, true)
+})

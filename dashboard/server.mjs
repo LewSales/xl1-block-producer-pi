@@ -6,7 +6,7 @@
 //   node    — producer container state, written by the host collector timer
 //   system  — Pi vitals from /proc and /sys (temp, throttle, RAM, swap, disk)
 
-import { readFile, readdir, appendFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { readFile, readdir, appendFile, writeFile, mkdir, rename, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createServer } from 'node:http'
 import { statfs, readFileSync } from 'node:fs'
@@ -467,6 +467,326 @@ function pruneDays() {
   for (const k of [...days.keys()]) if (!keep.has(k)) days.delete(k)
 }
 
+// ------------------------------------------------------- network observation
+//
+// Every figure below is derived from blocks the standings scan has ALREADY
+// read. No poller of its own, no gateway call, no second opinion: the scan
+// hands each block to one more accumulator on its way past, and the cost is a
+// few integer increments per block.
+//
+// The distinction this section exists to draw is the one nothing else on the
+// page draws. Every other card answers "how is my producer doing". These answer
+// "how is XL1 doing" — block cadence, concentration, who is arriving and who
+// has gone quiet — which is a question about the chain, not about this node.
+//
+// What it can honestly claim is bounded by what the scan saw. This dashboard
+// reads a window of blocks; it is not an indexer and does not see the chain's
+// whole history, so everything here is labelled as observed rather than as
+// protocol fact, and the window it rests on is reported beside it.
+
+// Block-time buckets, in seconds, each edge the INCLUSIVE floor of its bucket.
+// Fixed edges so the histogram is a handful of counters rather than a list of
+// observations: adding a block is one increment and the memory never grows.
+//
+// Dense between 40 and 80 because sequence targets about a minute and that is
+// where the shape actually lives; coarse in the tail, where the only question
+// left is how bad the worst ones were. The final bucket is everything above the
+// last edge, so no observation can fall outside the histogram.
+const GAP_EDGES = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 90, 100, 120, 150, 180, 240, 300, 420, 600, 900]
+
+const chainObs = {
+  gaps: {
+    buckets: new Array(GAP_EDGES.length).fill(0),
+    count: 0,
+    sum: 0,
+    min: undefined,
+    max: undefined,
+    // Intervals refused, and why. A histogram that silently swallowed bad data
+    // would be worse than one that admits it — the shape is the entire point,
+    // and one negative interval from a re-read block would drag the mean.
+    rejected: { nonPositive: 0, nonConsecutive: 0, undated: 0 },
+  },
+  // The newest dated block the gap accumulator has consumed. Only ever moves
+  // forward, which is what stops a backfill of older history from inventing
+  // intervals that run backwards.
+  last: undefined,
+}
+
+/** Which bucket an interval falls in. Linear over 27 edges — a binary search
+ *  would be faster in a way nothing here can measure and harder to read. */
+function gapBucket(seconds) {
+  for (let i = GAP_EDGES.length - 1; i >= 0; i--) if (seconds >= GAP_EDGES[i]) return i
+  return 0
+}
+
+/** One observed interval between consecutive blocks.
+ *
+ *  Only consecutive block numbers are admitted. The gap across a range the scan
+ *  skipped — a restart, a gateway refusing a window — is the dashboard's
+ *  downtime, not the chain's block time, and counting it would put an hour-long
+ *  outage in the tail of a chart about a one-minute chain. */
+function observeGap(prev, cur) {
+  const g = chainObs.gaps
+  if (cur.n !== prev.n + 1) { g.rejected.nonConsecutive += 1; return }
+  const ms = cur.t - prev.t
+  // Zero or backwards means the two blocks disagree about time. Refused rather
+  // than clamped: a clamped zero is indistinguishable from a genuinely fast
+  // block, and this chain does not produce those.
+  if (!(ms > 0)) { g.rejected.nonPositive += 1; return }
+  const seconds = ms / 1000
+  g.buckets[gapBucket(seconds)] += 1
+  g.count += 1
+  g.sum += seconds
+  if (g.min === undefined || seconds < g.min) g.min = seconds
+  if (g.max === undefined || seconds > g.max) g.max = seconds
+}
+
+/** Feed a batch of freshly scanned blocks to the gap accumulator.
+ *
+ *  Sorted here rather than relying on the caller: blocksByNumber answers
+ *  newest-first, and an unsorted walk would reject every interval as running
+ *  backwards. Blocks at or below the accumulator's high-water mark are dropped,
+ *  so a re-read range cannot be counted twice. */
+function observeBatch(dated) {
+  if (!dated.length) return
+  const sorted = dated.slice().sort((a, b) => a.n - b.n)
+  for (const cur of sorted) {
+    if (chainObs.last === undefined) { chainObs.last = cur; continue }
+    if (cur.n <= chainObs.last.n) continue
+    observeGap(chainObs.last, cur)
+    chainObs.last = cur
+  }
+}
+
+/** Percentile off the histogram. Returns the floor of the bucket the
+ *  percentile lands in, so it is accurate to the bucket width and never
+ *  pretends to more precision than the counters hold — which is why the page
+ *  prints these as "≥ 55s" rather than as a decimal. */
+function gapPercentile(p) {
+  const g = chainObs.gaps
+  if (!g.count) return undefined
+  const target = g.count * p
+  let seen = 0
+  for (let i = 0; i < g.buckets.length; i++) {
+    seen += g.buckets[i]
+    if (seen >= target) return GAP_EDGES[i]
+  }
+  return GAP_EDGES.at(-1)
+}
+
+/** Sum a set of day buckets into one tally. Hoisted out of peerBoard so the
+ *  standings, the drift and the churn all read the same arithmetic over the
+ *  same buckets — three answers that disagreed about one week would be worse
+ *  than any one of them being absent. */
+function sumDays(keys) {
+  const counts = new Map()
+  let denominator = 0
+  let covered = 0
+  for (const key of keys) {
+    const day = days.get(key)
+    if (!day) continue
+    covered += 1
+    denominator += day.scanned
+    for (const [addr, n] of day.counts) counts.set(addr, (counts.get(addr) ?? 0) + n)
+  }
+  return { counts, denominator, covered }
+}
+
+/** The N day keys ending `offset` days ago, newest first. recentKeys(n) is
+ *  this with offset 0; drift needs the window before that one. */
+function dayKeysBack(offset, count) {
+  const out = []
+  const now = Date.now()
+  for (let i = offset; i < offset + count; i++) out.push(dayKey(now - i * 86_400_000))
+  return out
+}
+
+/** How concentrated production is among the producers actually observed.
+ *
+ *  The denominator is the sum of every producer's blocks, not the number of
+ *  blocks scanned. They differ when a block carries more than one signer, and
+ *  using the block count there would make the shares sum past 100% and the
+ *  Nakamoto coefficient come out too low — an understatement of decentralisation
+ *  is the one direction this must not fail in. */
+function concentration(counts) {
+  const blocks = [...counts.values()].filter((n) => n > 0).sort((a, b) => b - a)
+  const total = blocks.reduce((a, b) => a + b, 0)
+  if (!total) return undefined
+
+  const share = (n) => Number(((n / total) * 100).toFixed(2))
+  const cumulative = (k) => blocks.slice(0, k).reduce((a, b) => a + b, 0)
+
+  // The fewest producers whose combined output passes a majority. Strictly
+  // greater than the threshold: exactly half is not a majority, and a two-way
+  // 50/50 split is a Nakamoto coefficient of 2, not 1.
+  const nakamotoAt = (threshold) => {
+    let acc = 0
+    for (let i = 0; i < blocks.length; i++) {
+      acc += blocks[i]
+      if (acc / total > threshold) return i + 1
+    }
+    return undefined
+  }
+
+  return {
+    producers: blocks.length,
+    blocks: total,
+    leaderShare: share(blocks[0]),
+    top3Share: share(cumulative(Math.min(3, blocks.length))),
+    nakamoto: nakamotoAt(0.5),
+    nakamoto67: nakamotoAt(0.67),
+    // An even split would give every producer this much. The leader's share
+    // against it is the whole story in one number.
+    evenShare: Number((100 / blocks.length).toFixed(2)),
+  }
+}
+
+/** Who is gaining and who is fading, from the day buckets already on disk.
+ *
+ *  Deliberately the simplest comparison that answers the question — this week's
+ *  share against last week's — rather than a regression over thirty days. The
+ *  extra machinery would not change which name an operator looks at, and a
+ *  number nobody can recompute by hand is a number nobody trusts. */
+function shareDrift(labels) {
+  const now = sumDays(dayKeysBack(0, 7))
+  const prev = sumDays(dayKeysBack(7, 7))
+  // Two partial windows compare two different amounts of chain, and the
+  // difference would read as movement that never happened.
+  const comparable = now.covered >= 2 && prev.covered >= 2
+
+  const rows = []
+  for (const addr of new Set([...now.counts.keys(), ...prev.counts.keys()])) {
+    const nowBlocks = now.counts.get(addr) ?? 0
+    const prevBlocks = prev.counts.get(addr) ?? 0
+    const nowShare = now.denominator > 0 ? (nowBlocks / now.denominator) * 100 : undefined
+    const prevShare = prev.denominator > 0 ? (prevBlocks / prev.denominator) * 100 : undefined
+    rows.push({
+      address: addr,
+      label: labels.get(addr),
+      url: explorerAddress(addr),
+      blocks: nowBlocks,
+      previousBlocks: prevBlocks,
+      sharePercent: nowShare === undefined ? undefined : Number(nowShare.toFixed(2)),
+      previousSharePercent: prevShare === undefined ? undefined : Number(prevShare.toFixed(2)),
+      deltaPercent: (nowShare === undefined || prevShare === undefined)
+        ? undefined : Number((nowShare - prevShare).toFixed(2)),
+    })
+  }
+  rows.sort((a, b) => (b.deltaPercent ?? -Infinity) - (a.deltaPercent ?? -Infinity))
+
+  return {
+    comparable,
+    daysWithData: now.covered,
+    previousDaysWithData: prev.covered,
+    scannedBlocks: now.denominator,
+    previousScannedBlocks: prev.denominator,
+    rows,
+  }
+}
+
+/** Producer lifecycle, from the same day buckets.
+ *
+ *  Nothing here says a producer has stopped. This dashboard sees a window of
+ *  one chain through one gateway, which is enough to say "not observed since
+ *  Tuesday" and nowhere near enough to say "gone" — so the words are `quiet`
+ *  and `lastSeen`, and the retention that bounds them is stated beside them. */
+function producerChurn(labels) {
+  const CHURN_QUIET_DAYS = 7
+  const history = Math.min(DAYS_KEPT, 28)
+
+  const lastSeen = new Map()
+  const firstSeen = new Map()
+  for (const key of [...days.keys()].sort()) {
+    for (const addr of days.get(key).counts.keys()) {
+      if (!firstSeen.has(addr)) firstSeen.set(addr, key)
+      lastSeen.set(addr, key)
+    }
+  }
+
+  const recent = sumDays(dayKeysBack(0, CHURN_QUIET_DAYS))
+  const earlier = sumDays(dayKeysBack(CHURN_QUIET_DAYS, history - CHURN_QUIET_DAYS))
+  const today = sumDays([todayKey()])
+
+  const decorate = (addr) => ({
+    address: addr,
+    label: labels.get(addr),
+    url: explorerAddress(addr),
+    firstSeen: firstSeen.get(addr),
+    lastSeen: lastSeen.get(addr),
+  })
+
+  return {
+    quietAfterDays: CHURN_QUIET_DAYS,
+    historyDays: history,
+    daysStored: days.size,
+    seenToday: today.counts.size,
+    seenThisWeek: recent.counts.size,
+    // Observed in the last week and not before it. On a dashboard that has been
+    // running less than two weeks this is mostly an artefact of when it started,
+    // which is why daysStored travels with it.
+    arrived: [...recent.counts.keys()].filter((a) => !earlier.counts.has(a)).map(decorate),
+    // Produced earlier in the retained history and nothing since.
+    quiet: [...earlier.counts.keys()].filter((a) => !recent.counts.has(a)).map(decorate),
+  }
+}
+
+/** Everything above, assembled once.
+ *
+ *  Memoised on what it is derived from — the scan cursor, the day buckets and
+ *  the interval count. A browser refresh between two scans recomputes nothing;
+ *  the page is served the same object it was served five seconds ago, which is
+ *  correct, because nothing it describes has changed. */
+let networkCache = { key: undefined, value: undefined }
+
+function networkView(board) {
+  const key = `${production.scannedTo}|${days.size}|${chainObs.gaps.count}|${peers.size}`
+  if (networkCache.key === key) return networkCache.value
+
+  const { byAddress: labels } = resolveLabels([...peers.keys()])
+  const g = chainObs.gaps
+  const mean = g.count > 0 ? Number((g.sum / g.count).toFixed(2)) : undefined
+
+  const value = {
+    // What every number here rests on, stated first so nothing below can be
+    // mistaken for a claim about the whole chain.
+    observed: {
+      blocks: production.scanned || 0,
+      fromBlock: production.scannedFrom,
+      toBlock: production.scannedTo,
+      since: peersSince,
+      behind: production.behind,
+      daysStored: days.size,
+      daysKept: DAYS_KEPT,
+      // The scan reads a window and resumes from a cursor; it has not read the
+      // chain from genesis and must not be quoted as though it had.
+      complete: false,
+    },
+    blockTime: {
+      samples: g.count,
+      meanSeconds: mean,
+      medianSeconds: gapPercentile(0.5),
+      p90Seconds: gapPercentile(0.9),
+      p95Seconds: gapPercentile(0.95),
+      p99Seconds: gapPercentile(0.99),
+      minSeconds: g.min === undefined ? undefined : Number(g.min.toFixed(2)),
+      maxSeconds: g.max === undefined ? undefined : Number(g.max.toFixed(2)),
+      // Sent as counts against their floors so the browser draws bars without
+      // ever seeing an observation. A month of chain is 27 integers.
+      edges: GAP_EDGES,
+      buckets: g.buckets.slice(),
+      rejected: { ...g.rejected },
+    },
+    concentration: concentration(peers),
+    drift: shareDrift(labels),
+    churn: producerChurn(labels),
+    // The standings already computed this; quoted rather than recomputed.
+    selfShare: board?.self?.sharePercent,
+  }
+
+  networkCache = { key, value }
+  return value
+}
+
 // Names for addresses, so the standings read as producers rather than hex.
 //
 //   DASH_PEER_LABELS=a1b2c3d4e5f6...=Alice,9f3ac210=Bob
@@ -568,6 +888,29 @@ async function loadPeers() {
       if (counts.size > 0) days.set(key, { scanned: Number(day.scanned) || 0, counts })
     }
     pruneDays()
+    // The histogram only means anything if the bucket edges it was built with
+    // are the ones being read. Edges that have changed since it was written
+    // make every count refer to a different range, so it is dropped rather than
+    // silently reinterpreted -- the distribution rebuilds itself from the scan.
+    const g = doc.gaps
+    if (g && Array.isArray(g.buckets) && Array.isArray(g.edges)
+        && g.edges.length === GAP_EDGES.length && g.edges.every((e, i) => e === GAP_EDGES[i])) {
+      chainObs.gaps.buckets = GAP_EDGES.map((_, i) => Number(g.buckets[i]) || 0)
+      chainObs.gaps.count = Number(g.count) || 0
+      chainObs.gaps.sum = Number(g.sum) || 0
+      chainObs.gaps.min = Number.isFinite(Number(g.min)) ? Number(g.min) : undefined
+      chainObs.gaps.max = Number.isFinite(Number(g.max)) ? Number(g.max) : undefined
+      chainObs.gaps.rejected = {
+        nonPositive: Number(g.rejected?.nonPositive) || 0,
+        nonConsecutive: Number(g.rejected?.nonConsecutive) || 0,
+        undated: Number(g.rejected?.undated) || 0,
+      }
+      // Resumed so the first block after a restart is measured against the one
+      // before it -- but only if they turn out to be consecutive, which
+      // observeGap checks and a restart of any length will fail.
+      chainObs.last = Number.isFinite(Number(g.last?.n)) && Number.isFinite(Number(g.last?.t))
+        ? { n: Number(g.last.n), t: Number(g.last.t) } : undefined
+    }
     production.daysFrom = Number.isFinite(Number(doc.daysFrom)) ? Number(doc.daysFrom) : undefined
     production.recent = Array.isArray(doc.recent)
       ? doc.recent.filter((r) => Number.isFinite(Number(r?.n))).slice(-RECENT_BLOCKS)
@@ -586,7 +929,10 @@ async function persistPeers(force = false) {
 
   peersSince ??= new Date().toISOString()
   const doc = {
-    v: 2,
+    // v3 adds `gaps`. A v2 reader ignores it; this reader treats its absence as
+    // an empty histogram, so the two versions are compatible in both directions
+    // and a downgrade costs the distribution, not the standings.
+    v: 3,
     since: peersSince,
     updatedAt: new Date().toISOString(),
     scannedFrom: production.scannedFrom,
@@ -606,6 +952,19 @@ async function persistPeers(force = false) {
       scanned: day.scanned,
       counts: Object.fromEntries([...day.counts.entries()].sort((a, b) => b[1] - a[1])),
     }])),
+    // Block-time histogram. Twenty-seven integers and four scalars, whatever
+    // the window: it is counters, not observations, which is the entire reason
+    // it can be kept forever without bounding anything.
+    gaps: {
+      edges: GAP_EDGES,
+      buckets: chainObs.gaps.buckets,
+      count: chainObs.gaps.count,
+      sum: chainObs.gaps.sum,
+      min: chainObs.gaps.min,
+      max: chainObs.gaps.max,
+      rejected: chainObs.gaps.rejected,
+      last: chainObs.last,
+    },
   }
 
   try {
@@ -689,6 +1048,14 @@ async function scanProduction(viewer, currentNum) {
         break
       }
 
+      // Timestamped blocks from this batch, handed to the block-time
+      // accumulator once the batch is done. Collected rather than observed
+      // inline because intervals need chain order and blocksByNumber answers
+      // newest-first. backfillDays walks OLDER blocks and deliberately has no
+      // equivalent: an interval across the seam it works back through would be
+      // the scan's own gap, not the chain's.
+      const dated = []
+
       for (const entry of blocks) {
         const bw = Array.isArray(entry) ? entry[0] : entry
         const n = Number(bw?.block)
@@ -711,6 +1078,7 @@ async function scanProduction(viewer, currentNum) {
         const epoch = blockEpoch(bw, Array.isArray(entry) ? entry[1] : undefined)
         if (Number.isFinite(epoch) && epoch > 0) {
           bucket(dayKey(epoch), signers)
+          dated.push({ n, t: epoch })
           if (production.daysFrom === undefined || n < production.daysFrom) production.daysFrom = n
         } else {
           production.undated = (production.undated ?? 0) + 1
@@ -725,6 +1093,10 @@ async function scanProduction(viewer, currentNum) {
           if (production.lastBlock === undefined || n > production.lastBlock) production.lastBlock = n
         }
       }
+
+      // Block times, off the same blocks, before the ring below is trimmed.
+      // One sort of the batch and one integer increment per interval.
+      observeBatch(dated)
 
       // blocksByNumber answers newest-first, so pushing in iteration order would
       // build the pulse strip backwards — it reads oldest-left, like the chain.
@@ -832,24 +1204,13 @@ function peerBoard() {
     return rows
   }
 
-  /** Sum a set of day buckets into one tally. */
-  const over = (keys) => {
-    const counts = new Map()
-    let denominator = 0
-    let covered = 0
-    for (const key of keys) {
-      const day = days.get(key)
-      if (!day) continue
-      covered += 1
-      denominator += day.scanned
-      for (const [addr, n] of day.counts) counts.set(addr, (counts.get(addr) ?? 0) + n)
-    }
-    return { counts, denominator, covered }
-  }
+  // Summing day buckets is sumDays() now, shared with the network drift and
+  // churn figures below. Three answers about one week that disagreed would be
+  // worse than any one of them being missing.
 
   /** A window as the page consumes it: ranked rows plus what they rest on. */
   const windowOf = (keys) => {
-    const { counts, denominator, covered } = over(keys)
+    const { counts, denominator, covered } = sumDays(keys)
     const rows = rank(counts, denominator)
     const mineHere = rows.find((r) => r.isSelf)
     return {
@@ -1108,6 +1469,111 @@ async function missingStatusReason(file = STATUS_FILE) {
   return `collector has not written ${file} yet`
 }
 
+
+// -------------------------------------------------------------- alert source
+//
+// The alerter is a separate program on both hosts -- xl1-alert.sh under a
+// systemd timer on the Pi, xl1-alert.ps1 under Task Scheduler on Windows -- and
+// it owns alerting completely: it decides what is firing, it delivers, it
+// remembers. This reads the file it leaves behind and nothing else.
+//
+// Deliberately one-way. The dashboard does not evaluate conditions, does not
+// send anything, and never writes here. Two programs deciding what "degraded"
+// means is the failure this whole layout exists to avoid, and an alert card
+// that disagreed with the alert you were paged by would be worse than no card.
+//
+// Both hosts put the file at the same path inside the container, because both
+// mount their state directory at /var/lib/xl1 -- so this needs no per-repo
+// configuration despite the two schedulers being nothing alike.
+const ALERT_STATE_FILE = envStr('DASH_ALERT_STATE_FILE', '/var/lib/xl1/.alert-state')
+
+// The alerter writes keys, not sentences, because the sentence it delivered is
+// already in the notification. These are for the panel only; an unknown key
+// falls through as itself rather than being hidden, so an alerter newer than
+// the dashboard still displays.
+const ALERT_LABELS = {
+  'node-down': 'Producer is down',
+  'container-missing': 'Producer container does not exist',
+  'container-stopped': 'Producer container is not running',
+  'collector-down': 'Collector is not reporting',
+  'collector-stale': 'Collector snapshot is stale',
+  'health-failing': 'Health probe /livez is failing',
+  'chain-unreachable': 'Chain gateway unreachable',
+  'chain-id': 'Chain id differs from the preset',
+  'ineligible': 'Producer cannot produce',
+  'chain-stalled': 'Chain has stopped advancing',
+  'dry-spell': 'No blocks won',
+  'not-producing': 'Not landing blocks',
+  'never-produced': 'Came up in the non-producing state',
+  'undervoltage': 'Undervolting right now',
+  'overheating': 'SoC hit the hard thermal limit',
+  'thermal-throttle': 'CPU clocked down for heat',
+  'swapping': 'Heavy swap use',
+  'os-security': 'Host security updates pending',
+  'reboot-required': 'Host reboot required',
+  'cli-behind': 'xl1-cli is behind',
+  'disk': 'Disk filling up',
+  'dashboard-unreachable': 'Dashboard API did not answer',
+  'alerter-broken': 'Alerter could not read the status document',
+}
+
+/** How long the state file may go untouched before the alerter is presumed not
+ *  to be running. Both schedulers fire every 60s and the file is rewritten on
+ *  every run, including the runs that find nothing -- so silence here is the
+ *  alerter being gone, which is exactly the thing an alert can never tell you. */
+const ALERT_SILENT_MS = envNum('DASH_ALERT_SILENT_MS', 600_000, 60_000)
+
+async function pollAlerts() {
+  try {
+    const [raw, info] = await Promise.all([
+      readFile(ALERT_STATE_FILE, 'utf8'),
+      stat(ALERT_STATE_FILE),
+    ])
+    const lastRun = info.mtimeMs
+    const age = Date.now() - lastRun
+
+    // key<TAB>epochSeconds, one per firing condition, empty when all clear.
+    // Anything that is not that shape is skipped rather than shown as a
+    // condition named after a corrupt line.
+    const active = []
+    let malformed = 0
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue
+      const [key, ts] = line.split('\t')
+      const since = Number(ts)
+      if (!key || !Number.isFinite(since) || since <= 0) { malformed += 1; continue }
+      active.push({
+        key,
+        label: ALERT_LABELS[key] ?? key,
+        since: new Date(since * 1000).toISOString(),
+        ageSeconds: Math.max(0, Math.round(Date.now() / 1000 - since)),
+      })
+    }
+    active.sort((a, b) => b.ageSeconds - a.ageSeconds)
+
+    state.alerts = {
+      ok: true,
+      installed: true,
+      // A file nobody has touched in ten minutes is a stopped timer. Said
+      // plainly, because "no alerts firing" and "nothing is watching" look
+      // identical on a panel and mean opposite things.
+      running: age <= ALERT_SILENT_MS,
+      lastRunAt: new Date(lastRun).toISOString(),
+      lastRunAgeSeconds: Math.round(age / 1000),
+      silentAfterSeconds: Math.round(ALERT_SILENT_MS / 1000),
+      active,
+      malformed,
+      file: ALERT_STATE_FILE,
+    }
+  } catch (error) {
+    // Not installed is the ordinary case on a host whose operator has not set
+    // alerting up, and it is not a fault. Everything else is reported as one.
+    state.alerts = error.code === 'ENOENT'
+      ? { ok: true, installed: false, file: ALERT_STATE_FILE }
+      : { ok: false, installed: true, file: ALERT_STATE_FILE, error: error.message?.slice(0, 160) }
+  }
+}
+
 // --------------------------------------------------------------- system source
 
 async function readFirstLine(path) {
@@ -1284,7 +1750,7 @@ function overall() {
 /** Figures worth showing that are not a reading of anything — each is a
  *  relationship between two readings the page would otherwise make the reader
  *  work out by eye. */
-function derived() {
+function derived(board = peerBoard()) {
   const observedSeconds = history.height.length > 1
     ? Math.round((history.height.at(-1).t - history.height[0].t) / 1000) : 0
   const chainRate = perHour('height')
@@ -1322,7 +1788,6 @@ function derived() {
     // come from the day buckets, which are the same blocks the standings count.
     blocksByWindow: (() => {
       const ring = (production.recent ?? []).filter((b) => Number.isFinite(b.t))
-      const board = peerBoard()
       const hourAgo = Date.now() - 3_600_000
       const inHour = ring.filter((b) => b.t >= hourAgo)
       const coverage = ring.length > 1
@@ -1400,7 +1865,6 @@ function derived() {
     operations: (() => {
       const race = state.node?.race
       const lat = state.node?.latency
-      const board = peerBoard()
       const ring = production.recent ?? []
 
       // -- efficiency score ------------------------------------------------
@@ -1677,9 +2141,19 @@ const snapshot = () => ({
   })(),
   ...state,
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
-  derived: derived(),
-  peers: peerBoard(),
-  history,
+  // One board per response. It was being rebuilt three times -- once in the
+  // payload and twice inside derived() -- over the same tally, for three
+  // identical answers.
+  ...(() => {
+    const board = peerBoard()
+    return { derived: derived(board), peers: board, network: networkView(board) }
+  })(),
+  // Values only. The browser reads `.v` and has never read `.t`, and at 240
+  // points across four series the timestamps were three quarters of the whole
+  // response -- resent every five seconds to draw sparklines that plot by
+  // index. perHour() still reads the timestamped ring; this is the wire format,
+  // not the store.
+  history: Object.fromEntries(Object.entries(history).map(([k, v]) => [k, v.map((p) => p.v)])),
   trend: { daily: trendDaily(), points: trend.length, retainDays: TREND_RETAIN_DAYS, error: trendError },
 })
 
@@ -1721,7 +2195,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -1743,7 +2217,7 @@ if (isMain) {
   // from a fresh window instead would re-count every block in the overlap.
   await loadPeers()
   if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
-  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease()])
+  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
 
   // Each poller catches internally, but a rejection escaping one of them would
@@ -1755,7 +2229,7 @@ if (isMain) {
   // enough time has passed, so the cadence lives in one place.
   setInterval(guard(persistTrend, 'persistTrend'), 60_000).unref()
   setInterval(guard(persistPeers, 'persistPeers'), 60_000).unref()
-  setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')() }, LOCAL_POLL_MS).unref()
+  setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')(); guard(pollAlerts, 'pollAlerts')() }, LOCAL_POLL_MS).unref()
   setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
 
   server.listen(PORT, BIND, () => {

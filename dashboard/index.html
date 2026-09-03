@@ -118,6 +118,20 @@
   .spark.ok rect { fill: color-mix(in srgb, var(--ok) 70%, transparent); }
   .peer-bar { height: 7px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 60px; }
   .peer-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-peers) 70%, transparent); }
+  .alert-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: baseline;
+    padding: 5px 0; border-top: 1px solid var(--line); }
+  .alert-row:first-child { border-top: 0; }
+  .alert-dot { font-size: 11px; line-height: 1; }
+  .conc-bar { display: flex; gap: 2px; height: 12px; margin-top: 12px; border-radius: 3px; overflow: hidden; background: var(--line); }
+  .conc-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-network) 75%, transparent); }
+  /* Fixed height so the card does not resize as the distribution shifts. */
+  .hist { display: flex; align-items: flex-end; gap: 2px; height: 96px; margin: 14px 0 6px; }
+  .hist-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 0; }
+  .hist-bar { background: color-mix(in srgb, var(--c-network) 70%, transparent); border-radius: 2px 2px 0 0; }
+  .hist-x { font-size: 9px; color: var(--muted); text-align: center; padding-top: 3px;
+    overflow: hidden; text-overflow: clip; white-space: nowrap; }
+  .drift-row { display: grid; grid-template-columns: 92px 1fr auto; gap: 8px; align-items: baseline;
+    padding: 4px 0; border-top: 1px solid var(--line); font-size: 12px; }
   table.board tr.self .peer-bar > i { background: var(--accent); }
   table.board td.barcell { width: 40%; padding-left: 14px; }
   pre.log {
@@ -186,13 +200,13 @@
   :root {
     --c-producer: #2f7ae5; --c-chain: #7a4ddb; --c-rewards: #1a7f47;
     --c-software: #b4690e; --c-trend: #0d7c8f; --c-pi: #c0392b; --c-log: #5b6472;
-    --c-peers: #8a5a2b;
+    --c-peers: #8a5a2b; --c-alert: #a3341f; --c-network: #2b6f6a;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --c-producer: #6aa8ff; --c-chain: #a98bff; --c-rewards: #4ec97f;
       --c-software: #e0a341; --c-trend: #48c3d6; --c-pi: #ff8a7a; --c-log: #9aa4b2;
-      --c-peers: #d7a06a;
+      --c-peers: #d7a06a; --c-alert: #ff9d84; --c-network: #5fc9c0;
     }
   }
   section { position: relative; overflow: hidden; }
@@ -310,7 +324,7 @@ const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v,
  *  because a bar chart with no scale is still just a shape.
  */
 const sparkDelta = (series, cls = '', summary) => {
-  const pts = (series ?? []).map((p) => Number(p.v)).filter((v) => !Number.isNaN(v))
+  const pts = (series ?? []).map(Number).filter((v) => !Number.isNaN(v))
   if (pts.length < 3) return `<div class="sub" style="margin-top:10px">collecting — needs a few more samples</div>`
   // Negative steps mean a restart or a reset, not a loss. Clamped rather than
   // drawn, so one counter reset cannot invert the whole chart.
@@ -336,7 +350,7 @@ const sparkDelta = (series, cls = '', summary) => {
  *  flat line from one point — an empty chart that looks like a dead one is
  *  worse than an honest label. */
 const spark = (series, cls = '') => {
-  const pts = (series ?? []).map((p) => Number(p.v)).filter((v) => !Number.isNaN(v))
+  const pts = (series ?? []).map(Number).filter((v) => !Number.isNaN(v))
   if (pts.length < 2) return `<div class="sub" style="margin-top:10px">collecting — needs a few more samples</div>`
   const min = Math.min(...pts), max = Math.max(...pts), span = (max - min) || 1
   const W = 100, H = 40
@@ -541,6 +555,158 @@ function render(d) {
           : `no reward movement in ${num(intervals)} intervals`)}
 
     </section>`)
+  }
+
+  // Alerts — read from the alerter's own state file, never evaluated here.
+  {
+    const al = d.alerts ?? {}
+    const firing = al.active ?? []
+    const big = !al.installed ? 'Not set up'
+      : al.ok === false ? 'Unreadable'
+      : !al.running ? 'Not running'
+      : firing.length ? `${firing.length} firing`
+      : 'All clear'
+    const cls = !al.installed ? 'sub' : (al.ok === false || !al.running) ? 'bad' : firing.length ? 'warn' : 'ok'
+    cards.push(`<section style="--c: var(--c-alert)">
+      <h2><span class="ico" aria-hidden="true">🔔</span>Alerts</h2>
+      <div class="big ${cls}">${esc(big)}</div>
+      <div class="sub">${al.installed
+        ? `checked ${al.lastRunAgeSeconds !== undefined ? dur(al.lastRunAgeSeconds) + ' ago' : '—'}`
+        : 'no alerter has written to this state directory'}</div>
+      ${firing.length ? `<div style="margin-top:8px">${firing.map((a) => `<div class="alert-row">
+        <span class="alert-dot warn">●</span>
+        <span>${esc(a.label)}</span>
+        <span class="sub">${dur(a.ageSeconds)}</span>
+      </div>`).join('')}</div>` : ''}
+      ${dl([
+        // "Nothing is firing" and "nothing is watching" look identical on a
+        // panel and mean opposite things, so the heartbeat is a row of its own.
+        al.installed && ['Alerter', al.running
+          ? '<span class="ok">running</span>'
+          : `<span class="bad">silent for ${dur(al.lastRunAgeSeconds ?? 0)}</span>`],
+        al.installed && !firing.length && al.running && ['Conditions', '<span class="ok">none firing</span>'],
+        al.malformed > 0 && ['Unreadable lines', `<span class="warn">${num(al.malformed)}</span>`],
+        al.error && ['Error', `<span class="bad">${esc(al.error)}</span>`],
+      ])}
+      ${!al.installed ? `<div class="banner">The dashboard only reads what the alerter writes; it never sends anything itself.
+        Set a channel in <span class="mono">alert.env</span> and the alerter will start writing here.</div>` : ''}
+    </section>`)
+  }
+
+  // XL1 Network — the chain, not this node.
+  {
+    const nw = d.network ?? {}
+    const co = nw.concentration
+    const ob = nw.observed ?? {}
+    const bt = nw.blockTime ?? {}
+    if (co) {
+      // How far the leader sits above an even split. The single number that
+      // says whether production is spread or captured.
+      const skew = co.evenShare > 0 ? co.leaderShare / co.evenShare : undefined
+      const leaderRow = (d.peers?.top ?? []).find((r) => r.sharePercent === co.leaderShare)
+      cards.push(`<section style="--c: var(--c-network)">
+        <h2><span class="ico" aria-hidden="true">🌐</span>XL1 Network</h2>
+        <div class="big">${num(co.producers)}</div>
+        <div class="sub">producers seen across ${num(ob.blocks)} observed blocks</div>
+        ${dl([
+          ['Nakamoto coefficient',
+            `<span class="${co.nakamoto <= 2 ? 'bad' : co.nakamoto <= 3 ? 'warn' : 'ok'}">${num(co.nakamoto)}</span>`
+            + ` <span class="sub" title="The fewest producers whose combined observed output passes 50%. Higher is more decentralised; 1 means a single producer could dictate the chain.">of ${num(co.producers)} ⓘ</span>`],
+          ['Top producer', `${co.leaderShare}%`
+            + (leaderRow?.label ? ` <span class="sub">${esc(leaderRow.label)}</span>` : '')
+            + (skew ? ` <span class="sub">· ${skew.toFixed(1)}× an even split</span>` : '')],
+          ['Top 3 combined', `${co.top3Share}%`],
+          ['Even split would be', `<span class="sub">${co.evenShare}% each</span>`],
+          co.nakamoto67 !== undefined && ['To reach 67%', `${num(co.nakamoto67)} producers`],
+          bt.meanSeconds !== undefined && ['Block time',
+            `${bt.meanSeconds}s mean <span class="sub">· ${bt.medianSeconds}s median</span>`],
+          d.network?.selfShare !== undefined && ['This node', `${d.network.selfShare}%`],
+        ])}
+        ${co.producers > 0 ? `<div class="conc-bar" title="Observed share, largest producer first">${
+          (d.peers?.top ?? []).slice(0, 10).map((r) => `<i style="width:${Math.max(0.5, r.sharePercent ?? 0)}%${
+            r.isSelf ? ';background:var(--ok)' : ''}" title="${esc(r.label ?? shortAddr(r.address))} — ${r.sharePercent}%"></i>`).join('')
+        }</div><div class="sub" style="margin-top:4px">each block is one producer's share · <span class="ok">green is this node</span></div>` : ''}
+        <div class="banner">Observed by this dashboard over blocks ${num(ob.fromBlock)}–${num(ob.toBlock)}, not a
+          protocol-wide census. A producer that never appeared in that window is not counted.</div>
+      </section>`)
+    }
+  }
+
+  // Block time — the distribution, not just the average.
+  {
+    const bt = d.network?.blockTime
+    if (bt && bt.samples > 0) {
+      const max = Math.max(1, ...bt.buckets)
+      // Only the occupied span, so an empty tail does not squash the shape.
+      let lo = bt.buckets.findIndex((c) => c > 0)
+      let hi = bt.buckets.length - 1
+      while (hi > lo && bt.buckets[hi] === 0) hi--
+      const shown = []
+      for (let i = lo; i <= hi; i++) shown.push([bt.edges[i], bt.buckets[i], bt.edges[i + 1]])
+      const pct = (n) => ((n / bt.samples) * 100)
+      cards.push(`<section style="--c: var(--c-network)">
+        <h2><span class="ico" aria-hidden="true">⏱️</span>Block time</h2>
+        <div class="big">${bt.medianSeconds}s</div>
+        <div class="sub">median over ${num(bt.samples)} observed intervals</div>
+        <div class="hist">${shown.map(([edge, count, next]) => `
+          <div class="hist-col" title="${edge}–${next ?? '∞'}s · ${num(count)} blocks · ${pct(count).toFixed(1)}%">
+            <div class="hist-bar" style="height:${count === 0 ? 0 : Math.max(2, (count / max) * 100)}%"></div>
+            <div class="hist-x">${edge}</div>
+          </div>`).join('')}</div>
+        <div class="sub" style="text-align:center;margin-top:-2px">seconds between consecutive blocks</div>
+        ${dl([
+          ['Mean', `${bt.meanSeconds}s`],
+          ['Median', `${bt.medianSeconds}s`],
+          ['P95', `<span title="95% of observed intervals were at or below this. Read as a floor: it is the bucket edge, not a decimal.">≥ ${bt.p95Seconds}s ⓘ</span>`],
+          ['P99', `≥ ${bt.p99Seconds}s`],
+          ['Fastest / slowest', `${bt.minSeconds}s / ${bt.maxSeconds}s`],
+          // Refusals are shown rather than swallowed: the shape is the point,
+          // and a histogram quietly dropping a third of its input is a lie.
+          (bt.rejected?.nonConsecutive > 0 || bt.rejected?.nonPositive > 0) && ['Not measured',
+            `<span class="sub">${num(bt.rejected.nonConsecutive)} across scan gaps${
+              bt.rejected.nonPositive > 0 ? `, ${num(bt.rejected.nonPositive)} out of order` : ''}</span>`],
+        ])}
+      </section>`)
+    }
+  }
+
+  // Producer movement — who is gaining, who has gone quiet.
+  {
+    const nw = d.network ?? {}
+    const dr = nw.drift
+    const ch = nw.churn
+    if (dr || ch) {
+      const movers = (dr?.rows ?? []).filter((r) => r.deltaPercent !== undefined && Math.abs(r.deltaPercent) >= 0.5)
+      const up = movers.filter((r) => r.deltaPercent > 0).slice(0, 4)
+      const down = movers.filter((r) => r.deltaPercent < 0).slice(-4).reverse()
+      const name = (r) => esc(r.label ?? shortAddr(r.address))
+      const row = (r) => `<div class="drift-row">
+        <span class="${r.deltaPercent > 0 ? 'ok' : 'warn'}">${r.deltaPercent > 0 ? '▲' : '▼'} ${Math.abs(r.deltaPercent).toFixed(2)} pts</span>
+        <span>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${name(r)}</a>` : name(r)}</span>
+        <span class="sub">${r.previousSharePercent ?? '—'}% → ${r.sharePercent ?? '—'}%</span>
+      </div>`
+      cards.push(`<section style="--c: var(--c-network)">
+        <h2><span class="ico" aria-hidden="true">🔀</span>Producer movement</h2>
+        <div class="big">${num(ch?.seenThisWeek)}</div>
+        <div class="sub">producing in the last 7 days · ${num(ch?.seenToday)} today</div>
+        ${dr?.comparable === false
+          ? `<div class="banner">Share drift needs two full weeks of day buckets to compare.
+              ${num(dr.daysWithData)} day(s) recorded so far — the comparison appears once there is something honest to compare.</div>`
+          : `${up.length || down.length
+              ? `<div class="sub" style="margin-top:10px" title="This week's share of observed blocks minus last week's. Points, not percent-of-percent.">7-day share vs the week before ⓘ</div>
+                 ${up.map(row).join('')}${down.map(row).join('')}`
+              : '<div class="sub" style="margin-top:10px">no producer moved more than half a point this week</div>'}`}
+        ${dl([
+          ch?.arrived?.length && ['Newly observed',
+            ch.arrived.map((a) => `<span title="first seen ${esc(a.firstSeen ?? '')}">${esc(a.label ?? shortAddr(a.address))}</span>`).join(', ')],
+          ch?.quiet?.length && ['Gone quiet',
+            ch.quiet.map((a) => `<span class="warn" title="last seen ${esc(a.lastSeen ?? '')}">${esc(a.label ?? shortAddr(a.address))}</span>`).join(', ')],
+          ch && ['Day buckets', `${num(ch.daysStored)} of ${num(nw.observed?.daysKept)} kept`],
+        ])}
+        ${ch?.quiet?.length ? `<div class="sub" style="margin-top:8px">"Quiet" means not observed in ${num(ch.quietAfterDays)} days —
+          this dashboard sees one window of one chain, which is enough to say when a producer was last seen and not enough to say it has stopped.</div>` : ''}
+      </section>`)
+    }
   }
 
   // Software and host — the two layers that rot quietly while every other
@@ -997,6 +1163,7 @@ function render(d) {
   // the right version.
   const CARD_ORDER = [
     'Producer cannot produce',   // the banner, when it exists, always first
+    'Producer movement',         // before 'Producer', same startsWith reason as the log
     'Producer log',              // matched before 'Producer' — startsWith would
                                  // otherwise claim it for the producer card
     'Producer standings',
@@ -1007,6 +1174,9 @@ function render(d) {
     'Chain',
     'Latency',
     'Rewards',
+    'Alerts',
+    'XL1 Network',
+    'Block time',
     'Raspberry Pi',
     'Host',
     'Trends',
@@ -1028,12 +1198,24 @@ function render(d) {
     Producer: 1,
     'Raspberry Pi': 2,
     Host: 2,
+    // After the machine, before the race. Whether the node is healthy and
+    // whether anything would tell you if it stopped are one question asked
+    // twice -- but this cannot go between Producer and its host card without
+    // breaking that pair.
+    Alerts: 2.5,
     'Candidate race': 3,
     Latency: 4,
     Operations: 5,
     Chain: 6,
     Trends: 7,
     Rewards: 8,
+    // The chain block, after every card about this node and immediately above
+    // the standings table it explains: concentration first because it is the
+    // headline, then the distribution behind the block time it quotes, then who
+    // is moving. Ranked past Software & host so the Rewards pair stays intact.
+    'XL1 Network': 9.5,
+    'Block time': 9.6,
+    'Producer movement': 9.7,
     'Software & host': 9,
     'Producer standings': 10,
     'Producer log': 11,
@@ -1104,6 +1286,11 @@ function render(d) {
 }
 
 async function tick() {
+  // A hidden tab is a tab nobody is reading. Left open on a second monitor it
+  // would otherwise pull the whole payload every five seconds forever, and on
+  // the Pi that is the dashboard's largest single cost. The fetch is skipped
+  // rather than the timer cancelled, so nothing has to be restarted.
+  if (document.hidden) return
   try {
     const res = await fetch(`/api/status${location.search}`, { cache: 'no-store' })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -1116,6 +1303,9 @@ async function tick() {
 }
 tick()
 setInterval(tick, 5000)
+// Coming back to the tab should not mean waiting out the rest of an interval to
+// see a page that is up to five seconds stale.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tick() })
 </script>
 </body>
 </html>

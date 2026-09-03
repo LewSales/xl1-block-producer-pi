@@ -157,7 +157,8 @@ cmd_status() {
       "  finalized              \(.chain.finalizedBlock // "—")",
       "  reward balance         \(.chain.balances.reward.xl1 // "—") XL1",
       "  signing balance        \(.chain.balances.producer.xl1 // "—") XL1",
-      "  blocks submitted       \(.node.blocksPublished // "—")",
+      "  blocks won 24h         \(.derived.blocksByWindow.day24h // "—")",
+      "  blocks won total       \(.peers.self.blocks // "—") (\(.peers.self.sharePercent // "—")% of \(.peers.scannedBlocks // "—") scanned)",
       (if (.problems | length) > 0 then "  problems               " + (.problems | join("; ")) else empty end)'
   else
     row "dashboard API" "responding (install jq for detail)"

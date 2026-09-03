@@ -467,6 +467,62 @@ function pruneDays() {
   for (const k of [...days.keys()]) if (!keep.has(k)) days.delete(k)
 }
 
+// The cumulative tally is one entry per distinct producer address ever seen, and
+// it was the only structure on this page with nothing bounding it. On a
+// federated chain of eight that is theoretical; on a chain that opens up, or one
+// where producers rotate addresses, it is a slow leak into a file that is
+// rewritten every five minutes and parsed on every boot.
+//
+// The two obvious caps are both wrong. Evicting the smallest deletes exactly the
+// minor producers the concentration figures exist to count -- it would make the
+// chain look more decentralised the longer the dashboard ran. Evicting the
+// oldest needs an age, and this map stores a lifetime total, not a date.
+//
+// But the recency is already recorded next door: an address in any retained day
+// bucket produced within DAYS_KEPT. So the rule is that a producer seen in the
+// retained window is never evicted, whatever the cap says. The cap only ever
+// reaches addresses that have been silent for over a month, and in normal
+// operation it evicts nothing at all.
+//
+// If the active set alone exceeds the cap, nothing is evicted and the overflow
+// is reported. A leaderboard missing producers that are demonstrably producing
+// is a worse failure than a map larger than intended, and the honest bound on
+// this structure was always "the chain's active producer set" rather than a
+// number chosen here.
+const PEERS_MAX = envNum('DASH_PEERS_MAX', 500, 16)
+
+/** Addresses dropped from the cumulative tally, and what they took with them.
+ *  Surfaced rather than swallowed: the totals stop summing to the blocks
+ *  scanned once anything is evicted, and a column that quietly stops adding up
+ *  is how a reader learns to distrust the whole table. */
+const peersEvicted = { addresses: 0, blocks: 0, overCap: false }
+
+function prunePeers() {
+  peersEvicted.overCap = false
+  if (peers.size <= PEERS_MAX) return
+
+  // Everyone who has produced inside the retained day buckets. Protected.
+  const active = new Set()
+  for (const day of days.values()) for (const addr of day.counts.keys()) active.add(addr)
+
+  // Only the silent are candidates, smallest first -- of the producers that
+  // stopped over a month ago, the one that produced least is the least missed.
+  const candidates = [...peers.entries()]
+    .filter(([addr]) => !active.has(addr))
+    .sort((a, b) => a[1] - b[1])
+
+  for (const [addr, blocks] of candidates) {
+    if (peers.size <= PEERS_MAX) break
+    peers.delete(addr)
+    peersEvicted.addresses += 1
+    peersEvicted.blocks += blocks
+  }
+
+  // Still over: every remaining address produced within the window, so the cap
+  // yields to the truth rather than the other way round.
+  if (peers.size > PEERS_MAX) peersEvicted.overCap = true
+}
+
 // ------------------------------------------------------- network observation
 //
 // Every figure below is derived from blocks the standings scan has ALREADY
@@ -869,6 +925,8 @@ async function loadPeers() {
     production.scannedFrom = doc.scannedFrom
     production.scannedTo = doc.scannedTo
     production.scanned = Number(doc.scanned) || 0
+    peersEvicted.addresses = Number(doc.evicted?.addresses) || 0
+    peersEvicted.blocks = Number(doc.evicted?.blocks) || 0
     production.multiSigner = Boolean(doc.multiSigner)
     peersSince = doc.since
     // Resume where the last run stopped rather than re-scanning a fresh window.
@@ -888,6 +946,7 @@ async function loadPeers() {
       if (counts.size > 0) days.set(key, { scanned: Number(day.scanned) || 0, counts })
     }
     pruneDays()
+    prunePeers()
     // The histogram only means anything if the bucket edges it was built with
     // are the ones being read. Edges that have changed since it was written
     // make every count refer to a different range, so it is dropped rather than
@@ -940,6 +999,10 @@ async function persistPeers(force = false) {
     scanned: production.scanned,
     multiSigner: production.multiSigner,
     counts: Object.fromEntries([...peers.entries()].sort((a, b) => b[1] - a[1])),
+    // Carried across restarts. Rebuilding it is impossible -- the evidence was
+    // the rows that were deleted -- and a total that silently starts summing
+    // correctly again after a reboot would hide that anything was ever dropped.
+    evicted: peersEvicted,
     // Lowest block represented in the day buckets. Without it a restart cannot
     // tell a backfill that finished from one that never ran, and the standings
     // would re-read the same history on every boot forever.
@@ -1114,6 +1177,7 @@ async function scanProduction(viewer, currentNum) {
     }
     if (from > currentNum) production.error = undefined
     pruneDays()
+    prunePeers()
     production.behind = Math.max(0, currentNum - (production.scannedTo ?? currentNum))
   } catch (error) {
     // Leave the cursor alone so the same range is retried rather than skipped.
@@ -1169,6 +1233,7 @@ async function backfillDays(viewer) {
       production.daysError = undefined
     }
     pruneDays()
+    prunePeers()
   } catch (error) {
     production.daysError = error.message?.slice(0, 160)
   }
@@ -1244,6 +1309,10 @@ function peerBoard() {
     // loud rather than normalised away, because the page would otherwise look
     // arithmetically broken to anyone who added the column up.
     multiSigner: production.multiSigner,
+    // Present only once something has actually been dropped, so the ordinary
+    // case carries no caveat at all.
+    evicted: peersEvicted.addresses > 0 ? { ...peersEvicted, quietDays: DAYS_KEPT } : undefined,
+    peersMax: PEERS_MAX,
     selfRank: mine?.rank,
     self: mine,
     top: rows.slice(0, PEERS_TOP),
@@ -2195,7 +2264,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

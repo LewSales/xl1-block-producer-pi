@@ -1248,3 +1248,82 @@ test('an empty state file means all clear, which is not the same as no alerter',
   assert.equal(fresh.state.alerts.active.length, 0)
   assert.equal(fresh.state.alerts.running, true)
 })
+
+// ---------------------------------------------------------- bounding the tally
+//
+// The cumulative tally was the one structure on the page with nothing bounding
+// it. The cap that guards it must never be the reason a producing node vanishes
+// from the standings, so these cases are mostly about what it refuses to evict.
+
+/** A tally of `n` addresses, none of them in any day bucket, plus whatever
+ *  recent producers the caller wants protected. */
+function seedPeers(silent, active = []) {
+  m.peers.clear()
+  m.days.clear()
+  m.peersEvicted.addresses = 0
+  m.peersEvicted.blocks = 0
+  m.peersEvicted.overCap = false
+  for (let i = 0; i < silent; i++) m.peers.set(`silent${String(i).padStart(4, '0')}`, i + 1)
+  if (active.length) {
+    const counts = new Map(active.map((a) => [a, 100]))
+    for (const a of active) m.peers.set(a, 100)
+    m.days.set(m.dayKey(Date.now()), { scanned: 100 * active.length, counts })
+  }
+}
+
+test('nothing is evicted while the tally is inside the cap', () => {
+  seedPeers(10)
+  m.prunePeers()
+  assert.equal(m.peers.size, 10)
+  assert.equal(m.peersEvicted.addresses, 0, 'the ordinary case must not touch anything')
+})
+
+test('over the cap, only addresses absent from every retained day are dropped', () => {
+  // One more silent address than the cap allows, plus five that produced today.
+  seedPeers(m.PEERS_MAX + 5, ['live1', 'live2', 'live3', 'live4', 'live5'])
+  const before = m.peers.size
+  m.prunePeers()
+  assert.ok(m.peers.size <= m.PEERS_MAX, `pruned to ${m.peers.size}, cap ${m.PEERS_MAX}`)
+  assert.ok(before > m.peers.size, 'something was actually dropped')
+  for (const a of ['live1', 'live2', 'live3', 'live4', 'live5']) {
+    assert.ok(m.peers.has(a), `${a} produced today and must survive any cap`)
+  }
+})
+
+test('the smallest of the long-silent goes first, not the smallest overall', () => {
+  seedPeers(m.PEERS_MAX + 3, ['live1'])
+  m.prunePeers()
+  // silent0000 held 1 block and had not produced in the retained window.
+  assert.equal(m.peers.has('silent0000'), false, 'the least-missed silent producer went')
+  // live1 holds 100 but is recent; a smallest-first cap over the whole map
+  // would have kept silent addresses ahead of it.
+  assert.equal(m.peers.get('live1'), 100, 'recency beats size')
+})
+
+test('a cap smaller than the active set yields rather than lying', () => {
+  // Every address produced today, and there are more of them than the cap.
+  const live = []
+  for (let i = 0; i < m.PEERS_MAX + 10; i++) live.push(`live${String(i).padStart(4, '0')}`)
+  seedPeers(0, live)
+  m.prunePeers()
+  assert.equal(m.peers.size, live.length, 'no producing node is dropped to satisfy a number')
+  assert.equal(m.peersEvicted.addresses, 0)
+  assert.equal(m.peersEvicted.overCap, true, 'and the overflow is admitted rather than hidden')
+})
+
+test('what was evicted is counted, so the totals can admit they are partial', () => {
+  seedPeers(m.PEERS_MAX + 4)
+  m.prunePeers()
+  assert.ok(m.peersEvicted.addresses >= 4)
+  assert.ok(m.peersEvicted.blocks > 0, 'the blocks that left with them are recorded too')
+  const board = m.peerBoard()
+  assert.ok(board.evicted, 'and the page is told')
+  assert.equal(board.evicted.quietDays, board.daysKept)
+})
+
+test('an untouched tally carries no caveat at all', () => {
+  seedPeers(5)
+  m.prunePeers()
+  assert.equal(m.peerBoard().evicted, undefined,
+    'the ordinary case must not explain itself')
+})

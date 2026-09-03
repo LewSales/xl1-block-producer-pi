@@ -1128,6 +1128,10 @@ function render(d) {
       </div>
       ${pb.dayTzError ? `<div class="sub warn">${esc(pb.dayTzError)}</div>` : ''}
       ${pb.daysError ? `<div class="sub warn">day history: ${esc(pb.daysError)}</div>` : ''}
+      ${pb.evicted ? `<div class="sub warn">${num(pb.evicted.addresses)} address(es) with no block in
+        ${num(pb.evicted.quietDays)} days were dropped from the totals to bound the tally, taking
+        ${num(pb.evicted.blocks)} block(s) with them — the total column no longer sums to every block scanned.
+        ${pb.evicted.overCap ? 'More producers are active than the cap allows, so nothing further is dropped.' : ''}</div>` : ''}
       ${pb.daysComplete === false
         ? `<div class="sub warn">Day history still filling in — it reaches back to #${num(pb.daysFrom)} of #${num(pb.scannedFrom)}, so older windows undercount until it finishes.</div>`
         : ''}

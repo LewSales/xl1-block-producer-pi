@@ -1177,15 +1177,47 @@ test('churn separates newly observed from gone quiet', () => {
   resetChain()
   const day = (back) => m.dayKey(Date.now() - back * 86_400_000)
   // `old` produced a fortnight ago and nothing since. `fresh` only appeared
-  // this week. `steady` is in both.
+  // this week. `steady` is in both. Two earlier days, so the comparison is
+  // allowed to run.
   m.days.set(day(14), { scanned: 20, counts: new Map([['old', 10], ['steady', 10]]) })
+  m.days.set(day(13), { scanned: 20, counts: new Map([['old', 10], ['steady', 10]]) })
   m.days.set(day(1), { scanned: 20, counts: new Map([['fresh', 10], ['steady', 10]]) })
   const churn = m.producerChurn(new Map())
+  assert.equal(churn.comparable, true)
   assert.deepEqual(churn.arrived.map((r) => r.address), ['fresh'])
   assert.deepEqual(churn.quiet.map((r) => r.address), ['old'])
   assert.equal(churn.seenThisWeek, 2, 'fresh and steady')
   const old = churn.quiet[0]
-  assert.equal(old.lastSeen, day(14), 'when it was last seen, not a claim that it stopped')
+  // day(13) is the newer of the two buckets it appears in, which is what
+  // "last seen" means.
+  assert.equal(old.lastSeen, day(13), 'when it was last seen, not a claim that it stopped')
+})
+
+test('a fresh install does not report the whole chain as newly arrived', () => {
+  // Five days of buckets and nothing before them, which is what a dashboard
+  // installed on Monday looks like on Friday. Every producer is "not in the
+  // earlier window" because there is no earlier window -- and the card listed
+  // seven of eight as new arrivals, an artefact of the install date presented
+  // as a fact about the chain.
+  resetChain()
+  const day = (back) => m.dayKey(Date.now() - back * 86_400_000)
+  for (const back of [0, 1, 2, 3, 4]) {
+    m.days.set(day(back), { scanned: 80, counts: new Map([['a', 20], ['b', 20], ['c', 20], ['d', 20]]) })
+  }
+  const churn = m.producerChurn(new Map())
+  assert.equal(churn.comparable, false, 'there is nothing to compare against yet')
+  assert.deepEqual(churn.arrived, [], 'so nobody is announced as new')
+  assert.deepEqual(churn.quiet, [], 'and nobody is announced as gone')
+  assert.equal(churn.seenThisWeek, 4, 'but who is producing is still known')
+})
+
+test('one earlier day is not enough to call anyone new', () => {
+  resetChain()
+  const day = (back) => m.dayKey(Date.now() - back * 86_400_000)
+  m.days.set(day(10), { scanned: 10, counts: new Map([['a', 10]]) })
+  m.days.set(day(1), { scanned: 10, counts: new Map([['b', 10]]) })
+  assert.equal(m.producerChurn(new Map()).comparable, false,
+    'a single day of history is a sample, not a baseline')
 })
 
 test('the network view is memoised so a browser refresh recomputes nothing', () => {

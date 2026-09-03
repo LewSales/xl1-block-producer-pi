@@ -485,8 +485,25 @@ function render(d) {
       ${sparkDelta(d.history?.height, '', (total, active, intervals) =>
         `${num(total)} block(s) · ${total > 0 ? `${(dv.observedSeconds / total).toFixed(0)}s each` : 'chain idle'}`)}
       ${tiles([
-        ['Block time', dv.secondsPerBlock ? `${dv.secondsPerBlock}s` : '—', 'observed'],
-        ['Chain rate', dv.blocksPerHourChain !== undefined ? `${num(dv.blocksPerHourChain)}/h` : '—', 'blocks per hour'],
+        // One block time on this page, not two. This tile used to divide chain
+        // height movement by however long the dashboard had been watching,
+        // which after a restart is minutes -- and it sat four cards away from a
+        // histogram measuring gaps between block timestamps over hours. They
+        // disagreed by twenty seconds and nothing on the page said why. The
+        // histogram is the better measurement (chain timestamps, larger sample,
+        // survives a restart), so it wins whenever it has anything to say.
+        ['Block time', d.network?.blockTime?.medianSeconds !== undefined
+          ? `${d.network.blockTime.medianSeconds}s`
+          : dv.secondsPerBlock ? `${dv.secondsPerBlock}s` : '—',
+          d.network?.blockTime?.medianSeconds !== undefined
+            ? `median of ${num(d.network.blockTime.samples)}`
+            : 'while watching'],
+        // Kept, and labelled for what it is: how fast the chain moved during
+        // the window this dashboard has been up. That is a different question
+        // from how long a block takes, and only confusing when it pretends not
+        // to be.
+        ['Chain rate', dv.blocksPerHourChain !== undefined ? `${num(dv.blocksPerHourChain)}/h` : '—',
+          dv.observedSeconds ? `while watching ${dur(dv.observedSeconds)}` : 'blocks per hour'],
         // Age of the newest block we have seen. Climbing past a couple of block
         // times means the chain has stalled, which nothing else here would say.
         ['Head age', dv.headAgeSeconds !== undefined
@@ -701,6 +718,11 @@ function render(d) {
             ch.arrived.map((a) => `<span title="first seen ${esc(a.firstSeen ?? '')}">${esc(a.label ?? shortAddr(a.address))}</span>`).join(', ')],
           ch?.quiet?.length && ['Gone quiet',
             ch.quiet.map((a) => `<span class="warn" title="last seen ${esc(a.lastSeen ?? '')}">${esc(a.label ?? shortAddr(a.address))}</span>`).join(', ')],
+          // Absent lists and unanswerable ones look identical otherwise, and
+          // only one of them means the chain has been steady.
+          ch?.comparable === false && ['Arrivals', '<span class="sub">needs a week of history before this one</span>'],
+          ch?.comparable && !ch.arrived.length && !ch.quiet.length
+            && ['Arrivals', '<span class="ok">nobody new, nobody gone quiet</span>'],
           ch && ['Day buckets', `${num(ch.daysStored)} of ${num(nw.observed?.daysKept)} kept`],
         ])}
         ${ch?.quiet?.length ? `<div class="sub" style="margin-top:8px">"Quiet" means not observed in ${num(ch.quietAfterDays)} days —

@@ -763,6 +763,14 @@ function producerChurn(labels) {
   const earlier = sumDays(dayKeysBack(CHURN_QUIET_DAYS, history - CHURN_QUIET_DAYS))
   const today = sumDays([todayKey()])
 
+  // "Newly observed" means "produced this week and not before it", which needs a
+  // before. With five days of buckets there is no earlier window at all, so
+  // every producer on the chain qualified and the card listed seven of eight as
+  // new arrivals -- an artefact of when the dashboard was installed, presented
+  // as a fact about the chain. Withheld until there is something to compare
+  // against, the same way share drift already withholds.
+  const comparable = earlier.covered >= 2
+
   const decorate = (addr) => ({
     address: addr,
     label: labels.get(addr),
@@ -777,12 +785,16 @@ function producerChurn(labels) {
     daysStored: days.size,
     seenToday: today.counts.size,
     seenThisWeek: recent.counts.size,
-    // Observed in the last week and not before it. On a dashboard that has been
-    // running less than two weeks this is mostly an artefact of when it started,
-    // which is why daysStored travels with it.
-    arrived: [...recent.counts.keys()].filter((a) => !earlier.counts.has(a)).map(decorate),
+    // Both lists are a comparison against the earlier window, so both wait for
+    // one. Empty here means "cannot yet say", which `comparable` distinguishes
+    // from "nobody arrived".
+    comparable,
+    earlierDaysWithData: earlier.covered,
+    arrived: comparable
+      ? [...recent.counts.keys()].filter((a) => !earlier.counts.has(a)).map(decorate) : [],
     // Produced earlier in the retained history and nothing since.
-    quiet: [...earlier.counts.keys()].filter((a) => !recent.counts.has(a)).map(decorate),
+    quiet: comparable
+      ? [...earlier.counts.keys()].filter((a) => !recent.counts.has(a)).map(decorate) : [],
   }
 }
 

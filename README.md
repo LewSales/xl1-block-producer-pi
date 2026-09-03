@@ -292,6 +292,73 @@ on the panel rather than dropped:
 
 ---
 
+### The XL1 Network view
+
+Every other card on the page answers one question — how is *my producer* doing.
+Three cards answer the other one: how is *the chain* doing.
+
+**XL1 Network** is the headline. It reports how many producers have been seen,
+what share the largest one holds, and the **Nakamoto coefficient** — the fewest
+producers whose combined output passes 50%. That number is the one worth
+watching: it says how many parties would have to agree to control block
+production. On an eight-producer chain an even split would give everyone 12.5%;
+the leader currently holds about 25%, and it takes three of them to reach a
+majority. A coefficient of 1 or 2 is a chain one or two operators could dictate.
+
+It is a strict majority, deliberately. Two producers at exactly 50% each is not
+control, so that reads as 2 rather than 1 — an off-by-one there would understate
+concentration, which is the one direction this must never fail in.
+
+**Block time** is a distribution, not an average, because the average here is
+actively misleading. A two-hundred-block sample of live Sequence looked like
+this: twenty-six intervals in the 55s bucket, twenty-three in the 60s, and
+sixty-four at 300s or worse. The mean of that is 144 seconds, which describes
+neither half of it. The histogram shows both modes at a glance; a single number
+cannot.
+
+The percentiles are read off the histogram, so they are bucket floors rather
+than decimals — the page prints `≥ 55s` for exactly that reason, and will not
+pretend to a precision the counters do not hold. The mean, minimum and maximum
+are exact.
+
+Only **consecutive** blocks are measured. The gap across a range the scan never
+read is this dashboard's own downtime, not the chain's block time, and an hour
+of it in the tail of a chart about a one-minute chain would be a lie that looks
+like a finding. Intervals refused for that reason are counted and shown rather
+than dropped silently.
+
+**Producer movement** compares this week's share against the week before, and
+lists who has newly appeared and who has gone quiet. It needs two full weeks of
+day buckets before it will compare anything; until then it says so instead of
+inventing a trend from three days of data.
+
+#### Where the numbers come from
+
+All of it, without exception, is derived from blocks the standings scan has
+**already read**. The scan hands each block to one more accumulator on its way
+past and the cost is a few integer increments — there is not one additional
+gateway call anywhere in this section, which was the constraint the whole design
+was built around.
+
+The block-time histogram is fixed buckets rather than retained observations, so
+it is twenty-seven integers however long the node runs. Share drift and churn
+come out of the same thirty-five days of day buckets the standings windows use,
+so the two can never disagree about the same week.
+
+#### What it does not claim
+
+This dashboard reads a window of one chain through one gateway. It is not an
+indexer and has not seen the chain from genesis, so every figure here is
+**observed**, not authoritative, and the block range it rests on is printed
+beside it. A producer that never appeared in that window is not counted, and
+nothing here can prove one has stopped — which is why the wording is *quiet* and
+*last seen* rather than *dead*.
+
+After upgrading, the block-time histogram starts empty and fills forward. The
+standings file it lives in carries no interval history from before the feature
+existed, and there is no honest way to reconstruct it: the day buckets record
+who produced each block, not when. Give it an hour of chain.
+
 ## Alerting
 
 Nothing here alerts until you configure a channel. `sudo nano /etc/xl1/alert.env`,

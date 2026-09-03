@@ -97,6 +97,31 @@ read_rollback_target() {
   printf '%s' "${t}"
 }
 
+# Restart the producer, including out of a failed state.
+#
+# `systemctl is-active` is false for a unit that FAILED, which is not the same
+# thing as one an operator stopped -- and the difference cost a night. During an
+# outage the producer crash-looped until systemd hit its restart limit and gave
+# up; `update` then loaded the fixed image, found is-active false, skipped the
+# restart entirely, and printed "services restarted". The node sat dead on a
+# good image while the tool said it was fine.
+#
+# So: restart when the unit is running OR failed, and clear the failure counter
+# first, because systemd refuses a start it considers repeated too quickly and
+# the reset is the only thing that lifts it. A unit that is merely inactive was
+# stopped on purpose and is left alone.
+restart_producer_if_wanted() {
+  local context="${1:-restart}"
+  if systemctl is-failed --quiet xl1-producer; then
+    printf '  %sproducer was in a failed state; clearing it before the restart%s\n' "${DIM}" "${RESET}"
+    systemctl reset-failed xl1-producer 2>/dev/null || true
+  elif ! systemctl is-active --quiet xl1-producer; then
+    printf '  %sproducer was not running; started nothing%s\n' "${DIM}" "${RESET}"
+    return 0
+  fi
+  systemctl restart xl1-producer || die "${context}"
+}
+
 # --------------------------------------------------------------------- status
 
 cmd_status() {
@@ -161,6 +186,9 @@ cmd_stop() {
 
 cmd_restart() {
   need_root restart
+  # Same reason as the update path: a restart of a unit systemd has given up on
+  # fails with "Start request repeated too quickly" until the counter is reset.
+  systemctl reset-failed xl1-producer 2>/dev/null || true
   systemctl restart xl1-producer || die "restart failed — try: xl1ctl doctor"
   printf '%s✓%s producer restarted\n' "${GREEN}" "${RESET}"
   sleep 3
@@ -475,10 +503,7 @@ cmd_update() {
   apply_ui_overlay
 
   systemctl restart xl1-dashboard || printf '  %swarning:%s dashboard did not restart — check: journalctl -u xl1-dashboard -n 50\n' "${YELLOW}" "${RESET}"
-  if systemctl is-active --quiet xl1-producer; then
-    systemctl restart xl1-producer \
-      || die "images loaded, but the producer did not restart — check: xl1ctl doctor"
-  fi
+  restart_producer_if_wanted "images loaded, but the producer did not restart — check: xl1ctl doctor"
 
   # Say what actually happened rather than asserting success. The version the
   # node now runs is the only claim worth making here.
@@ -530,12 +555,7 @@ cmd_rollback() {
     printf '%s\n' "${current}" > "${ROLLBACK_FILE}"
   fi
 
-  if systemctl is-active --quiet xl1-producer; then
-    systemctl restart xl1-producer \
-      || die "xl1:local now points at ${target}, but the producer did not restart — check: xl1ctl doctor"
-  else
-    printf '  %sproducer was not running; started nothing%s\n' "${DIM}" "${RESET}"
-  fi
+  restart_producer_if_wanted "xl1:local now points at ${target}, but the producer did not restart — check: xl1ctl doctor"
 
   # The image answers for itself, the same way update does. A rollback that
   # reported success while the tag had not moved would be the worst outcome

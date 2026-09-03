@@ -5,7 +5,13 @@ ARG NODE_VERSION=24.14.1
 FROM node:${NODE_VERSION}-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
+# A cache mount rather than a plain install: package.json changes on every
+# version bump, which invalidates this layer and re-downloads the whole SDK.
+# The cache lives outside the image, so nothing is added to the layer and the
+# `npm cache clean` this used to end with would only throw away the thing that
+# makes the next build survive a bad connection.
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --omit=dev --no-audit --no-fund
 
 FROM node:${NODE_VERSION}-bookworm-slim
 LABEL org.opencontainers.image.title="XL1 Pi Dashboard" \

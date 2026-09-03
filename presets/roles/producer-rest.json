@@ -1,0 +1,23 @@
+{
+  "providerBindings": {
+    "BlockViewer": { "connection": "rest-finalized" },
+    "ChainStateViewer": { "connection": "rest-chain-state" },
+    "FinalizationViewer": { "connection": "rest-chain-state" },
+    "IndexViewer": { "connection": "rest-index" },
+    "MempoolViewer": { "connection": "default-rpc" },
+    "MempoolRunner": { "connection": "default-rpc" },
+    "ChainContractViewer": { "connection": "default-evm-rpc" },
+    "EvmChainViewer": { "connection": "default-evm-rpc" },
+    "StakeTotalsViewer": { "connection": "default-evm-rpc" },
+    "BlockRunner": { "connection": "memory" },
+    "BlockValidationViewer": { "connection": "memory" }
+  },
+  "actors": [
+    {
+      "name": "producer",
+      "accountPath": "0",
+      "blockProductionCheckInterval": 5000,
+      "heartbeatInterval": 60000
+    }
+  ]
+}

@@ -420,7 +420,8 @@ info "installed /usr/local/bin/xl1-alert.sh"
 # See the comment block in the unit for what the one changed field buys.
 install -d -m 755 "${CONF_DIR}/presets/roles"
 install -m 644 "${BUNDLE_DIR}/presets/roles/producer.json" "${CONF_DIR}/presets/roles/producer.json"
-info "installed ${CONF_DIR}/presets/roles/producer.json (blockProductionCheckInterval override)"
+install -m 644 "${BUNDLE_DIR}/presets/roles/producer-rest.json" "${CONF_DIR}/presets/roles/producer-rest.json"
+info "installed ${CONF_DIR}/presets/roles/producer{,-rest}.json (blockProductionCheckInterval override)"
 
 # Root-owned and not operator-writable: the sudoers grant below would otherwise
 # be a way to escalate by editing the script it exempts.

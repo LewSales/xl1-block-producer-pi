@@ -331,6 +331,35 @@ A run that could not read the status document deliberately sends **no** ping.
 
 ---
 
+## Which role reads the chain how
+
+`XL1_ROLE` in `/etc/xl1/sequence-producer.env` picks one of two role presets,
+both of them mounted by the unit:
+
+| | chain reads | mempool |
+|---|---|---|
+| `producer` | JSON-RPC | JSON-RPC |
+| `producer-rest` | the REST CDNs — `blocks`, `state` and `indexes.sequence.xyo.space` | JSON-RPC |
+
+This node runs `producer-rest`, and the reason is a night in September 2026. The
+gateway's RPC schema began requiring an `$epoch` argument on viewer calls, and
+every client older than that change failed on **every** call: the producer
+stopped producing, the dashboard lost the chain, and the network dropped from a
+block every ~50s to one every five minutes while operators rebuilt. A
+`producer-rest` node reads the chain from the CDNs and would have kept building
+through it — only submission goes over RPC.
+
+Switching is an env edit and a restart, not a unit edit:
+
+```bash
+sudo sed -i 's/^XL1_ROLE=.*/XL1_ROLE=producer-rest/' /etc/xl1/sequence-producer.env
+sudo systemctl restart xl1-producer
+```
+
+`presets/roles/producer-rest.json` is upstream's file with one field changed —
+the same `blockProductionCheckInterval` override the RPC preset carries, for the
+same reason. Every other binding is theirs.
+
 ## When a healthy node produces nothing
 
 This is the failure this bundle was built around, because every ordinary signal

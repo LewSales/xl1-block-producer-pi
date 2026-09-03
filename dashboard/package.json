@@ -9,7 +9,7 @@
     "start": "node server.mjs"
   },
   "dependencies": {
-    "@xyo-network/xl1-sdk": "5.4.1"
+    "@xyo-network/xl1-sdk": "5.5.2"
   },
   "engines": {
     "node": ">=24"

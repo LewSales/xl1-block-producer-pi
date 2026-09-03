@@ -638,6 +638,27 @@ async function persistPeers(force = false) {
  *  read — an earlier version asked for the newest 200 and then jumped the
  *  cursor to the head, which after any real outage booked the skipped middle as
  *  scanned and lost those blocks from every total for good. */
+/** A block's own millisecond timestamp.
+ *
+ *  Two places carry it and only one of them is dependable. `$epoch` is metadata
+ *  the datalake attaches, and on 2 September 2026 it stopped arriving on new
+ *  blocks while remaining on every older one — so a reader that knows only
+ *  about `$epoch` files everything from that day forward as undated, and the
+ *  day windows quietly stop counting while the totals keep rising. The time
+ *  payload is inside the block itself and was present on every block sampled,
+ *  new and old, which makes it the fallback rather than the other way round:
+ *  `$epoch` still wins where it exists, so nothing about the history already on
+ *  disk shifts by a millisecond. */
+function blockEpoch(bw, payloads) {
+  const meta = Number(bw?.$epoch)
+  if (Number.isFinite(meta) && meta > 0) return meta
+  const list = Array.isArray(payloads) ? payloads : []
+  const timed = list.find((p) => p?.schema === 'network.xyo.time' && Number.isFinite(Number(p?.epoch)))
+  const fallback = timed ?? list.find((p) => Number.isFinite(Number(p?.epoch)) && Number(p.epoch) > 0)
+  const epoch = Number(fallback?.epoch)
+  return Number.isFinite(epoch) && epoch > 0 ? epoch : undefined
+}
+
 async function scanProduction(viewer, currentNum) {
   const self = PRODUCER_ADDRESS || REWARD_ADDRESS
   if (!Number.isFinite(currentNum)) return
@@ -682,12 +703,12 @@ async function scanProduction(viewer, currentNum) {
         production.scanned += 1
         for (const addr of signers) peers.set(addr, (peers.get(addr) ?? 0) + 1)
 
-        // $epoch is the block's own millisecond timestamp. A block without one
-        // is counted in the totals and left out of every day window rather than
-        // filed under an invented date; the count is surfaced so a chain that
-        // stopped carrying $epoch shows up as undated blocks instead of as days
-        // that quietly stop adding up.
-        const epoch = Number(bw?.$epoch)
+        // A block with no timestamp in either place is counted in the totals and
+        // left out of every day window rather than filed under an invented
+        // date; the count is surfaced so a chain that stopped carrying one
+        // shows up as undated blocks instead of as days that quietly stop
+        // adding up.
+        const epoch = blockEpoch(bw, Array.isArray(entry) ? entry[1] : undefined)
         if (Number.isFinite(epoch) && epoch > 0) {
           bucket(dayKey(epoch), signers)
           if (production.daysFrom === undefined || n < production.daysFrom) production.daysFrom = n
@@ -761,7 +782,7 @@ async function backfillDays(viewer) {
         const bw = Array.isArray(entry) ? entry[0] : entry
         const n = Number(bw?.block)
         if (!Number.isFinite(n) || n < from || n > to) continue
-        const epoch = Number(bw?.$epoch)
+        const epoch = blockEpoch(bw, Array.isArray(entry) ? entry[1] : undefined)
         if (!Number.isFinite(epoch) || epoch <= 0) continue
         const signers = new Set((bw?.addresses ?? [])
           .map((a) => String(a).replace(/^0x/i, '').toLowerCase())
@@ -1700,7 +1721,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

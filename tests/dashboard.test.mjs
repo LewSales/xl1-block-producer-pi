@@ -287,7 +287,7 @@ const DAY = 86_400_000
 
 /** A viewer whose chain is a plain map of block number → signer addresses.
  *  Records every call so the walk itself can be asserted, not just its result. */
-function fakeViewer(signersByBlock, { emptyFor, epochFor } = {}) {
+function fakeViewer(signersByBlock, { emptyFor, epochFor, timeEpochFor } = {}) {
   const calls = []
   return {
     calls,
@@ -304,9 +304,16 @@ function fakeViewer(signersByBlock, { emptyFor, epochFor } = {}) {
           // No epochFor means no $epoch on the block at all, which is the
           // undated case the older tests here already exercise by accident.
           const epoch = epochFor?.(n)
-          out.push(epoch === undefined
+          const bw = epoch === undefined
             ? { block: n, addresses: signers }
-            : { block: n, addresses: signers, $epoch: epoch })
+            : { block: n, addresses: signers, $epoch: epoch }
+          // timeEpochFor is the shape the gateway started returning on 2
+          // September 2026: the block itself, paired with its payloads, and the
+          // timestamp only in the time payload.
+          const timeEpoch = timeEpochFor?.(n)
+          out.push(timeEpoch === undefined
+            ? bw
+            : [bw, [{ schema: 'network.xyo.transfer' }, { schema: 'network.xyo.time', epoch: timeEpoch }]])
         }
         return out
       },
@@ -560,6 +567,36 @@ test('a block is filed under its own day, not the day it was read', async () => 
   assert.equal(today.scanned, 1)
   assert.equal(today.counts.get(SELF), 1)
   assert.equal(m.days.get(m.dayKey(now - 3 * DAY)).counts.get(PEER_A), 2)
+})
+
+test('blockEpoch prefers the metadata and falls back to the time payload', () => {
+  const payloads = [{ schema: 'network.xyo.transfer', epoch: 222 }, { schema: 'network.xyo.time', epoch: 333 }]
+  // $epoch still wins where it exists, so history already on disk cannot shift.
+  assert.equal(m.blockEpoch({ $epoch: 111 }, payloads), 111)
+  // The time payload is the block's own account of when it was made; the
+  // transfer's epoch is only reached for if there is no time payload at all.
+  assert.equal(m.blockEpoch({}, payloads), 333)
+  assert.equal(m.blockEpoch({}, [{ schema: 'network.xyo.transfer', epoch: 222 }]), 222)
+  assert.equal(m.blockEpoch({}, [{ schema: 'network.xyo.time' }]), undefined)
+  assert.equal(m.blockEpoch({}, undefined), undefined)
+})
+
+test('a block dated only by its time payload is still filed under its day', async () => {
+  // The gateway stopped attaching $epoch to new blocks on 2 September 2026 and
+  // kept it on every older one. A reader that knows only about $epoch counts
+  // those blocks in the totals and files none of them under a day, so every
+  // window silently flatlines while the all-time figure keeps climbing.
+  resetScan()
+  const now = Date.now()
+  const chain = { 1: [PEER_A], 2: [SELF], 3: [SELF] }
+  const epochs = { 1: now - 2 * DAY, 2: now, 3: now }
+  m.production.cursor = 0
+  await m.scanProduction(fakeViewer(chain, { timeEpochFor: (n) => epochs[n] }), 3)
+
+  assert.equal(m.production.undated, undefined, 'a dated block must not be counted as undated')
+  assert.equal(m.days.size, 2)
+  assert.equal(m.days.get(m.dayKey(now)).counts.get(SELF), 2)
+  assert.equal(m.days.get(m.dayKey(now - 2 * DAY)).counts.get(PEER_A), 1)
 })
 
 test('a window ranks on its own blocks while the total keeps its own order', async () => {

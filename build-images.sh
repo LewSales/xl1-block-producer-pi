@@ -7,7 +7,7 @@
 # to be its own failure mode, and a laptop does it in about 80 seconds.
 #
 #   ./build-images.sh
-#   XL1_CLI_VERSION=5.2.4 ./build-images.sh      # pin an older one
+#   XL1_CLI_VERSION=5.3.1 ./build-images.sh      # pin an older one
 #
 # Produces xl1-local-arm64.tar.gz and xl1-dashboard-arm64.tar.gz alongside this
 # script. They are gitignored — they are build artifacts, and each exceeds
@@ -17,7 +17,7 @@ set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${HERE}/.build"
-XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.1}"
+XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.2}"
 # The Pi is arm64; a workstation running the producer natively is amd64, and
 # building for it needs no emulation at all — which is why this is a variable
 # rather than a fork of the script.

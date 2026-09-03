@@ -1,0 +1,56 @@
+# Build both arm64 images where the bandwidth is, and attach them to a release.
+#
+# The alternative is what this replaces: cross-build on a workstation under
+# QEMU, then push 220 MB to the Pi or to GitHub over whatever connection the
+# operator happens to have. That is twenty emulated minutes and an upload that
+# can take longer than the build. Here the runner is arm64 already — no
+# emulation — and the tarballs never leave GitHub's network until the Pi pulls
+# them with `xl1ctl update --release`, on the Pi's own line.
+name: release images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: release tag to attach the images to (created if absent)
+        required: true
+      cli_version:
+        description: xl1-cli version to bake into the producer image
+        required: true
+        default: '5.3.2'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Native arm64. ubuntu-24.04-arm is free for public repositories, which is
+    # what makes this cheaper than emulating the Pi's architecture anywhere else.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        # build-images.sh compiles upstream's entrypoint before the image build
+        # and refuses to start without pnpm on PATH.
+        run: npm install -g pnpm
+
+      - name: Build both images
+        env:
+          XL1_CLI_VERSION: ${{ inputs.cli_version }}
+          TARGET_ARCH: arm64
+        run: ./build-images.sh
+
+      - name: Publish to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The release path downloads a file named SHA256SUMS; the build writes
+          # it per-arch, so publish it under the name the Pi asks for.
+          cp SHA256SUMS-arm64 SHA256SUMS
+          gh release view "${{ inputs.tag }}" >/dev/null 2>&1 \
+            || gh release create "${{ inputs.tag }}" --title "${{ inputs.tag }}" --notes "xl1-cli ${{ inputs.cli_version }}"
+          gh release upload "${{ inputs.tag }}" \
+            xl1-local-arm64.tar.gz xl1-dashboard-arm64.tar.gz SHA256SUMS --clobber

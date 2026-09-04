@@ -40,9 +40,18 @@ SUBPATH="${XL1_PUBLISH_PATH:-xl1/rbpi3}"
 # checkout has no business in the directory whose disk usage the dashboard
 # reports either.
 WORKDIR="${XL1_PUBLISH_WORKDIR:-/var/lib/xl1-publish}"
+# The file this node writes. One repository can hold several nodes' data when
+# each writes its own name -- which is what lets the site own every page while
+# the nodes own only what they measure.
+DATA_FILE="${XL1_PUBLISH_FILE:-status.json}"
 GIT_NAME="${XL1_PUBLISH_GIT_NAME:-xl1-publisher}"
 GIT_EMAIL="${XL1_PUBLISH_GIT_EMAIL:-xl1-publisher@users.noreply.github.com}"
-PAGE="${XL1_PUBLISH_PAGE:-/srv/xl1-dashboard/public.html}"
+# ${VAR-default}, not ${VAR:-default}: the colon form falls back when the value
+# is EMPTY as well as unset, and empty is a real choice here -- it means "this
+# destination already owns its pages, do not write one". With the colon the
+# node wrote a second copy of the producer page into the data directory,
+# where nothing serves it and it would have gone stale beside live data.
+PAGE="${XL1_PUBLISH_PAGE-/srv/xl1-dashboard/public.html}"
 # Optional: a URL that accepts the status document directly -- object storage, a
 # Worker, anything that takes an HTTP PUT. Git ships the PAGE well, because a
 # page is reviewed and versioned and changes rarely. It ships the DATA badly:
@@ -86,7 +95,7 @@ mkdir -p "${WORKDIR}"
 # writes the files and stops, rather than failing on a clone of "".
 if (( DRY )) && [[ -z "${REPO}" ]]; then
   mkdir -p "${WORKDIR}/${SUBPATH}"
-  printf '%s' "${BODY}" > "${WORKDIR}/${SUBPATH}/status.json"
+  printf '%s' "${BODY}" > "${WORKDIR}/${SUBPATH}/${DATA_FILE}"
   [[ -f "${PAGE}" ]] && cp -f "${PAGE}" "${WORKDIR}/${SUBPATH}/index.html"
   log "dry run: wrote ${WORKDIR}/${SUBPATH} (no repository configured)"
   exit 0
@@ -103,7 +112,7 @@ git config user.name "${GIT_NAME}"
 git config user.email "${GIT_EMAIL}"
 
 mkdir -p "${SUBPATH}"
-printf '%s' "${BODY}" > "${SUBPATH}/status.json"
+printf '%s' "${BODY}" > "${SUBPATH}/${DATA_FILE}"
 
 # The page travels with the data so a page fix reaches the site on the next
 # publish, rather than needing somebody to remember to copy it.

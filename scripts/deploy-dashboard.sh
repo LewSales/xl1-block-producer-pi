@@ -46,16 +46,19 @@ ok "server.mjs parses"
 ssh -o ConnectTimeout=10 "${HOST}" "mkdir -p ${DEST}" 2>/dev/null \
   || die "cannot create ${DEST} — run: sudo install -d -o \$USER -g \$USER -m 755 ${DEST}"
 
-for f in server.mjs index.html; do
+# public.html travels too: the publisher reads it from ${DEST} to put beside
+# the status it pushes, so a page fix that never left this machine would be a
+# page fix nobody ever sees.
+for f in server.mjs index.html public.html; do
   scp -q "${HERE}/dashboard/${f}" "${HOST}:${DEST}/${f}" || die "copy failed: ${f}"
 done
 printf '%s' "${STAMP}" | ssh -o ConnectTimeout=10 "${HOST}" "cat > ${DEST}/build.json" || die "copy failed: build.json"
-ssh -o ConnectTimeout=10 "${HOST}" "chmod 644 ${DEST}/server.mjs ${DEST}/index.html ${DEST}/build.json"
+ssh -o ConnectTimeout=10 "${HOST}" "chmod 644 ${DEST}/server.mjs ${DEST}/index.html ${DEST}/public.html ${DEST}/build.json"
 
 # Compare hashes rather than trusting exit codes, which is the failure this
 # script exists to stop repeating.
-LOCAL_SUM="$(cat "${HERE}/dashboard/server.mjs" "${HERE}/dashboard/index.html" | sha256sum | cut -d' ' -f1)"
-REMOTE_SUM="$(ssh -o ConnectTimeout=10 "${HOST}" "cat ${DEST}/server.mjs ${DEST}/index.html | sha256sum | cut -d' ' -f1")"
+LOCAL_SUM="$(cat "${HERE}/dashboard/server.mjs" "${HERE}/dashboard/index.html" "${HERE}/dashboard/public.html" | sha256sum | cut -d' ' -f1)"
+REMOTE_SUM="$(ssh -o ConnectTimeout=10 "${HOST}" "cat ${DEST}/server.mjs ${DEST}/index.html ${DEST}/public.html | sha256sum | cut -d' ' -f1")"
 [[ "${LOCAL_SUM}" == "${REMOTE_SUM}" ]] || die "files differ after copy (local ${LOCAL_SUM:0:12}, remote ${REMOTE_SUM:0:12})"
 ok "files match on the far side (${LOCAL_SUM:0:12})"
 

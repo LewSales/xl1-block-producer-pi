@@ -1546,3 +1546,55 @@ test('the published label is chosen, never taken from the hostname', () => {
   assert.notEqual(pub.label, 'CANARY-HOSTNAME')
   assert.equal(pub.label, undefined, 'unset means unpublished, not guessed')
 })
+
+// -------------------------------------------------------------- market price
+//
+// The one place this page could be talked into inventing a number. A testnet
+// balance has no currency value, and every test here is about saying so.
+
+test('a testnet balance is never given a cash value it does not have', async () => {
+  const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}`)
+  fresh.state.chain = { ok: true, balances: { reward: { xl1: '47,230.0853' } } }
+  const v = fresh.priceView()
+  assert.ok(v.marketNote, 'sequence must carry the note that it trades nowhere')
+  assert.match(v.marketNote, /trades nowhere/)
+  assert.equal(v.hypothetical ?? true, true)
+})
+
+test('sequence and local have no market; mainnet does', async () => {
+  const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}b`)
+  assert.equal(fresh.NO_MARKET.has('sequence'), true)
+  assert.equal(fresh.NO_MARKET.has('local'), true)
+  assert.equal(fresh.NO_MARKET.has('mainnet'), false,
+    'a real network must not be lumped in with the test ones')
+})
+
+test('with no price source configured, nothing is quoted at all', async () => {
+  const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}c`)
+  await fresh.pollPrice()
+  const v = fresh.priceView()
+  assert.equal(v.configured, false)
+  assert.equal(v.notional, undefined, 'no source means no number, not a zero')
+})
+
+test('a conversion always travels with the reason it may mean nothing', async () => {
+  // Even when a price IS configured on a testnet, the figure must carry the
+  // hypothetical flag and the note -- a caller cannot get one without the other.
+  const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}d`)
+  fresh.state.chain = { ok: true, balances: { reward: { xl1: '1,000.0000' } } }
+  fresh.state.price = { configured: true, ok: true, hasMarket: false, id: 'xyo-network', currency: 'usd', value: 0.01 }
+  const v = fresh.priceView()
+  assert.equal(v.notional, 10, '1000 at 0.01 is 10')
+  assert.equal(v.hypothetical, true, 'and it is flagged as hypothetical')
+  assert.ok(v.marketNote, 'and the note comes with it')
+})
+
+test('a failed price poll keeps the last quote rather than blanking', async () => {
+  const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}e`)
+  fresh.state.price = { configured: true, ok: true, hasMarket: true, value: 0.02, currency: 'usd' }
+  // A price API that is down must not empty a card that is showing good data.
+  fresh.state.price = { ...fresh.state.price, ok: false, error: 'timeout' }
+  const v = fresh.priceView()
+  assert.equal(v.value, 0.02, 'the last good quote survives')
+  assert.equal(v.ok, false, 'and is marked as not current')
+})

@@ -205,16 +205,39 @@ function render(d) {
     ${esc(b.upstreamName ?? 'XYO Network')}</strong>.`
 }
 
-fetch('status.json?t=' + Date.now(), { cache: 'no-store' })
-  .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
-  .then(render)
-  .catch((e) => {
+// Where the data lives. The publisher rewrites this line when a live endpoint is
+// configured; left alone, the file sits next to this page.
+//
+// The distinction is the whole difference between "a few minutes behind" and
+// "live": a file shipped through git waits for a commit, a build and a CDN,
+// while one written straight to object storage is simply there.
+const DATA_URL = 'status.json'
+
+// Poll and re-render rather than reloading the document. A reload re-fetches
+// the page, re-parses the CSS and throws away the scroll position, several
+// times an hour, to redraw numbers that came from one small JSON file.
+const REFRESH_MS = 30000
+let failures = 0
+
+async function tick() {
+  // A hidden tab is a tab nobody is reading.
+  if (document.hidden) return
+  try {
+    const res = await fetch(DATA_URL + (DATA_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    render(await res.json())
+    failures = 0
+  } catch (e) {
+    // One failed poll is a hiccup and must not blank a page that is already
+    // showing good data; several in a row is worth saying out loud.
+    if (++failures < 3 && document.getElementById('grid').children.length) return
     $('state').textContent = 'no data'
     $('state').className = 'pill bad'
-    $('grid').innerHTML = `<section><h2>No data</h2><div class="sub">status.json could not be read
+    $('grid').innerHTML = `<section><h2>No data</h2><div class="sub">${esc(DATA_URL)} could not be read
       (${esc(e.message)}). The page is here; the node has not published to it yet.</div></section>`
-  })
-// The node publishes every few minutes; reloading more often than that only
-// re-reads the same file.
-setTimeout(() => location.reload(), 300000)
+  }
+}
+tick()
+setInterval(tick, REFRESH_MS)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tick() })
 </script>

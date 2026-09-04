@@ -540,6 +540,33 @@ function render(d) {
         b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
         dv.rewardEqualsProducer && ['Signer', '<span class="ok">✓ same as reward address</span>'],
       ])}
+      ${(() => {
+        const pr = d.price ?? {}
+        // The honest answer first, because on a test network it is the whole
+        // answer: the balance is real and its cash value is zero. Printing
+        // "$0.00" instead would read as a broken price feed rather than as the
+        // truth about a token that trades nowhere.
+        if (pr.marketNote) {
+          return `<div class="banner">${esc(pr.marketNote)}
+            What it buys is position: ${d.peers?.self ? `#${num(d.peers.self.rank)} of ${num(d.peers.producers)} producers
+            and ${d.peers.self.sharePercent}% of the chain` : 'blocks on the chain'}.
+            ${pr.notional !== undefined ? `<br><span class="sub">Were XL1 to trade at
+              ${esc(pr.id)}'s price (${esc(pr.currency.toUpperCase())} ${num(pr.value)}), this balance would come to
+              ${esc(pr.currency.toUpperCase())} ${num(pr.notional)} — a scale, not an amount.</span>` : ''}</div>`
+        }
+        if (!pr.configured) return ''
+        if (pr.ok === false && pr.value === undefined) {
+          return `<div class="sub warn" style="margin-top:8px">price unavailable — ${esc(pr.error ?? 'no quote')}</div>`
+        }
+        return dl([
+          ['Market', `${esc(pr.currency?.toUpperCase() ?? '')} ${num(pr.value)}
+            ${pr.change24h !== undefined ? `<span class="${pr.change24h >= 0 ? 'ok' : 'bad'}">${pr.change24h >= 0 ? '▲' : '▼'} ${Math.abs(pr.change24h)}%</span>` : ''}
+            <span class="sub">${esc(pr.id ?? '')}</span>`],
+          pr.notional !== undefined && ['Balance value', `${esc(pr.currency?.toUpperCase() ?? '')} ${num(pr.notional)}`],
+          // A quote that stopped updating is worse than none: it looks current.
+          pr.ok === false && ['Quote', `<span class="warn">stale — ${esc(pr.error)}</span>`],
+        ])
+      })()}
       <details class="ident"><summary>Addresses ${b.reward ? `· ${esc(shortAddr(b.reward.address))}` : ''}</summary>
         ${dl([
           b.reward && ['Reward address', addrCell(b.reward)],

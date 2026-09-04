@@ -1677,6 +1677,104 @@ async function pollAlerts() {
 }
 
 
+
+// -------------------------------------------------------------- market price
+//
+// What the earnings are worth, and -- more often -- an honest statement that
+// they are worth nothing yet.
+//
+// XL1 on sequence is a testnet token. It trades nowhere, so any currency figure
+// against a sequence balance is invented, and an invented number on a page whose
+// only job is to be believed costs more than the feature is worth. The card
+// says so plainly rather than printing $0.00, which reads like a broken feed.
+//
+// A price can still be tracked, because the question people actually ask is
+// "what would this be worth if it were the real token" -- so where a source is
+// configured the conversion is shown as the hypothetical it is, labelled in the
+// card, never as an amount earned.
+//
+// The one new outbound request on this page, and it is not to XL1: a price API
+// is not the gateway every producer on the chain is competing over. Fifteen
+// minutes, cached, and failure is a missing row rather than a broken card.
+const PRICE_ID = envStr('DASH_PRICE_ID', '')
+const PRICE_CURRENCY = envStr('DASH_PRICE_CURRENCY', 'usd').toLowerCase()
+const PRICE_POLL_MS = envNum('DASH_PRICE_POLL_MS', 900_000, 300_000)
+const PRICE_URL = envStr('DASH_PRICE_URL', 'https://api.coingecko.com/api/v3/simple/price')
+
+// Networks whose token has no market. Kept as a list rather than "not mainnet"
+// so a new testnet does not silently start quoting prices.
+const NO_MARKET = new Set(['sequence', 'local'])
+
+async function pollPrice() {
+  if (!PRICE_ID) { state.price = { configured: false, hasMarket: !NO_MARKET.has(NETWORK) }; return }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const url = `${PRICE_URL}?ids=${encodeURIComponent(PRICE_ID)}` +
+      `&vs_currencies=${encodeURIComponent(PRICE_CURRENCY)}&include_24hr_change=true`
+    const res = await fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const doc = await res.json()
+    const row = doc?.[PRICE_ID]
+    const value = Number(row?.[PRICE_CURRENCY])
+    if (!Number.isFinite(value)) throw new Error(`no ${PRICE_CURRENCY} price for ${PRICE_ID}`)
+    state.price = {
+      configured: true,
+      ok: true,
+      hasMarket: !NO_MARKET.has(NETWORK),
+      id: PRICE_ID,
+      currency: PRICE_CURRENCY,
+      value,
+      change24h: Number.isFinite(Number(row[`${PRICE_CURRENCY}_24h_change`]))
+        ? Number(Number(row[`${PRICE_CURRENCY}_24h_change`]).toFixed(2)) : undefined,
+      polledAt: new Date().toISOString(),
+      source: new URL(PRICE_URL).host,
+    }
+  } catch (error) {
+    // The last good price is kept beside the error: a quote from twenty minutes
+    // ago is still useful, and a card that empties itself on one failed request
+    // teaches its reader to distrust it.
+    state.price = {
+      ...(state.price ?? {}),
+      configured: true,
+      ok: false,
+      hasMarket: !NO_MARKET.has(NETWORK),
+      error: error.name === 'AbortError' ? 'timeout' : error.message?.slice(0, 120),
+      polledAt: new Date().toISOString(),
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The earnings expressed in currency, where that means anything.
+ *
+ *  Returns the conversion AND the reason it may be meaningless, together, so no
+ *  caller can take the number without the caveat attached to it. */
+function priceView() {
+  const p = state.price ?? { configured: Boolean(PRICE_ID), hasMarket: !NO_MARKET.has(NETWORK) }
+  const balance = Number(String(state.chain?.balances?.reward?.xl1 ?? '').replace(/,/g, ''))
+  const hypothetical = !p.hasMarket
+
+  return {
+    ...p,
+    network: NETWORK,
+    // On sequence this is the whole answer, and the card leads with it: the
+    // balance is real, its cash value is zero, and the thing that is worth
+    // something is the block count next to it.
+    marketNote: hypothetical
+      ? `XL1 on ${NETWORK} is a test token — it trades nowhere and this balance is worth nothing in currency.`
+      : undefined,
+    ...(p.ok && Number.isFinite(balance) && Number.isFinite(p.value) ? {
+      notional: Number((balance * p.value).toFixed(2)),
+      notionalOf: balance,
+      // Named so it cannot be read as earnings. It is what the balance would be
+      // worth if XL1 traded at the tracked token's price, which it does not.
+      hypothetical,
+    } : {}),
+  }
+}
+
 // -------------------------------------------------------------- fleet source
 //
 // One page for every node you run, instead of one page each.
@@ -2424,7 +2522,7 @@ const snapshot = () => ({
   // identical answers.
   ...(() => {
     const board = peerBoard()
-    return { derived: derived(board), peers: board, network: networkView(board), fleet: fleetView(board) }
+    return { derived: derived(board), peers: board, network: networkView(board), fleet: fleetView(board), price: priceView() }
   })(),
   // Values only. The browser reads `.v` and has never read `.t`, and at 240
   // points across four series the timestamps were three quarters of the whole
@@ -2593,7 +2691,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -2615,7 +2713,7 @@ if (isMain) {
   // from a fresh window instead would re-count every block in the overlap.
   await loadPeers()
   if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
-  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet()])
+  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet(), pollPrice()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
 
   // Each poller catches internally, but a rejection escaping one of them would
@@ -2629,6 +2727,7 @@ if (isMain) {
   setInterval(guard(persistPeers, 'persistPeers'), 60_000).unref()
   setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')(); guard(pollAlerts, 'pollAlerts')() }, LOCAL_POLL_MS).unref()
   setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
+  if (PRICE_ID) setInterval(guard(pollPrice, 'pollPrice'), PRICE_POLL_MS).unref()
   if (FLEET.peers.length) setInterval(guard(pollFleet, 'pollFleet'), FLEET_POLL_MS).unref()
 
   server.listen(PORT, BIND, () => {

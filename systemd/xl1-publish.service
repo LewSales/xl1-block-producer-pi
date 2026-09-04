@@ -14,7 +14,8 @@ Group=xl1pi
 # took the default config, and a second ExecStart for the site was added by hand
 # on the running Pi and never written back here -- so reinstalling the unit
 # would have silently returned the node to publishing only into the retired
-# xl1-status-rbpi3 repo, with the live page going stale and nothing to say why.
+# xl1-status-rbpi3 repo (now archived), the live page going stale and nothing
+# on the box to say why.
 #
 # Naming the config here means the unit cannot quietly disagree with the box.
 ExecStart=/usr/bin/env XL1_PUBLISH_ENV=/etc/xl1/publish-site.env /usr/local/bin/xl1-publish.sh

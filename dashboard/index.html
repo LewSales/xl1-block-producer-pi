@@ -200,13 +200,15 @@
   :root {
     --c-producer: #2f7ae5; --c-chain: #7a4ddb; --c-rewards: #1a7f47;
     --c-software: #b4690e; --c-trend: #0d7c8f; --c-pi: #c0392b; --c-log: #5b6472;
-    --c-peers: #8a5a2b; --c-alert: #a3341f; --c-network: #2b6f6a --c-fleet: #4a5a8f;
+    --c-peers: #8a5a2b; --c-alert: #a3341f; --c-network: #2b6f6a; --c-fleet: #4a5a8f;
+    --c-worth: #1a7f47;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --c-producer: #6aa8ff; --c-chain: #a98bff; --c-rewards: #4ec97f;
       --c-software: #e0a341; --c-trend: #48c3d6; --c-pi: #ff8a7a; --c-log: #9aa4b2;
-      --c-peers: #d7a06a; --c-alert: #ff9d84; --c-network: #5fc9c0 --c-fleet: #93a7e6;
+      --c-peers: #d7a06a; --c-alert: #ff9d84; --c-network: #5fc9c0; --c-fleet: #93a7e6;
+      --c-worth: #4ec97f;
     }
   }
   section { position: relative; overflow: hidden; }
@@ -540,33 +542,6 @@ function render(d) {
         b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
         dv.rewardEqualsProducer && ['Signer', '<span class="ok">✓ same as reward address</span>'],
       ])}
-      ${(() => {
-        const pr = d.price ?? {}
-        // The honest answer first, because on a test network it is the whole
-        // answer: the balance is real and its cash value is zero. Printing
-        // "$0.00" instead would read as a broken price feed rather than as the
-        // truth about a token that trades nowhere.
-        if (pr.marketNote) {
-          return `<div class="banner">${esc(pr.marketNote)}
-            What it buys is position: ${d.peers?.self ? `#${num(d.peers.self.rank)} of ${num(d.peers.producers)} producers
-            and ${d.peers.self.sharePercent}% of the chain` : 'blocks on the chain'}.
-            ${pr.notional !== undefined ? `<br><span class="sub">Were XL1 to trade at
-              ${esc(pr.id)}'s price (${esc(pr.currency.toUpperCase())} ${num(pr.value)}), this balance would come to
-              ${esc(pr.currency.toUpperCase())} ${num(pr.notional)} — a scale, not an amount.</span>` : ''}</div>`
-        }
-        if (!pr.configured) return ''
-        if (pr.ok === false && pr.value === undefined) {
-          return `<div class="sub warn" style="margin-top:8px">price unavailable — ${esc(pr.error ?? 'no quote')}</div>`
-        }
-        return dl([
-          ['Market', `${esc(pr.currency?.toUpperCase() ?? '')} ${num(pr.value)}
-            ${pr.change24h !== undefined ? `<span class="${pr.change24h >= 0 ? 'ok' : 'bad'}">${pr.change24h >= 0 ? '▲' : '▼'} ${Math.abs(pr.change24h)}%</span>` : ''}
-            <span class="sub">${esc(pr.id ?? '')}</span>`],
-          pr.notional !== undefined && ['Balance value', `${esc(pr.currency?.toUpperCase() ?? '')} ${num(pr.notional)}`],
-          // A quote that stopped updating is worse than none: it looks current.
-          pr.ok === false && ['Quote', `<span class="warn">stale — ${esc(pr.error)}</span>`],
-        ])
-      })()}
       <details class="ident"><summary>Addresses ${b.reward ? `· ${esc(shortAddr(b.reward.address))}` : ''}</summary>
         ${dl([
           b.reward && ['Reward address', addrCell(b.reward)],
@@ -599,6 +574,61 @@ function render(d) {
           : `no reward movement in ${num(intervals)} intervals`)}
 
     </section>`)
+  }
+
+  // What it is worth — its own card now, rather than a banner buried in the
+  // body of Rewards. The public page has led with this since it shipped while
+  // the operator view, which is the one read every day, made you scroll past
+  // two address rows to find it. It is the first question anyone asks about a
+  // balance, so it gets a heading.
+  //
+  // Beyond what the public page shows: earnings since the dashboard's own
+  // baseline, and what a single accepted block is worth. Both are meaningless
+  // to a visitor — they depend on when this process last restarted — and both
+  // are exactly what the operator wants.
+  {
+    const pr = d.price ?? {}
+    const cur = (pr.currency ?? '').toUpperCase()
+    const worthOf = (xl1) => Number.isFinite(xl1) && Number.isFinite(pr.value)
+      ? `${cur} ${num(Number((xl1 * pr.value).toFixed(2)))}` : undefined
+    const sinceXl1 = Number(String(b.reward?.sinceStart?.xl1 ?? '').replace(/,/g, ''))
+    const sinceWorth = worthOf(sinceXl1)
+    // The chain pays ~50 XL1 per accepted block; Rewards states that in XL1, so
+    // this states the same block in the other unit rather than repeating it.
+    const blockWorth = worthOf(50)
+
+    if (pr.configured || pr.marketNote) {
+      cards.push(`<section style="--c: var(--c-worth)">
+        <h2><span class="ico" aria-hidden="true">⚖️</span>What it is worth</h2>
+        ${pr.marketNote
+          // The honest answer first, because on a test network it is the whole
+          // answer. "$0.00" would read as a broken feed rather than as the truth
+          // about a token that trades nowhere.
+          ? `<div class="big sub" style="font-size:19px">nothing, yet</div>
+             <div class="sub">${esc(pr.marketNote)}</div>`
+          : pr.notional !== undefined
+            ? `<div class="big">${esc(cur)} ${num(pr.notional)}</div>
+               <div class="sub">reward balance at the tracked price</div>`
+            : ''}
+        ${pr.ok === false && pr.value === undefined
+          ? `<div class="sub warn" style="margin-top:8px">price unavailable — ${esc(pr.error ?? 'no quote')}</div>`
+          : dl([
+            ['Tracked price', `${esc(cur)} ${pr.value ?? '—'}
+              ${pr.change24h !== undefined ? `<span class="${pr.change24h >= 0 ? 'ok' : 'bad'}">${pr.change24h >= 0 ? '▲' : '▼'} ${Math.abs(pr.change24h)}%</span>` : ''}
+              <span class="sub">${esc(pr.id ?? '')}</span>`],
+            pr.notional !== undefined && pr.marketNote &&
+              ['If it traded at that', `${esc(cur)} ${num(pr.notional)} <span class="sub">a scale, not an amount</span>`],
+            sinceWorth && sinceXl1 > 0 &&
+              ['Since dashboard start', `${esc(b.reward.sinceStart.xl1)} XL1 <span class="sub">≈ ${esc(sinceWorth)}</span>`],
+            blockWorth && ['Per accepted block', `~50 XL1 <span class="sub">≈ ${esc(blockWorth)}</span>`],
+            // A quote that stopped updating is worse than none: it looks current.
+            pr.ok === false && ['Quote', `<span class="warn">stale — ${esc(pr.error)}</span>`],
+          ])}
+        ${d.peers?.self ? `<div class="sub" style="margin-top:7px">
+          What it buys is position: <strong>#${num(d.peers.self.rank)} of ${num(d.peers.producers)}</strong>
+          producers, ${d.peers.self.sharePercent}% of the chain.</div>` : ''}
+      </section>`)
+    }
   }
 
   // Alerts — read from the alerter's own state file, never evaluated here.
@@ -1290,6 +1320,7 @@ function render(d) {
     'Chain',
     'Latency',
     'Rewards',
+    'What it is worth',
     'Alerts',
     'Fleet',
     'XL1 Network',
@@ -1337,6 +1368,12 @@ function render(d) {
     // question standings answers for one node, asked about all of them.
     Fleet: 9.8,
     'Software & host': 9,
+    // As close to Rewards as it can get without splitting it from Software &
+    // host. Pairing is decided by adjacency alone, so a card ranked between
+    // those two would not join that stack -- it would dissolve it, and both
+    // would fall out. This sits immediately after the stack, still directly
+    // below the balance it prices, and still ahead of the chain-wide block.
+    'What it is worth': 9.4,
     'Producer standings': 10,
     'Producer log': 11,
   }

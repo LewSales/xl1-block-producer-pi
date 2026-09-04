@@ -30,6 +30,7 @@ const ALL = [
   'Raspberry Pi', 'Operations', 'Candidate race', 'Latency', 'Producer standings',
   'Producer log — newest first (40 lines)',
   'Alerts', 'XL1 Network', 'Block time', 'Producer movement', 'Fleet',
+  'What it is worth',
 ]
 
 function layout(titles = ALL) {
@@ -56,6 +57,7 @@ test('cards are ordered by what an operator needs, not by build order', () => {
     'Trends',
     'Rewards',
     'Software & host',
+    'What it is worth',   // prices the balance, so it follows the Rewards stack
     'XL1 Network',          // the chain, once every card about this node is done
     'Block time',
     'Producer movement',
@@ -84,6 +86,18 @@ test('paired cards become one grid item so the second sits below the first', () 
     ['Rewards', 'Software & host'],
   ])
   assert.equal(items.length, ALL.length - 4, 'each pair collapses two cards into one grid item')
+})
+
+test('the worth card does not split Rewards from the build earning them', () => {
+  // Pairing is adjacency-only, so the obvious rank for this card -- straight
+  // after Rewards, whose balance it prices -- would not join that stack, it
+  // would dissolve it and drop both cards out. It goes after the pair instead.
+  const stacked = layout().filter((h) => h.startsWith('<div class="stack">')).map(titlesOf)
+  assert.ok(stacked.some(([a, b]) => a === 'Rewards' && b === 'Software & host'),
+    'Rewards and Software & host must still share one grid item')
+  const order = layout().flatMap(titlesOf)
+  assert.equal(order[order.indexOf('Software & host') + 1], 'What it is worth',
+    'it belongs immediately after that stack, not inside it')
 })
 
 test('a card missing for want of data does not leave its partner in a stack of one', () => {

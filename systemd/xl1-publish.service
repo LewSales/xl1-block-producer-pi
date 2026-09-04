@@ -1,0 +1,17 @@
+[Unit]
+Description=Publish the XL1 producer's public status page
+Documentation=https://github.com/LewSales/xl1-block-producer-pi
+After=network-online.target xl1-dashboard.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Not root. This needs to read one loopback URL and push to one repository, and
+# the credential it pushes with belongs to the operator, not to the system.
+User=xl1pi
+Group=xl1pi
+ExecStart=/usr/local/bin/xl1-publish.sh
+# A publish that cannot reach GitHub is not a failure of the node. The timer
+# will try again in five minutes and the page says how old it is.
+SuccessExitStatus=0 1
+TimeoutStartSec=120

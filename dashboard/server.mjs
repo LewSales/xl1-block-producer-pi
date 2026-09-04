@@ -2435,6 +2435,116 @@ const snapshot = () => ({
   trend: { daily: trendDaily(), points: trend.length, retainDays: TREND_RETAIN_DAYS, error: trendError },
 })
 
+
+// -------------------------------------------------------------- public view
+//
+// The subset of this page that is safe to put on the open internet, served at
+// /api/public for a publisher to copy somewhere else. Nothing computes here --
+// it is a projection of numbers the page already holds.
+//
+// An ALLOW-LIST, and deliberately not a deny-list. A field added to the payload
+// next month must be invisible here until somebody chooses to publish it; the
+// opposite default publishes it because nobody remembered to exclude it, and
+// that mistake is only discovered by the person who finds it.
+//
+// The split turns out to be clean, because almost everything interesting on
+// this page is already public: the reward address, the balance, who produced
+// which block and every producer's share are all readable from the explorer by
+// anyone who cares. What must not leave is the machine -- its hostname, its RAM
+// and disk, its container image and uptime, the raw producer log, the health
+// endpoint, the alerter's channels, and the labels and URLs of other nodes.
+// None of that is catastrophic on its own; together it is a fingerprint of a
+// specific computer in a specific house, offered to strangers for nothing.
+//
+// `problems` is withheld for a subtler reason: the status is a word this file
+// controls, but the problem STRINGS are assembled from error messages, and an
+// error message is exactly where a filesystem path or a hostname arrives
+// without anyone deciding it should.
+const PUBLIC_LABEL = envStr('DASH_PUBLIC_LABEL', '')
+
+function publicView(board) {
+  const dv = derived(board)
+  const nw = networkView(board)
+  const b = state.chain?.balances
+  const bw = dv.blocksByWindow ?? {}
+
+  return {
+    // Bumped when the shape changes, so a page built against an older payload
+    // can say "this is newer than I understand" instead of drawing nothing.
+    schema: 1,
+    label: PUBLIC_LABEL || undefined,
+    generatedAt: new Date().toISOString(),
+
+    // A word, never the sentences behind it.
+    status: overall().status,
+    problemCount: overall().problems.length,
+
+    chain: state.chain?.ok ? {
+      network: NETWORK,
+      networkName: state.chain.networkName,
+      chainId: state.chain.chainId,
+      currentBlock: state.chain.currentBlock,
+      finalizedBlock: state.chain.finalizedBlock,
+      finalizationLag: state.chain.finalizationLag,
+      explorerUrl: state.chain.explorerUrl,
+    } : { ok: false },
+
+    // This node, in the terms the chain already describes it.
+    producer: {
+      address: board?.self?.address,
+      url: board?.self?.url,
+      rank: board?.self?.rank,
+      producers: board?.producers,
+      sharePercent: board?.self?.sharePercent,
+      blocks: {
+        total: board?.self?.blocks,
+        today: bw.today,
+        week: bw.week,
+        day24h: bw.day24h,
+        day24hComplete: bw.day24hComplete,
+      },
+      lastBlock: dv.lastBlock,
+      lastBlockUrl: dv.lastBlockUrl,
+      blocksSinceLast: dv.blocksSinceLast,
+      rewardXl1: b?.reward?.xl1,
+      rewardAddressUrl: b?.reward?.url,
+    },
+
+    // The chain-level figures, which are the reason to publish anything at all:
+    // they are about XL1 rather than about this machine, and nobody else is
+    // measuring them.
+    network: {
+      observed: nw?.observed,
+      concentration: nw?.concentration,
+      blockTime: nw?.blockTime,
+      // Addresses and counts only. Operator-chosen labels are included because
+      // they are names for public addresses, but no window internals and no
+      // per-node detail beyond what the explorer already shows.
+      standings: (board?.top ?? []).map((r) => ({
+        address: r.address,
+        label: r.label,
+        blocks: r.blocks,
+        sharePercent: r.sharePercent,
+        rank: r.rank,
+        isSelf: r.isSelf,
+        url: r.url,
+      })),
+      multiSigner: board?.multiSigner,
+    },
+
+    // Which build produced this, so a stale page is identifiable as one.
+    build: {
+      version: BUILD_STAMP.version ?? DASH_VERSION,
+      commit: BUILD_STAMP.commit ?? envStr('DASH_COMMIT', 'unknown'),
+      source: envStr('DASH_SOURCE_URL', '').replace(/\/+$/, '') || undefined,
+      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
+      upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
+    },
+  }
+}
+
 // ---------------------------------------------------------------------- server
 
 const PAGE = await readFile(new URL('./index.html', import.meta.url), 'utf8')
@@ -2455,6 +2565,16 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  // Public-safe projection, for a publisher to copy to a website. Behind the
+  // same token as everything else: this runs on the producer's own machine, and
+  // the publisher can supply a token as easily as a browser can.
+  if (url.pathname === '/api/public') {
+    const board = peerBoard()
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      .end(JSON.stringify(publicView(board), null, 2))
+    return
+  }
+
   if (url.pathname === '/api/status') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       .end(JSON.stringify(snapshot(), null, 2))
@@ -2473,7 +2593,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

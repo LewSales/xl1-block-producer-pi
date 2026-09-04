@@ -1478,3 +1478,71 @@ test('no fleet configured means no card at all', async () => {
   assert.equal(fresh.fleetView(fresh.peerBoard()), undefined,
     'a single-node install must not grow a fleet table of one')
 })
+
+// ------------------------------------------------------------- the public view
+//
+// This is the projection that leaves the house. Every test here is about what
+// must NOT be in it: the payload is going on the open internet, and a mistake
+// is discovered by whoever finds it rather than by us.
+
+test('the public view carries the chain figures worth publishing', () => {
+  const board = m.peerBoard()
+  const pub = m.publicView(board)
+  assert.equal(pub.schema, 1, 'the shape is versioned so a stale page can say so')
+  assert.ok(pub.generatedAt, 'and dated, so a frozen page is visibly frozen')
+  assert.ok('concentration' in pub.network, 'Nakamoto and shares are the point of publishing')
+  assert.ok('blockTime' in pub.network, 'so is the distribution')
+  assert.ok(Array.isArray(pub.network.standings))
+})
+
+test('nothing that identifies the machine survives the projection', () => {
+  // Seed every private field with a value that would be obvious in a diff, then
+  // assert none of them appear anywhere in the serialised output.
+  m.state.system = {
+    ok: true, hostname: 'CANARY-HOSTNAME', cpuCount: 16,
+    memory: { usedPercent: 77 }, disk: { usedPercent: 76, freeBytes: 1 },
+  }
+  m.state.node = {
+    ok: true, cliVersion: '5.3.2',
+    container: { running: true, image: 'CANARY-IMAGE', uptime: 'CANARY-UPTIME' },
+    recentLog: ['CANARY-LOG-LINE /home/someone/secret/path'],
+  }
+  m.state.health = { ok: true, endpoint: 'http://CANARY-HEALTH-ENDPOINT:9099' }
+  m.state.alerts = {
+    ok: true, installed: true, running: true, active: [],
+    armed: { node: 'CANARY-ALERT-NODE', channels: ['ntfy'], deadman: false },
+  }
+
+  const text = JSON.stringify(m.publicView(m.peerBoard()))
+  for (const canary of [
+    'CANARY-HOSTNAME', 'CANARY-IMAGE', 'CANARY-UPTIME', 'CANARY-LOG-LINE',
+    'CANARY-HEALTH-ENDPOINT', 'CANARY-ALERT-NODE', 'secret/path',
+  ]) {
+    assert.equal(text.includes(canary), false, `${canary} reached the public payload`)
+  }
+  // And the shapes that carried them are absent outright, not merely emptied.
+  const pub = m.publicView(m.peerBoard())
+  for (const key of ['system', 'node', 'alerts', 'fleet', 'health', 'history', 'trend', 'problems']) {
+    assert.equal(key in pub, false, `\`${key}\` must not be published`)
+  }
+})
+
+test('the status is a word, never the sentences behind it', () => {
+  // Problem strings are assembled from error messages, and an error message is
+  // exactly where a path or a hostname arrives without anyone deciding it should.
+  m.state.node = { ok: false, error: 'ENOENT /var/lib/xl1/CANARY-PATH' }
+  const pub = m.publicView(m.peerBoard())
+  assert.equal(typeof pub.status, 'string')
+  assert.equal(typeof pub.problemCount, 'number')
+  assert.equal(JSON.stringify(pub).includes('CANARY-PATH'), false,
+    'the count is publishable, the text is not')
+})
+
+test('the published label is chosen, never taken from the hostname', () => {
+  // A default of os.hostname() would publish the machine's name the moment
+  // somebody turned the feature on without reading anything.
+  m.state.system = { ok: true, hostname: 'CANARY-HOSTNAME' }
+  const pub = m.publicView(m.peerBoard())
+  assert.notEqual(pub.label, 'CANARY-HOSTNAME')
+  assert.equal(pub.label, undefined, 'unset means unpublished, not guessed')
+})

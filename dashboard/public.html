@@ -1,0 +1,220 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XL1 Block Producer</title>
+<!--
+  Reads status.json beside it and renders. No build step, no dependencies, no
+  external requests: it is one file that a static host serves and a browser
+  runs, which is the whole reason it can live anywhere.
+
+  Everything it shows comes from /api/public on the node -- an allow-list
+  projection, so this page cannot display something private even by mistake.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#12151a; --muted:#5a6472;
+    --ok:#1a7f47; --warn:#b4690e; --bad:#c0392b; --accent:#2b6f6a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1013; --panel:#171a1f; --line:#262b33; --ink:#e6e9ee; --muted:#9aa4b2;
+            --ok:#4ec97f; --warn:#e0a341; --bad:#ff8a7a; --accent:#5fc9c0; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { padding:18px 20px; border-bottom:1px solid var(--line); background:var(--panel);
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap }
+  h1 { font-size:16px; margin:0; letter-spacing:.2px }
+  .pill { font-size:11px; padding:2px 9px; border-radius:999px; border:1px solid var(--line); color:var(--muted) }
+  .pill.ok { color:var(--ok); border-color:color-mix(in srgb,var(--ok) 40%,transparent) }
+  .pill.warn { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent) }
+  .pill.bad { color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent) }
+  main { padding:16px; columns:330px; column-gap:16px }
+  section { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--accent);
+    border-radius:10px; padding:14px 16px; margin:0 0 16px; break-inside:avoid; display:inline-block; width:100% }
+  section.wide { column-span:all }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px }
+  .big { font-size:30px; font-weight:650; line-height:1.1 }
+  .sub { font-size:12px; color:var(--muted) }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:12px 0 0; font-size:13px }
+  dt { color:var(--muted) } dd { margin:0; text-align:right }
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px }
+  th { text-align:right; font-weight:500; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em }
+  th:first-child,td:first-child { text-align:left }
+  td,th { padding:5px 6px; border-bottom:1px solid var(--line) }
+  tr.self { background:color-mix(in srgb,var(--accent) 12%,transparent); font-weight:650 }
+  .hist { display:flex; align-items:flex-end; gap:2px; height:92px; margin:14px 0 4px }
+  .hist-col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; height:100%; min-width:0 }
+  .hist-bar { background:color-mix(in srgb,var(--accent) 70%,transparent); border-radius:2px 2px 0 0 }
+  .hist-x { font-size:9px; color:var(--muted); text-align:center; padding-top:3px; white-space:nowrap }
+  .bar { display:flex; gap:2px; height:11px; margin-top:10px; border-radius:3px; overflow:hidden; background:var(--line) }
+  .bar > i { display:block; height:100%; background:color-mix(in srgb,var(--accent) 75%,transparent) }
+  .bar > i.self { background:var(--ok) }
+  footer { padding:14px 20px; border-top:1px solid var(--line); color:var(--muted); font-size:12px }
+  a { color:inherit }
+  .stale { background:color-mix(in srgb,var(--warn) 14%,transparent); border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);
+    border-radius:8px; padding:10px 12px; margin:0 16px 16px; font-size:13px }
+</style>
+<header>
+  <h1>⛏️ XL1 Block Producer</h1>
+  <span class="pill" id="label"></span>
+  <span class="pill" id="state">loading…</span>
+  <span class="sub" id="net"></span>
+</header>
+<div id="stale"></div>
+<main id="grid"></main>
+<footer id="foot"></footer>
+<script>
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
+const num = (n) => (n === undefined || n === null || Number.isNaN(n)) ? '—' : Number(n).toLocaleString()
+const dur = (s) => {
+  if (s === undefined || s === null) return '—'
+  if (s < 90) return `${Math.round(s)}s`
+  if (s < 5400) return `${Math.round(s / 60)}m`
+  if (s < 172800) return `${Math.round(s / 3600)}h`
+  return `${Math.round(s / 86400)}d`
+}
+const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
+
+function render(d) {
+  if (d.schema > 1) {
+    $('grid').innerHTML = `<section><h2>Unsupported</h2><div class="sub">This page understands
+      schema 1 and the data is schema ${esc(d.schema)}. It is newer than the page; nothing is drawn
+      rather than drawing it wrong.</div></section>`
+    return
+  }
+  $('label').textContent = d.label || 'producer'
+  const st = d.status === 'ok' ? 'ok' : d.status === 'degraded' ? 'warn' : 'bad'
+  $('state').textContent = d.status ?? 'unknown'
+  $('state').className = `pill ${st}`
+  $('net').textContent = d.chain?.networkName ? `${d.chain.networkName} · chain ${String(d.chain.chainId ?? '').slice(0, 10)}…` : ''
+
+  // A page fed by a file that stopped updating must say so. Without this it
+  // shows yesterday's numbers with total confidence.
+  const age = (Date.now() - new Date(d.generatedAt).getTime()) / 1000
+  $('stale').innerHTML = age > 1800
+    ? `<div class="stale">This page has not been updated in ${dur(age)}. The node stopped publishing —
+       every number below is from ${esc(new Date(d.generatedAt).toLocaleString())} and may no longer be true.</div>`
+    : ''
+
+  const p = d.producer ?? {}, n = d.network ?? {}, c = n.concentration, bt = n.blockTime
+  const cards = []
+
+  cards.push(`<section>
+    <h2>This producer</h2>
+    <div class="big">${num(p.blocks?.total)}</div>
+    <div class="sub">blocks won${p.producers ? ` · #${num(p.rank)} of ${num(p.producers)}` : ''}</div>
+    ${dl([
+      ['Share of observed', p.sharePercent !== undefined ? `${p.sharePercent}%` : '—'],
+      ['Last 24 hours', p.blocks?.day24h !== undefined ? num(p.blocks.day24h) : '—'],
+      ['Today', num(p.blocks?.today)],
+      ['This week', num(p.blocks?.week)],
+      p.lastBlock !== undefined && ['Last block', p.lastBlockUrl
+        ? `<a href="${esc(p.lastBlockUrl)}" target="_blank" rel="noopener">#${num(p.lastBlock)}</a>` : `#${num(p.lastBlock)}`],
+      p.blocksSinceLast !== undefined && ['Since last win', `${num(p.blocksSinceLast)} block(s)`],
+      p.rewardXl1 && ['Rewards', `${esc(p.rewardXl1)} XL1`],
+      p.address && ['Address', p.rewardAddressUrl
+        ? `<a class="mono" href="${esc(p.rewardAddressUrl)}" target="_blank" rel="noopener">${esc(p.address.slice(0,8))}…${esc(p.address.slice(-4))}</a>`
+        : `<span class="mono">${esc(p.address.slice(0,8))}…</span>`],
+    ])}
+  </section>`)
+
+  if (d.chain?.currentBlock !== undefined) {
+    cards.push(`<section>
+      <h2>Chain</h2>
+      <div class="big">${num(d.chain.currentBlock)}</div>
+      <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
+      ${dl([
+        ['Finalization lag', `${num(d.chain.finalizationLag)} block(s)`],
+        bt?.medianSeconds !== undefined && ['Block time', `${bt.medianSeconds}s <span class="sub">median of ${num(bt.samples)}</span>`],
+        d.chain.explorerUrl && ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener">open ↗</a>`],
+      ])}
+    </section>`)
+  }
+
+  if (c) {
+    const skew = c.evenShare > 0 ? (c.leaderShare / c.evenShare).toFixed(1) : null
+    cards.push(`<section>
+      <h2>XL1 Network</h2>
+      <div class="big">${num(c.producers)}</div>
+      <div class="sub">producers seen across ${num(n.observed?.blocks)} observed blocks</div>
+      ${dl([
+        ['Nakamoto coefficient', `<span class="${c.nakamoto <= 2 ? 'bad' : c.nakamoto <= 3 ? 'warn' : 'ok'}">${num(c.nakamoto)}</span>
+          <span class="sub" title="The fewest producers whose combined observed output passes 50%. Higher is more decentralised.">of ${num(c.producers)}</span>`],
+        ['Top producer', `${c.leaderShare}%${skew ? ` <span class="sub">· ${skew}× an even split</span>` : ''}`],
+        ['Top 3 combined', `${c.top3Share}%`],
+        ['Even split would be', `<span class="sub">${c.evenShare}% each</span>`],
+        c.nakamoto67 !== undefined && ['To reach 67%', `${num(c.nakamoto67)} producers`],
+      ])}
+      <div class="bar">${(n.standings ?? []).slice(0, 12).map((r) =>
+        `<i class="${r.isSelf ? 'self' : ''}" style="width:${Math.max(0.5, r.sharePercent ?? 0)}%" title="${esc(r.label ?? r.address.slice(0,8))} — ${r.sharePercent}%"></i>`).join('')}</div>
+      <div class="sub" style="margin-top:4px">each block is one producer's share</div>
+    </section>`)
+  }
+
+  if (bt?.samples > 0) {
+    const max = Math.max(1, ...bt.buckets)
+    let lo = bt.buckets.findIndex((x) => x > 0), hi = bt.buckets.length - 1
+    while (hi > lo && bt.buckets[hi] === 0) hi--
+    const cols = []
+    for (let i = lo; i <= hi; i++) cols.push([bt.edges[i], bt.buckets[i], bt.edges[i + 1]])
+    cards.push(`<section>
+      <h2>Block time</h2>
+      <div class="big">${bt.medianSeconds}s</div>
+      <div class="sub">median over ${num(bt.samples)} observed intervals</div>
+      <div class="hist">${cols.map(([e, cnt, nx]) => `
+        <div class="hist-col" title="${e}–${nx ?? '∞'}s · ${num(cnt)} blocks">
+          <div class="hist-bar" style="height:${cnt === 0 ? 0 : Math.max(2, (cnt / max) * 100)}%"></div>
+          <div class="hist-x">${e}</div>
+        </div>`).join('')}</div>
+      <div class="sub" style="text-align:center">seconds between consecutive blocks</div>
+      ${dl([
+        ['Mean', `${bt.meanSeconds}s`],
+        ['P95', `<span title="95% of intervals were at or below this. A bucket floor, not a decimal.">≥ ${bt.p95Seconds}s</span>`],
+        ['P99', `≥ ${bt.p99Seconds}s`],
+        ['Fastest / slowest', `${bt.minSeconds}s / ${bt.maxSeconds}s`],
+      ])}
+    </section>`)
+  }
+
+  if (n.standings?.length) {
+    cards.push(`<section class="wide">
+      <h2>Producer standings</h2>
+      <table>
+        <thead><tr><th>#</th><th>Producer</th><th>Blocks</th><th>Share</th></tr></thead>
+        <tbody>${n.standings.map((r) => `<tr class="${r.isSelf ? 'self' : ''}">
+          <td>${num(r.rank)}</td>
+          <td>${r.url ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label ?? r.address.slice(0,10) + '…' + r.address.slice(-4))}</a>`
+                      : `<span class="mono">${esc(r.label ?? r.address)}</span>`}${r.isSelf ? ' <span class="sub">this node</span>' : ''}</td>
+          <td>${num(r.blocks)}</td><td>${r.sharePercent}%</td></tr>`).join('')}</tbody>
+      </table>
+      <div class="sub" style="margin-top:8px">Observed by this node over blocks ${num(n.observed?.fromBlock)}–${num(n.observed?.toBlock)},
+        not a protocol-wide census. A producer that never appeared in that window is not counted.${
+        n.multiSigner ? ' Shares can exceed 100% because some blocks carry more than one signer.' : ''}</div>
+    </section>`)
+  }
+
+  $('grid').innerHTML = cards.join('')
+  const b = d.build ?? {}
+  $('foot').innerHTML = `Updated ${esc(new Date(d.generatedAt).toLocaleString())} · build ${esc(b.version ?? '?')} ${esc(b.commit ?? '')}
+    ${b.source ? ` · <a href="${esc(b.source)}" target="_blank" rel="noopener">source ↗</a>` : ''}
+    <br>Independent community project — <strong>not affiliated with, endorsed by, or supported by
+    ${esc(b.upstreamName ?? 'XYO Network')}</strong>.`
+}
+
+fetch('status.json?t=' + Date.now(), { cache: 'no-store' })
+  .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
+  .then(render)
+  .catch((e) => {
+    $('state').textContent = 'no data'
+    $('state').className = 'pill bad'
+    $('grid').innerHTML = `<section><h2>No data</h2><div class="sub">status.json could not be read
+      (${esc(e.message)}). The page is here; the node has not published to it yet.</div></section>`
+  })
+// The node publishes every few minutes; reloading more often than that only
+// re-reads the same file.
+setTimeout(() => location.reload(), 300000)
+</script>

@@ -15,10 +15,18 @@
     color-scheme: light dark;
     --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#12151a; --muted:#5a6472;
     --ok:#1a7f47; --warn:#b4690e; --bad:#c0392b; --accent:#2b6f6a;
+    /* One accent per card, the same family the private dashboard uses, so the
+       two look like the same instrument rather than two products. */
+    --c-producer:#2f7ae5; --c-chain:#7a4ddb; --c-network:#2b6f6a; --c-blocktime:#0d7c8f;
+    --c-worth:#1a7f47; --c-race:#6b4ea8; --c-ops:#a3341f; --c-latency:#7a4ddb;
+    --c-continuity:#1f7a5a; --c-movement:#8a5a2b; --c-trend:#0d7c8f; --c-standings:#8a5a2b;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#0e1013; --panel:#171a1f; --line:#262b33; --ink:#e6e9ee; --muted:#9aa4b2;
-            --ok:#4ec97f; --warn:#e0a341; --bad:#ff8a7a; --accent:#5fc9c0; }
+            --ok:#4ec97f; --warn:#e0a341; --bad:#ff8a7a; --accent:#5fc9c0;
+            --c-producer:#6aa8ff; --c-chain:#a98bff; --c-network:#5fc9c0; --c-blocktime:#48c3d6;
+            --c-worth:#4ec97f; --c-race:#b49bff; --c-ops:#ff9d84; --c-latency:#a98bff;
+            --c-continuity:#5fd6a8; --c-movement:#d7a06a; --c-trend:#48c3d6; --c-standings:#d7a06a; }
   }
   * { box-sizing:border-box }
   body { margin:0; background:var(--bg); color:var(--ink);
@@ -31,10 +39,11 @@
   .pill.warn { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent) }
   .pill.bad { color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent) }
   main { padding:16px; columns:330px; column-gap:16px }
-  section { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--accent);
+  section { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--c, var(--accent));
     border-radius:10px; padding:14px 16px; margin:0 0 16px; break-inside:avoid; display:inline-block; width:100% }
   section.wide { column-span:all }
-  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--c, var(--muted)); margin:0 0 10px;
+       opacity:.95 }
   .big { font-size:30px; font-weight:650; line-height:1.1 }
   .sub { font-size:12px; color:var(--muted) }
   dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:12px 0 0; font-size:13px }
@@ -44,13 +53,13 @@
   th { text-align:right; font-weight:500; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em }
   th:first-child,td:first-child { text-align:left }
   td,th { padding:5px 6px; border-bottom:1px solid var(--line) }
-  tr.self { background:color-mix(in srgb,var(--accent) 12%,transparent); font-weight:650 }
+  tr.self { background:color-mix(in srgb,var(--c, var(--accent)) 14%,transparent); font-weight:650 }
   .hist { display:flex; align-items:flex-end; gap:2px; height:92px; margin:14px 0 4px }
   .hist-col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; height:100%; min-width:0 }
   .hist-bar { background:color-mix(in srgb,var(--accent) 70%,transparent); border-radius:2px 2px 0 0 }
   .hist-x { font-size:9px; color:var(--muted); text-align:center; padding-top:3px; white-space:nowrap }
   .bar { display:flex; gap:2px; height:11px; margin-top:10px; border-radius:3px; overflow:hidden; background:var(--line) }
-  .bar > i { display:block; height:100%; background:color-mix(in srgb,var(--accent) 75%,transparent) }
+  .bar > i { display:block; height:100%; background:color-mix(in srgb,var(--c, var(--accent)) 78%,transparent) }
   .bar > i.self { background:var(--ok) }
   footer { padding:14px 20px; border-top:1px solid var(--line); color:var(--muted); font-size:12px }
   a { color:inherit }
@@ -103,7 +112,7 @@ function render(d) {
   const p = d.producer ?? {}, n = d.network ?? {}, c = n.concentration, bt = n.blockTime
   const cards = []
 
-  cards.push(`<section>
+  cards.push(`<section style="--c: var(--c-producer)">
     <h2>This producer</h2>
     <div class="big">${num(p.blocks?.total)}</div>
     <div class="sub">blocks won${p.producers ? ` · #${num(p.rank)} of ${num(p.producers)}` : ''}</div>
@@ -123,7 +132,7 @@ function render(d) {
   </section>`)
 
   if (d.chain?.currentBlock !== undefined) {
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-chain)">
       <h2>Chain</h2>
       <div class="big">${num(d.chain.currentBlock)}</div>
       <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
@@ -137,7 +146,7 @@ function render(d) {
 
   if (c) {
     const skew = c.evenShare > 0 ? (c.leaderShare / c.evenShare).toFixed(1) : null
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-network)">
       <h2>XL1 Network</h2>
       <div class="big">${num(c.producers)}</div>
       <div class="sub">producers seen across ${num(n.observed?.blocks)} observed blocks</div>
@@ -161,7 +170,7 @@ function render(d) {
     while (hi > lo && bt.buckets[hi] === 0) hi--
     const cols = []
     for (let i = lo; i <= hi; i++) cols.push([bt.edges[i], bt.buckets[i], bt.edges[i + 1]])
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-blocktime)">
       <h2>Block time</h2>
       <div class="big">${bt.medianSeconds}s</div>
       <div class="sub">median over ${num(bt.samples)} observed intervals</div>
@@ -184,7 +193,7 @@ function render(d) {
   const pr = d.price ?? {}
 
   if (pr.marketNote) {
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-worth)">
       <h2>What it is worth</h2>
       <div class="big sub" style="font-size:19px">nothing, yet</div>
       <div class="sub">${esc(pr.marketNote)}</div>
@@ -202,7 +211,7 @@ function render(d) {
     const totalLost = Object.values(lost).reduce((a, b) => a + b, 0)
     const reason = (k, label) => (lost[k] ?? 0) > 0 &&
       [label, `${num(lost[k])} <span class="sub">${totalLost ? Math.round((lost[k] / totalLost) * 100) : 0}% of losses</span>`]
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-race)">
       <h2>Candidate race</h2>
       <div class="big">${num(race.built)}</div>
       <div class="sub">candidates built in the last ${Math.round((race.windowSeconds ?? 3600) / 60)} minutes</div>
@@ -220,7 +229,7 @@ function render(d) {
   }
 
   if (ops?.score !== undefined) {
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-ops)">
       <h2>Operations</h2>
       <div class="big">${num(ops.score)}<span class="sub" style="font-size:16px"> / 100</span></div>
       <div class="sub">mean of the measured components</div>
@@ -231,7 +240,7 @@ function render(d) {
 
   if (lat?.cycleP50Ms !== undefined) {
     const st = lat.stages ?? {}
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-latency)">
       <h2>Latency</h2>
       <div class="big">${num(lat.cycleP50Ms)}<span class="sub" style="font-size:16px"> ms</span></div>
       <div class="sub">typical production cycle · p95 ${num(lat.cycleP95Ms)} ms · ${num(lat.samples)} samples</div>
@@ -248,7 +257,7 @@ function render(d) {
   if (cont?.producingPercent !== undefined) {
     const hrs = cont.hours ?? []
     const max = Math.max(1, ...hrs.map((h) => h.wins ?? 0))
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-continuity)">
       <h2>Continuity</h2>
       <div class="big">${cont.producingPercent}<span class="sub" style="font-size:16px">%</span></div>
       <div class="sub">of the ${num(cont.observedHours)} hours observed had at least one block won</div>
@@ -270,7 +279,7 @@ function render(d) {
   if (mv) {
     const movers = (mv.rows ?? []).filter((r) => r.deltaPercent !== undefined && Math.abs(r.deltaPercent) >= 0.5)
     const nm = (r) => esc(r.label ?? (r.address ?? '').slice(0, 10) + '…')
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-movement)">
       <h2>Producer movement</h2>
       <div class="big">${num(mv.seenThisWeek)}</div>
       <div class="sub">producing in the last 7 days · ${num(mv.seenToday)} today</div>
@@ -293,7 +302,7 @@ function render(d) {
   if (d.trend?.daily?.length) {
     const days = d.trend.daily.slice(-14)
     const maxB = Math.max(1, ...days.map((x) => x.blocks))
-    cards.push(`<section>
+    cards.push(`<section style="--c: var(--c-trend)">
       <h2>Trends</h2>
       <div class="big">${num(days.reduce((a, x) => a + x.blocks, 0))}</div>
       <div class="sub">blocks over ${num(days.length)} day(s)</div>
@@ -307,7 +316,7 @@ function render(d) {
   }
 
   if (n.standings?.length) {
-    cards.push(`<section class="wide">
+    cards.push(`<section style="--c: var(--c-standings)" class="wide">
       <h2>Producer standings</h2>
       <table>
         <thead><tr><th>#</th><th>Producer</th><th>Blocks</th><th>Share</th></tr></thead>

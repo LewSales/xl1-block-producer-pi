@@ -180,6 +180,132 @@ function render(d) {
     </section>`)
   }
 
+  const race = d.race, ops = d.operations, lat = d.latency, cont = d.continuity, mv = d.movement
+  const pr = d.price ?? {}
+
+  if (pr.marketNote) {
+    cards.push(`<section>
+      <h2>What it is worth</h2>
+      <div class="big sub" style="font-size:19px">nothing, yet</div>
+      <div class="sub">${esc(pr.marketNote)}</div>
+      ${pr.notional !== undefined ? dl([
+        ['Tracked price', `${esc((pr.currency ?? '').toUpperCase())} ${pr.value}
+          ${pr.change24h !== undefined ? `<span class="${pr.change24h >= 0 ? 'ok' : 'bad'}">${pr.change24h >= 0 ? '▲' : '▼'} ${Math.abs(pr.change24h)}%</span>` : ''}
+          <span class="sub">${esc(pr.id ?? '')}</span>`],
+        ['If it traded at that', `${esc((pr.currency ?? '').toUpperCase())} ${num(pr.notional)} <span class="sub">a scale, not an amount</span>`],
+      ]) : ''}
+    </section>`)
+  }
+
+  if (race && race.built !== undefined) {
+    const lost = race.lost ?? {}
+    const totalLost = Object.values(lost).reduce((a, b) => a + b, 0)
+    const reason = (k, label) => (lost[k] ?? 0) > 0 &&
+      [label, `${num(lost[k])} <span class="sub">${totalLost ? Math.round((lost[k] / totalLost) * 100) : 0}% of losses</span>`]
+    cards.push(`<section>
+      <h2>Candidate race</h2>
+      <div class="big">${num(race.built)}</div>
+      <div class="sub">candidates built in the last ${Math.round((race.windowSeconds ?? 3600) / 60)} minutes</div>
+      ${dl([
+        ['Rejected locally', num(totalLost)],
+        reason('behindFinalizedHead', 'Head advanced first'),
+        reason('txAlreadyFinalized', 'Tx already finalized'),
+        reason('blockNumberMismatch', 'Block number mismatch'),
+        race.retries ? ['Rebuilt and resubmitted', num(race.retries)] : null,
+      ])}
+      ${lost.behindFinalizedHead > 0 && totalLost > 0
+        ? `<div class="sub" style="margin-top:8px">Losing to "head advanced first" means the candidate was valid and
+           somebody else's landed sooner — being outrun, rather than failing.</div>` : ''}
+    </section>`)
+  }
+
+  if (ops?.score !== undefined) {
+    cards.push(`<section>
+      <h2>Operations</h2>
+      <div class="big">${num(ops.score)}<span class="sub" style="font-size:16px"> / 100</span></div>
+      <div class="sub">mean of the measured components</div>
+      ${dl((ops.components ?? []).map((c) => [c.label, `${num(c.value)} <span class="sub">${esc(c.why ?? '')}</span>`]))}
+      ${ops.bottleneck?.text ? `<div class="sub" style="margin-top:8px">${esc(ops.bottleneck.text)}</div>` : ''}
+    </section>`)
+  }
+
+  if (lat?.cycleP50Ms !== undefined) {
+    const st = lat.stages ?? {}
+    cards.push(`<section>
+      <h2>Latency</h2>
+      <div class="big">${num(lat.cycleP50Ms)}<span class="sub" style="font-size:16px"> ms</span></div>
+      <div class="sub">typical production cycle · p95 ${num(lat.cycleP95Ms)} ms · ${num(lat.samples)} samples</div>
+      ${dl([
+        ['Wire floor', `${num(lat.headFetchMinMs)} ms <span class="sub">the network itself</span>`],
+        ['Head fetch p50 / p95', `${num(lat.headFetchP50Ms)} / ${num(lat.headFetchP95Ms)} ms`],
+        ...Object.entries(st).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, `${num(v)} ms`]),
+      ])}
+      <div class="sub" style="margin-top:8px">The wire floor is what the network costs. Everything above it is
+        local work and remote calls the producer has to make anyway.</div>
+    </section>`)
+  }
+
+  if (cont?.producingPercent !== undefined) {
+    const hrs = cont.hours ?? []
+    const max = Math.max(1, ...hrs.map((h) => h.wins ?? 0))
+    cards.push(`<section>
+      <h2>Continuity</h2>
+      <div class="big">${cont.producingPercent}<span class="sub" style="font-size:16px">%</span></div>
+      <div class="sub">of the ${num(cont.observedHours)} hours observed had at least one block won</div>
+      <div class="hist" style="height:56px">${hrs.slice(-72).map((h) => `
+        <div class="hist-col" title="${esc(new Date(h.t).toLocaleString())} — ${h.observed ? `${h.wins ?? 0} won of ${h.chainBlocks ?? 0}` : 'not observed'}">
+          <div class="hist-bar" style="height:${h.observed ? Math.max(3, ((h.wins ?? 0) / max) * 100) : 0}%;${
+            h.observed ? '' : 'background:var(--line)'}"></div>
+        </div>`).join('')}</div>
+      <div class="sub" style="text-align:center">last 72 hours · a flat grey column is an hour nobody was watching</div>
+      ${dl([
+        ['Hours producing', num(cont.producingHours)],
+        ['Hours with none', `${num(cont.missedHours)} <span class="sub">while the chain moved</span>`],
+        cont.longestMissedHours > 0 && ['Longest gap', `${num(cont.longestMissedHours)} h`],
+        cont.unobservedHours > 0 && ['Not observed', `${num(cont.unobservedHours)} h <span class="sub">dashboard was down</span>`],
+      ])}
+    </section>`)
+  }
+
+  if (mv) {
+    const movers = (mv.rows ?? []).filter((r) => r.deltaPercent !== undefined && Math.abs(r.deltaPercent) >= 0.5)
+    const nm = (r) => esc(r.label ?? (r.address ?? '').slice(0, 10) + '…')
+    cards.push(`<section>
+      <h2>Producer movement</h2>
+      <div class="big">${num(mv.seenThisWeek)}</div>
+      <div class="sub">producing in the last 7 days · ${num(mv.seenToday)} today</div>
+      ${mv.comparable === false
+        ? `<div class="sub" style="margin-top:10px">Share drift needs two full weeks of history before it can
+           compare anything, so it is withheld rather than guessed.</div>`
+        : movers.length
+          ? movers.slice(0, 6).map((r) => `<div class="drift-row">
+              <span class="${r.deltaPercent > 0 ? 'ok' : 'warn'}">${r.deltaPercent > 0 ? '▲' : '▼'} ${Math.abs(r.deltaPercent).toFixed(2)} pts</span>
+              <span>${nm(r)}</span><span class="sub">${r.previousSharePercent ?? '—'}% → ${r.sharePercent ?? '—'}%</span></div>`).join('')
+          : '<div class="sub" style="margin-top:10px">no producer moved more than half a point this week</div>'}
+      ${dl([
+        mv.arrived?.length && ['Newly observed', mv.arrived.map(nm).join(', ')],
+        mv.quiet?.length && ['Gone quiet', `<span class="warn">${mv.quiet.map(nm).join(', ')}</span>
+          <span class="sub">no block in ${num(mv.quietAfterDays)} days</span>`],
+      ])}
+    </section>`)
+  }
+
+  if (d.trend?.daily?.length) {
+    const days = d.trend.daily.slice(-14)
+    const maxB = Math.max(1, ...days.map((x) => x.blocks))
+    cards.push(`<section>
+      <h2>Trends</h2>
+      <div class="big">${num(days.reduce((a, x) => a + x.blocks, 0))}</div>
+      <div class="sub">blocks over ${num(days.length)} day(s)</div>
+      <div class="hist">${days.map((x) => `
+        <div class="hist-col" title="${esc(x.day)} — ${num(x.blocks)} blocks, ${num(Math.round(x.earned))} XL1">
+          <div class="hist-bar" style="height:${x.blocks === 0 ? 0 : Math.max(3, (x.blocks / maxB) * 100)}%"></div>
+          <div class="hist-x">${esc(x.day.slice(5))}</div>
+        </div>`).join('')}</div>
+      <div class="sub" style="text-align:center">blocks won per day · kept ${num(d.trend.retainDays)} days</div>
+    </section>`)
+  }
+
   if (n.standings?.length) {
     cards.push(`<section class="wide">
       <h2>Producer standings</h2>

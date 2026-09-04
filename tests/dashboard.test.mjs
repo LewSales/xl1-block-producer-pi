@@ -1522,8 +1522,19 @@ test('nothing that identifies the machine survives the projection', () => {
   }
   // And the shapes that carried them are absent outright, not merely emptied.
   const pub = m.publicView(m.peerBoard())
-  for (const key of ['system', 'node', 'alerts', 'fleet', 'health', 'history', 'trend', 'problems']) {
+  for (const key of ['system', 'node', 'alerts', 'fleet', 'health', 'history', 'problems']) {
     assert.equal(key in pub, false, `\`${key}\` must not be published`)
+  }
+  // `trend` IS published, but only as daily aggregates. The raw store carries a
+  // sample every five minutes with CPU temperature and memory in it, and none of
+  // that describes the chain.
+  for (const row of pub.trend?.daily ?? []) {
+    assert.deepEqual(Object.keys(row).sort(), ['blocks', 'day', 'earned'],
+      'a trend row must be the day summary, never a raw sample')
+  }
+  for (const forbidden of ['tempC', 'memPct', 'cblocks']) {
+    assert.equal(JSON.stringify(pub.trend ?? {}).includes(forbidden), false,
+      `${forbidden} is a host reading and must not ride along in the trend`)
   }
 })
 
@@ -1597,4 +1608,35 @@ test('a failed price poll keeps the last quote rather than blanking', async () =
   const v = fresh.priceView()
   assert.equal(v.value, 0.02, 'the last good quote survives')
   assert.equal(v.ok, false, 'and is marked as not current')
+})
+
+test('a Windows dashboard without host metrics says nothing rather than the wrong thing', async () => {
+  // The container runs inside a Linux VM whose /proc describes the VM: 7.6 GB
+  // and a container-id hostname, on a 16 GB laptop. Presenting that as the host
+  // is worse than presenting nothing, because every figure looks measured.
+  process.env.DASH_HOST_PLATFORM = 'windows'
+  const fresh = await import(`../dashboard/server.mjs?host=${Date.now()}`)
+  fresh.state.node = { ok: false, error: 'collector not reporting' }
+  await fresh.pollSystem()
+  const s = fresh.state.system
+  assert.equal(s.platform, 'windows', 'the configured platform is known without the collector')
+  assert.equal(s.hostUnavailable, true)
+  assert.ok(s.hostUnavailableReason, 'and it says why')
+  assert.equal(s.hostname, undefined, "the container's hostname must not be shown as the host's")
+  assert.equal(s.memory, undefined, "nor the VM's memory")
+})
+
+test('once the collector reports, the real host figures take over', async () => {
+  process.env.DASH_HOST_PLATFORM = 'windows'
+  const fresh = await import(`../dashboard/server.mjs?host=${Date.now()}b`)
+  fresh.state.node = {
+    ok: true,
+    host: { hostname: 'REAL-PC', platform: 'windows', cpuCount: 16, uptimeSeconds: 100,
+            memory: { totalBytes: 16890322944, availableBytes: 4000000000, usedPercent: 76 } },
+  }
+  await fresh.pollSystem()
+  const s = fresh.state.system
+  assert.equal(s.hostUnavailable, undefined)
+  assert.equal(s.hostname, 'REAL-PC')
+  assert.equal(s.memory.totalBytes, 16890322944)
 })

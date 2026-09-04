@@ -949,6 +949,10 @@ function render(d) {
            <div class="sub">memory in use</div>`
     cards.push(`<section style="--c: var(--c-pi)">
       <h2><span class="ico" aria-hidden="true">${s.platform === 'windows' ? '🖥️' : '🍓'}</span>${s.platform === 'windows' ? 'Host' : 'Raspberry Pi'}</h2>
+      ${s.hostUnavailable ? `<div class="big sub" style="font-size:16px">not reported</div>
+        <div class="sub">${esc(s.hostUnavailableReason ?? 'host metrics unavailable')} — this dashboard runs in a
+        container whose own memory and disk describe the Docker VM, not this machine, so nothing is shown rather
+        than something that would look like a measurement.</div>` : ''}
       ${headline}
       <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)}${hasLoad ? ` · load ${s.loadAverage.join(' ')}` : ''}</div>
       ${hasTemp ? spark(d.history?.tempC) : ''}

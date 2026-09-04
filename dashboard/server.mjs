@@ -100,6 +100,11 @@ const DISK_PATH = envStr('DASH_DISK_PATH', '/var/lib/xl1')
  *  way until the container is recreated. Nothing about the compose file is
  *  wrong; only the container running from it, which is why the remedy is a
  *  recreate and not an edit. */
+// Which machine this dashboard is attached to, as configured rather than as
+// inferred. The container cannot tell by looking: on Windows it runs inside a
+// Linux VM whose /proc describes the VM.
+const HOST_PLATFORM = envStr('DASH_HOST_PLATFORM', 'pi')
+
 const mountRemedy = () => (envStr('DASH_HOST_PLATFORM', 'pi') === 'windows'
   ? 'recreate the container from PowerShell (.\\scripts\\xl1ctl.ps1 restart)'
   : 'xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)')
@@ -1678,6 +1683,106 @@ async function pollAlerts() {
 
 
 
+
+// ------------------------------------------------------------------ continuity
+//
+// Was it actually working? Not "is it healthy now", which every other card
+// answers, but "how much of the last week did this node spend producing" -- the
+// question you ask after a bad night, and the one nothing here could answer.
+//
+// Computed entirely from the trend store already on disk: every five minutes it
+// records the chain height and this node's chain-counted win total, and the
+// difference between two rows an hour apart is how the chain moved and how much
+// of it was ours. No new source, and it works retroactively over whatever
+// history exists rather than starting from zero today.
+//
+// The distinction that makes it honest: an hour with no SAMPLES is an hour the
+// dashboard was not watching, which is not the same as an hour the node did not
+// produce. One is our ignorance and the other is a fault, they look identical
+// in a bare count, and conflating them would turn every restart into an outage.
+const CONTINUITY_HOURS = envNum('DASH_CONTINUITY_HOURS', 168, 24)
+
+function continuity() {
+  if (trend.length < 2) return undefined
+
+  const now = Date.now()
+  const hourMs = 3_600_000
+  const from = now - CONTINUITY_HOURS * hourMs
+
+  // Bucket the samples by the hour they fall in. Only rows carrying both
+  // numbers are useful: cblocks arrived later than the store did, so early
+  // history has heights without wins.
+  const buckets = new Map()
+  for (const r of trend) {
+    if (r.t < from) continue
+    if (!Number.isFinite(r.cblocks) || !Number.isFinite(r.height)) continue
+    const key = Math.floor(r.t / hourMs)
+    const b = buckets.get(key) ?? { key, first: r, last: r, samples: 0 }
+    if (r.t < b.first.t) b.first = r
+    if (r.t > b.last.t) b.last = r
+    b.samples += 1
+    buckets.set(key, b)
+  }
+  if (!buckets.size) return undefined
+
+  const firstKey = Math.min(...buckets.keys())
+  const lastKey = Math.max(...buckets.keys())
+  const hours = []
+  for (let k = firstKey; k <= lastKey; k++) {
+    const b = buckets.get(k)
+    if (!b || b.samples < 2) {
+      // Not observed. Recorded as such rather than as a zero -- an hour we did
+      // not watch is our gap, not the node's.
+      hours.push({ t: k * hourMs, observed: false })
+      continue
+    }
+    const chain = b.last.height - b.first.height
+    const wins = b.last.cblocks - b.first.cblocks
+    hours.push({
+      t: k * hourMs,
+      observed: true,
+      // A negative delta means the underlying counter was rebuilt, which is not
+      // a negative number of blocks. Withheld rather than shown as nonsense.
+      chainBlocks: chain >= 0 ? chain : undefined,
+      wins: wins >= 0 ? wins : undefined,
+      sharePercent: (chain > 0 && wins >= 0) ? Number(((wins / chain) * 100).toFixed(1)) : undefined,
+    })
+  }
+
+  const observed = hours.filter((h) => h.observed && h.wins !== undefined)
+  const producing = observed.filter((h) => h.wins > 0)
+  // An hour where the chain moved and none of it was ours. This is the number
+  // that matters: the chain standing still is not this node failing.
+  const missed = observed.filter((h) => h.wins === 0 && (h.chainBlocks ?? 0) > 0)
+
+  // The longest unbroken run of those, which is what an outage actually looks
+  // like from the outside.
+  let longest = 0, run = 0, longestEndsAt
+  for (const h of hours) {
+    if (h.observed && h.wins === 0 && (h.chainBlocks ?? 0) > 0) {
+      run += 1
+      if (run > longest) { longest = run; longestEndsAt = h.t }
+    } else if (h.observed && h.wins > 0) { run = 0 }
+    // An unobserved hour neither breaks a run nor extends it: we do not know.
+  }
+
+  return {
+    windowHours: CONTINUITY_HOURS,
+    hours,
+    observedHours: observed.length,
+    unobservedHours: hours.filter((h) => !h.observed).length,
+    producingHours: producing.length,
+    missedHours: missed.length,
+    // Of the hours we actually watched, the share in which this node won
+    // something. Deliberately not called uptime: the container can be up for
+    // every one of them and still win nothing.
+    producingPercent: observed.length
+      ? Number(((producing.length / observed.length) * 100).toFixed(1)) : undefined,
+    longestMissedHours: longest,
+    longestMissedEndedAt: longestEndsAt ? new Date(longestEndsAt).toISOString() : undefined,
+  }
+}
+
 // -------------------------------------------------------------- market price
 //
 // What the earnings are worth, and -- more often -- an honest statement that
@@ -2041,6 +2146,28 @@ async function pollSystem() {
     // natively there and supplies the real figures — same division of labour as
     // the throttle reading on the Pi, for the same reason.
     const hostMetrics = state.node?.host
+
+    // Configured platform, which this process knows even when the collector has
+    // told it nothing. Without consulting it, a Windows dashboard that has lost
+    // its snapshot silently presents the container's own /proc as the host --
+    // the Docker VM's 7.6 GB and its container-id hostname, under a Raspberry Pi
+    // heading, on a 16 GB Windows laptop. Every figure looks like a measurement
+    // and every one of them describes the wrong machine.
+    if (HOST_PLATFORM === 'windows' && !hostMetrics) {
+      state.system = {
+        ok: true,
+        platform: 'windows',
+        // Withheld, not guessed. These are the container's numbers and they are
+        // not about the machine anyone is asking about.
+        hostUnavailable: true,
+        hostUnavailableReason: state.node?.ok === false
+          ? 'the collector is not reporting'
+          : 'the collector has not written host metrics yet',
+        polledAt: new Date().toISOString(),
+      }
+      return
+    }
+
     if (hostMetrics?.platform === 'windows') {
       state.system = {
         ...state.system,
@@ -2522,7 +2649,7 @@ const snapshot = () => ({
   // identical answers.
   ...(() => {
     const board = peerBoard()
-    return { derived: derived(board), peers: board, network: networkView(board), fleet: fleetView(board), price: priceView() }
+    return { derived: derived(board), peers: board, network: networkView(board), fleet: fleetView(board), price: priceView(), continuity: continuity() }
   })(),
   // Values only. The browser reads `.v` and has never read `.t`, and at 240
   // points across four series the timestamps were three quarters of the whole
@@ -2630,6 +2757,79 @@ function publicView(board) {
       multiSigner: board?.multiSigner,
     },
 
+    // How the node competes. Counters the producer keeps about its own work --
+    // nothing here describes the machine, only what it did on a public chain,
+    // and "we are being outrun rather than failing" is the single most useful
+    // thing this whole dashboard learned.
+    race: state.node?.race ? {
+      windowSeconds: state.node.race.windowSeconds,
+      built: state.node.race.built,
+      retries: state.node.race.retries,
+      lost: state.node.race.lost,
+    } : undefined,
+
+    // The 0-100 summary and what drives it. Arithmetic over figures already
+    // published above, so it reveals nothing new -- it just saves the reader
+    // doing it.
+    operations: dv.operations ? {
+      score: dv.operations.score,
+      components: dv.operations.components,
+      bottleneck: dv.operations.bottleneck,
+    } : undefined,
+
+    // Timings the producer measured on itself. Included because the interesting
+    // claim on this page -- that the network is not the constraint -- is only
+    // checkable if the numbers behind it are visible.
+    latency: state.node?.latency ? {
+      headFetchMinMs: state.node.latency.headFetchMinMs,
+      headFetchP50Ms: state.node.latency.headFetchP50Ms,
+      headFetchP95Ms: state.node.latency.headFetchP95Ms,
+      cycleP50Ms: state.node.latency.cycleP50Ms,
+      cycleP95Ms: state.node.latency.cycleP95Ms,
+      stages: state.node.latency.stages,
+      samples: state.node.latency.samples,
+    } : undefined,
+
+    // Daily production and earnings, from the chain scan. The same rows the
+    // Trends card draws.
+    trend: { daily: trendDaily(), retainDays: TREND_RETAIN_DAYS },
+
+    // Hour by hour, was it producing. Chain-derived and the honest answer to
+    // "has this thing actually been working".
+    continuity: (() => {
+      const c = continuity()
+      if (!c) return undefined
+      // The per-hour array is the useful part; the rest is summary. Capped so a
+      // long window cannot bloat a file served to strangers.
+      return { ...c, hours: c.hours.slice(-168) }
+    })(),
+
+    // Who is gaining and who has gone quiet, over the same day buckets as the
+    // standings.
+    movement: nw?.drift && nw?.churn ? {
+      comparable: nw.drift.comparable,
+      rows: nw.drift.rows.slice(0, 12),
+      seenToday: nw.churn.seenToday,
+      seenThisWeek: nw.churn.seenThisWeek,
+      arrived: nw.churn.arrived,
+      quiet: nw.churn.quiet,
+      quietAfterDays: nw.churn.quietAfterDays,
+    } : undefined,
+
+    // What it is worth, and the reason that is usually nothing.
+    price: (() => {
+      const pv = priceView()
+      return {
+        marketNote: pv.marketNote,
+        currency: pv.currency,
+        value: pv.value,
+        change24h: pv.change24h,
+        id: pv.id,
+        notional: pv.notional,
+        hypothetical: pv.hypothetical,
+      }
+    })(),
+
     // Which build produced this, so a stale page is identifiable as one.
     build: {
       version: BUILD_STAMP.version ?? DASH_VERSION,
@@ -2691,7 +2891,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

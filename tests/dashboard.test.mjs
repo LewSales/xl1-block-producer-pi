@@ -1359,3 +1359,122 @@ test('an untouched tally carries no caveat at all', () => {
   assert.equal(m.peerBoard().evicted, undefined,
     'the ordinary case must not explain itself')
 })
+
+test('the alerter reports what it is armed with, and the dashboard says so', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'xl1-armed-'))
+  const since = Math.floor(Date.now() / 1000) - 60
+  await writeFile(join(dir, '.alert-state'), `ineligible\t${since}\n`)
+  await writeFile(join(dir, '.alert-status'), JSON.stringify({
+    node: 'pitest', ranAt: new Date().toISOString(),
+    channels: ['ntfy', 'webhook'], deadman: false,
+    cooldownSeconds: 21600, stallBlocks: 90,
+  }))
+  process.env.DASH_ALERT_STATE_FILE = join(dir, '.alert-state')
+  process.env.DASH_ALERT_STATUS_FILE = join(dir, '.alert-status')
+  const fresh = await import(`../dashboard/server.mjs?armed=${Date.now()}`)
+  await fresh.pollAlerts()
+  const a = fresh.state.alerts
+  assert.deepEqual(a.armed.channels, ['ntfy', 'webhook'])
+  assert.equal(a.armed.deadman, false, 'the gap is reported, not glossed over')
+  assert.equal(a.armed.node, 'pitest')
+})
+
+test('no status file costs one row, not the card', async () => {
+  // An alerter older than this feature writes no such file. The conditions it
+  // does report must still reach the page.
+  const dir = await mkdtemp(join(tmpdir(), 'xl1-armed-'))
+  await writeFile(join(dir, '.alert-state'), '')
+  process.env.DASH_ALERT_STATE_FILE = join(dir, '.alert-state')
+  process.env.DASH_ALERT_STATUS_FILE = join(dir, '.alert-status-missing')
+  const fresh = await import(`../dashboard/server.mjs?armed=${Date.now()}b`)
+  await fresh.pollAlerts()
+  assert.equal(fresh.state.alerts.installed, true, 'the alerter is still detected')
+  assert.equal(fresh.state.alerts.armed, undefined, 'only the armed row is absent')
+})
+
+test('a status file that is not our JSON is ignored rather than rendered', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'xl1-armed-'))
+  await writeFile(join(dir, '.alert-state'), '')
+  await writeFile(join(dir, '.alert-status'), 'not json at all')
+  process.env.DASH_ALERT_STATE_FILE = join(dir, '.alert-state')
+  process.env.DASH_ALERT_STATUS_FILE = join(dir, '.alert-status')
+  const fresh = await import(`../dashboard/server.mjs?armed=${Date.now()}c`)
+  await fresh.pollAlerts()
+  assert.equal(fresh.state.alerts.ok, true, 'a corrupt advisory file is not a fault')
+  assert.equal(fresh.state.alerts.armed, undefined)
+})
+
+// ------------------------------------------------------------------ the fleet
+//
+// A peer is another dashboard, not the chain, so none of this adds a gateway
+// call. What it must never do is present a fleet more healthy than it is.
+
+test('a peer summary keeps only the fields the card draws', () => {
+  const summary = m.fleetSummary({
+    status: 'degraded',
+    problems: ['a', 'b', 'c', 'd', 'e', 'f'],
+    build: { version: '2.2.3', commit: 'abc' },
+    chain: { currentBlock: 100 },
+    derived: { blocksByWindow: { day24h: 12 } },
+    peers: { self: { blocks: 500, sharePercent: 9.5, rank: 4, address: 'aa' }, producers: 8, scannedBlocks: 1000 },
+    alerts: { installed: true, running: true, active: [{ key: 'x' }] },
+    node: { runSeconds: 900, cliVersion: '5.3.2' },
+    // Thirty kilobytes this node has no use for. It must not survive.
+    history: { height: new Array(240).fill({ t: 1, v: 2 }) },
+  })
+  assert.equal(summary.blocksTotal, 500)
+  assert.equal(summary.alertsFiring, 1)
+  assert.equal(summary.problems.length, 4, 'problems are capped, not copied wholesale')
+  assert.equal(summary.history, undefined, 'a peer cannot push its history into this payload')
+})
+
+test('an unrecognised status from a peer is not taken at face value', () => {
+  assert.equal(m.fleetSummary({ status: 'excellent' }).status, 'unknown')
+  assert.equal(m.fleetSummary({}).status, 'unknown')
+})
+
+test('combined share is withheld unless the nodes scanned the same blocks', async () => {
+  process.env.DASH_FLEET = 'a=http://127.0.0.1:9/api/status'
+  const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}`)
+  fresh.fleet.set('a', { label: 'a', ok: true, blocksTotal: 100, sharePercent: 5, scannedBlocks: 2000 })
+  // This node scanned a different window, so the two shares describe different
+  // denominators and adding them would be arithmetic on unlike things.
+  fresh.production.scanned = 1000
+  // SELF, so peerBoard() actually finds this node in its own tally -- any other
+  // address leaves board.self undefined and the row contributes nothing.
+  fresh.peers.set(SELF, 50)
+  const view = fresh.fleetView(fresh.peerBoard())
+  assert.equal(view.combinedSharePercent, undefined, 'unlike windows do not add')
+  assert.equal(view.combinedBlocks, 150, 'but the block counts still total')
+  assert.equal(view.combinedFrom, 2, 'and say how many nodes they came from')
+})
+
+test('an unreachable peer is a row, not an omission', async () => {
+  process.env.DASH_FLEET = 'gone=http://127.0.0.1:9/api/status'
+  const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}b`)
+  await fresh.pollFleet()
+  const view = fresh.fleetView(fresh.peerBoard())
+  const peer = view.nodes.find((n) => n.label === 'gone')
+  assert.ok(peer, 'a node that is switched off must still appear')
+  assert.equal(peer.ok, false)
+  assert.ok(peer.error, 'and say why')
+  assert.equal(view.reachable, 1, 'only this node answered')
+  assert.equal(view.total, 2)
+})
+
+test('malformed fleet entries are reported rather than dropped', async () => {
+  process.env.DASH_FLEET = 'noequals,bad=notaurl,ok=http://127.0.0.1:9'
+  const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}c`)
+  assert.equal(fresh.FLEET.peers.length, 1)
+  assert.equal(fresh.FLEET.rejected.length, 2,
+    'a node missing from the card looks identical to one switched off')
+  // A bare host is accepted; the API path is added rather than demanded.
+  assert.match(fresh.FLEET.peers[0].url, /\/api\/status$/)
+})
+
+test('no fleet configured means no card at all', async () => {
+  process.env.DASH_FLEET = ''
+  const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}d`)
+  assert.equal(fresh.fleetView(fresh.peerBoard()), undefined,
+    'a single-node install must not grow a fleet table of one')
+})

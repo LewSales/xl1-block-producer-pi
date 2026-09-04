@@ -1567,6 +1567,11 @@ async function missingStatusReason(file = STATUS_FILE) {
 // mount their state directory at /var/lib/xl1 -- so this needs no per-repo
 // configuration despite the two schedulers being nothing alike.
 const ALERT_STATE_FILE = envStr('DASH_ALERT_STATE_FILE', '/var/lib/xl1/.alert-state')
+// What the alerter is armed with, written beside the state file on every run.
+// Channel NAMES only -- never a URL, topic or password: this lives in the
+// directory the dashboard mounts, and the dashboard has no business holding a
+// credential it does not need in order to say "ntfy is configured".
+const ALERT_STATUS_FILE = envStr('DASH_ALERT_STATUS_FILE', '/var/lib/xl1/.alert-status')
 
 // The alerter writes keys, not sentences, because the sentence it delivered is
 // already in the notification. These are for the panel only; an unknown key
@@ -1632,9 +1637,25 @@ async function pollAlerts() {
     }
     active.sort((a, b) => b.ageSeconds - a.ageSeconds)
 
+    // Written by the same run that wrote the state file, so a failure to read
+    // it costs one row rather than the card. An older alerter writes no such
+    // file at all, which is why every field below is optional.
+    let armed
+    try {
+      const doc = JSON.parse(await readFile(ALERT_STATUS_FILE, 'utf8'))
+      armed = {
+        node: typeof doc.node === 'string' ? doc.node : undefined,
+        channels: Array.isArray(doc.channels) ? doc.channels.filter((c) => typeof c === 'string') : [],
+        deadman: Boolean(doc.deadman),
+        cooldownSeconds: Number(doc.cooldownSeconds) || undefined,
+        stallBlocks: Number.isFinite(Number(doc.stallBlocks)) ? Number(doc.stallBlocks) : undefined,
+      }
+    } catch { armed = undefined }
+
     state.alerts = {
       ok: true,
       installed: true,
+      armed,
       // A file nobody has touched in ten minutes is a stopped timer. Said
       // plainly, because "no alerts firing" and "nothing is watching" look
       // identical on a panel and mean opposite things.
@@ -1652,6 +1673,182 @@ async function pollAlerts() {
     state.alerts = error.code === 'ENOENT'
       ? { ok: true, installed: false, file: ALERT_STATE_FILE }
       : { ok: false, installed: true, file: ALERT_STATE_FILE, error: error.message?.slice(0, 160) }
+  }
+}
+
+
+// -------------------------------------------------------------- fleet source
+//
+// One page for every node you run, instead of one page each.
+//
+// Nothing here talks to XL1. A peer is another instance of this dashboard, and
+// what is fetched is the summary it has already computed for its own page --
+// so adding a second node to the fleet costs one HTTP request every thirty
+// seconds to a machine you own, and not one additional call to the gateway
+// every producer on the chain is competing for.
+//
+// Deliberately read-only and one-way. Peers do not know they are in a fleet,
+// there is no registration and no push: a node that is switched off simply
+// stops answering, which is the state the card is there to show.
+//
+//   DASH_FLEET=pi=http://xl1pi:8088,laptop=http://192.168.1.20:8088
+//
+// A peer behind a token takes it in the URL, the same way a browser would:
+//   DASH_FLEET=pi=http://xl1pi:8088?token=abc
+const FLEET_POLL_MS = envNum('DASH_FLEET_POLL_MS', 30_000, 5_000)
+const FLEET_TIMEOUT_MS = envNum('DASH_FLEET_TIMEOUT_MS', 6_000, 1_000)
+// A fleet is a handful of machines somebody owns. The cap is here so a
+// mis-pasted variable cannot turn one poll into a hundred outbound requests.
+const FLEET_MAX = envNum('DASH_FLEET_MAX', 12, 1)
+
+/** `label=url` pairs. Malformed entries are reported rather than dropped: a
+ *  node silently missing from a fleet card looks exactly like a node that is
+ *  switched off, and only one of those is worth getting out of bed for. */
+const FLEET = (() => {
+  const raw = envStr('DASH_FLEET', '')
+  const peers = []
+  const rejected = []
+  if (!raw) return { peers, rejected }
+
+  for (const item of raw.split(',').map((x) => x.trim()).filter(Boolean)) {
+    const eq = item.indexOf('=')
+    if (eq < 1) { rejected.push(`${item} — expected label=url`); continue }
+    const label = item.slice(0, eq).trim()
+    const url = item.slice(eq + 1).trim()
+    if (!label) { rejected.push(`${item} — no label`); continue }
+    let parsed
+    try { parsed = new URL(url) } catch { rejected.push(`${item} — "${url}" is not a URL`); continue }
+    if (!/^https?:$/.test(parsed.protocol)) { rejected.push(`${item} — ${parsed.protocol} is not http`); continue }
+    if (peers.length >= FLEET_MAX) { rejected.push(`${item} — over the ${FLEET_MAX} peer limit`); continue }
+    // Accept either the page or the API; ask for the API either way.
+    if (!parsed.pathname.endsWith('/api/status')) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, '')}/api/status`
+    }
+    peers.push({ label, url: parsed.toString() })
+  }
+  return { peers, rejected }
+})()
+
+/** Last answer from each peer, keyed by label. Bounded by FLEET_MAX, and each
+ *  entry is the handful of fields the card draws -- never the peer's whole
+ *  document, which is 30KB of history and standings this node has no use for. */
+const fleet = new Map()
+
+/** Everything the card needs out of a peer's status document, and nothing else.
+ *  Written as an explicit projection so a peer running a newer or older build
+ *  cannot push unexpected shape into this node's payload. */
+function fleetSummary(doc) {
+  const d = doc?.derived ?? {}
+  const p = doc?.peers ?? {}
+  return {
+    status: ['ok', 'degraded', 'down'].includes(doc?.status) ? doc.status : 'unknown',
+    problems: Array.isArray(doc?.problems) ? doc.problems.slice(0, 4) : [],
+    version: doc?.build?.version,
+    commit: doc?.build?.commit,
+    chainBlock: doc?.chain?.currentBlock,
+    // Blocks won, on the two windows worth comparing between machines.
+    blocks24h: d.blocksByWindow?.day24h,
+    blocksTotal: p.self?.blocks,
+    sharePercent: p.self?.sharePercent,
+    rank: p.self?.rank,
+    producers: p.producers,
+    scannedBlocks: p.scannedBlocks,
+    address: p.self?.address,
+    // A fleet card that showed everything green while one node was paging
+    // somebody would be worse than no fleet card.
+    alertsFiring: Array.isArray(doc?.alerts?.active) ? doc.alerts.active.length : undefined,
+    alerterRunning: doc?.alerts?.installed ? Boolean(doc.alerts.running) : undefined,
+    uptimeSeconds: doc?.node?.runSeconds,
+    cliVersion: doc?.node?.cliVersion,
+  }
+}
+
+async function pollFleet() {
+  if (!FLEET.peers.length) return
+  await Promise.all(FLEET.peers.map(async ({ label, url }) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FLEET_TIMEOUT_MS)
+    const started = Date.now()
+    try {
+      const res = await fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const doc = await res.json()
+      fleet.set(label, {
+        label,
+        ok: true,
+        ...fleetSummary(doc),
+        latencyMs: Date.now() - started,
+        polledAt: new Date().toISOString(),
+      })
+    } catch (error) {
+      // A peer that is down is the thing this card exists to show, so it is a
+      // row rather than an omission -- and the last good reading is kept beside
+      // the error, because "unreachable, was at 11% an hour ago" says more than
+      // "unreachable".
+      const previous = fleet.get(label)
+      fleet.set(label, {
+        ...(previous ?? {}),
+        label,
+        ok: false,
+        error: error.name === 'AbortError' ? 'timeout' : error.message?.slice(0, 120),
+        lastSeenAt: previous?.ok ? previous.polledAt : previous?.lastSeenAt,
+        polledAt: new Date().toISOString(),
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }))
+}
+
+/** This node in the same shape as its peers, so the card draws one table and
+ *  not two. Built from the snapshot's own inputs rather than by fetching
+ *  ourselves, which would be a request to answer a question we already know. */
+function fleetView(board) {
+  if (!FLEET.peers.length && !FLEET.rejected.length) return undefined
+
+  const self = {
+    label: envStr('DASH_FLEET_SELF', os.hostname()),
+    ok: true,
+    isSelf: true,
+    status: overall().status,
+    version: BUILD_STAMP.version ?? DASH_VERSION,
+    chainBlock: state.chain?.currentBlock,
+    blocksTotal: board?.self?.blocks,
+    sharePercent: board?.self?.sharePercent,
+    rank: board?.self?.rank,
+    producers: board?.producers,
+    scannedBlocks: board?.scannedBlocks,
+    address: board?.self?.address,
+    alertsFiring: state.alerts?.active?.length,
+    alerterRunning: state.alerts?.installed ? Boolean(state.alerts.running) : undefined,
+    cliVersion: state.node?.cliVersion,
+  }
+
+  const nodes = [self, ...FLEET.peers.map(({ label }) => fleet.get(label) ?? { label, ok: false, error: 'not polled yet' })]
+
+  // Combined production, over the nodes that could actually be read. Stated
+  // with a count of how many contributed, because a total that silently drops
+  // an unreachable machine reads as that machine having produced nothing.
+  const counted = nodes.filter((n) => Number.isFinite(n.blocksTotal))
+  const combinedBlocks = counted.reduce((a, n) => a + n.blocksTotal, 0)
+
+  return {
+    nodes,
+    reachable: nodes.filter((n) => n.ok).length,
+    total: nodes.length,
+    combinedBlocks: counted.length ? combinedBlocks : undefined,
+    combinedFrom: counted.length,
+    // Shares are only additive when every node read the same blocks. They do
+    // not here -- each scans its own window -- so the combined share is offered
+    // only when the windows match, and withheld rather than approximated.
+    combinedSharePercent: (() => {
+      const scans = new Set(counted.map((n) => n.scannedBlocks))
+      if (counted.length < 2 || scans.size !== 1) return undefined
+      const shares = counted.reduce((a, n) => a + (n.sharePercent ?? 0), 0)
+      return Number(shares.toFixed(2))
+    })(),
+    rejected: FLEET.rejected,
+    pollSeconds: Math.round(FLEET_POLL_MS / 1000),
   }
 }
 
@@ -2227,7 +2424,7 @@ const snapshot = () => ({
   // identical answers.
   ...(() => {
     const board = peerBoard()
-    return { derived: derived(board), peers: board, network: networkView(board) }
+    return { derived: derived(board), peers: board, network: networkView(board), fleet: fleetView(board) }
   })(),
   // Values only. The browser reads `.v` and has never read `.t`, and at 240
   // points across four series the timestamps were three quarters of the whole
@@ -2276,7 +2473,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX }
+export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -2298,7 +2495,7 @@ if (isMain) {
   // from a fresh window instead would re-count every block in the overlap.
   await loadPeers()
   if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
-  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts()])
+  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
 
   // Each poller catches internally, but a rejection escaping one of them would
@@ -2312,9 +2509,12 @@ if (isMain) {
   setInterval(guard(persistPeers, 'persistPeers'), 60_000).unref()
   setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')(); guard(pollAlerts, 'pollAlerts')() }, LOCAL_POLL_MS).unref()
   setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
+  if (FLEET.peers.length) setInterval(guard(pollFleet, 'pollFleet'), FLEET_POLL_MS).unref()
 
   server.listen(PORT, BIND, () => {
-    console.log(`xl1-dashboard listening on http://${BIND}:${PORT} (network=${NETWORK}${TOKEN ? ', token required' : ''})`)
+    const fleetNote = FLEET.peers.length ? `, fleet of ${FLEET.peers.length + 1}` : ''
+    console.log(`xl1-dashboard listening on http://${BIND}:${PORT} (network=${NETWORK}${TOKEN ? ', token required' : ''}${fleetNote})`)
+    for (const r of FLEET.rejected) console.warn(`xl1-dashboard: fleet entry ignored — ${r}`)
   })
 
   for (const sig of ['SIGTERM', 'SIGINT']) {

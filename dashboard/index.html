@@ -200,13 +200,13 @@
   :root {
     --c-producer: #2f7ae5; --c-chain: #7a4ddb; --c-rewards: #1a7f47;
     --c-software: #b4690e; --c-trend: #0d7c8f; --c-pi: #c0392b; --c-log: #5b6472;
-    --c-peers: #8a5a2b; --c-alert: #a3341f; --c-network: #2b6f6a;
+    --c-peers: #8a5a2b; --c-alert: #a3341f; --c-network: #2b6f6a --c-fleet: #4a5a8f;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --c-producer: #6aa8ff; --c-chain: #a98bff; --c-rewards: #4ec97f;
       --c-software: #e0a341; --c-trend: #48c3d6; --c-pi: #ff8a7a; --c-log: #9aa4b2;
-      --c-peers: #d7a06a; --c-alert: #ff9d84; --c-network: #5fc9c0;
+      --c-peers: #d7a06a; --c-alert: #ff9d84; --c-network: #5fc9c0 --c-fleet: #93a7e6;
     }
   }
   section { position: relative; overflow: hidden; }
@@ -602,9 +602,27 @@ function render(d) {
           ? '<span class="ok">running</span>'
           : `<span class="bad">silent for ${dur(al.lastRunAgeSeconds ?? 0)}</span>`],
         al.installed && !firing.length && al.running && ['Conditions', '<span class="ok">none firing</span>'],
+        // Configured and firing are different questions, and on a machine with
+        // every channel left blank only one of them has an answer -- an alerter
+        // with nowhere to send writes an empty state file on every run and is
+        // indistinguishable from a quiet, healthy node.
+        al.armed && ['Channels', al.armed.channels?.length
+          ? `<span class="ok">${al.armed.channels.map(esc).join(', ')}</span>`
+          : '<span class="bad">none \u2014 nothing is delivered anywhere</span>'],
+        // Its own row, and warned about rather than merely reported. Every other
+        // channel can only report problems this machine is awake to observe;
+        // this is the one that covers it ceasing to exist, where the signal is
+        // the absence of a signal.
+        al.armed && ['Dead-man switch', al.armed.deadman
+          ? '<span class="ok">armed</span>'
+          : '<span class="warn">not configured</span>'],
         al.malformed > 0 && ['Unreadable lines', `<span class="warn">${num(al.malformed)}</span>`],
         al.error && ['Error', `<span class="bad">${esc(al.error)}</span>`],
       ])}
+      ${al.armed && !al.armed.deadman ? `<div class="banner">Nothing here can tell you this machine has stopped existing.
+        A power cut, a dead disk, a host that never came back from a reboot \u2014 each sends exactly what a healthy node sends.
+        Point <span class="mono">XL1_ALERT_DEADMAN_URL</span> at a healthchecks.io or Uptime Kuma push monitor and the
+        absence of a ping becomes the alarm.</div>` : ''}
       ${!al.installed ? `<div class="banner">The dashboard only reads what the alerter writes; it never sends anything itself.
         Set a channel in <span class="mono">alert.env</span> and the alerter will start writing here.</div>` : ''}
     </section>`)
@@ -727,6 +745,47 @@ function render(d) {
         ])}
         ${ch?.quiet?.length ? `<div class="sub" style="margin-top:8px">"Quiet" means not observed in ${num(ch.quietAfterDays)} days —
           this dashboard sees one window of one chain, which is enough to say when a producer was last seen and not enough to say it has stopped.</div>` : ''}
+      </section>`)
+    }
+  }
+
+  // Fleet — every node you run, on one page. Absent entirely unless configured.
+  {
+    const fl = d.fleet
+    if (fl) {
+      const dot = (n) => !n.ok ? 'bad'
+        : n.status === 'down' ? 'bad' : n.status === 'degraded' ? 'warn' : 'ok'
+      const row = (n) => `<tr${n.isSelf ? ' class="self"' : ''}>
+        <td><span class="alert-dot ${dot(n)}">\u25cf</span> ${esc(n.label)}${n.isSelf ? ' <span class="sub">this node</span>' : ''}</td>
+        <td>${n.ok
+          ? `<span class="${n.status === 'ok' ? 'ok' : n.status === 'down' ? 'bad' : 'warn'}">${esc(n.status)}</span>`
+          : `<span class="bad">unreachable</span>`}</td>
+        <td>${n.blocksTotal !== undefined ? num(n.blocksTotal) : '—'}</td>
+        <td>${n.sharePercent !== undefined ? n.sharePercent + '%' : '—'}</td>
+        <td>${n.rank !== undefined ? '#' + num(n.rank) + (n.producers ? ' of ' + num(n.producers) : '') : '—'}</td>
+        <td>${n.alertsFiring
+          ? `<span class="warn">${num(n.alertsFiring)}</span>`
+          : n.alerterRunning === false ? '<span class="bad">alerter down</span>'
+          : n.alerterRunning === undefined ? '<span class="sub">—</span>' : '<span class="ok">clear</span>'}</td>
+        <td class="sub">${n.ok
+          ? esc(n.version ?? '—')
+          : esc((n.error ?? 'no answer') + (n.lastSeenAt ? ' · last seen ' + new Date(n.lastSeenAt).toLocaleTimeString() : ''))}</td>
+      </tr>`
+      cards.push(`<section class="wide" style="--c: var(--c-fleet)">
+        <h2><span class="ico" aria-hidden="true">\ud83d\udef0\ufe0f</span>Fleet</h2>
+        <div class="big ${fl.reachable === fl.total ? 'ok' : 'warn'}">${num(fl.reachable)}<span class="sub" style="font-size:16px"> of ${num(fl.total)}</span></div>
+        <div class="sub">nodes answering${fl.combinedBlocks !== undefined
+          ? ` · ${num(fl.combinedBlocks)} block(s) between ${num(fl.combinedFrom)} of them` : ''}</div>
+        <table class="board">
+          <thead><tr><th>Node</th><th>State</th><th>Blocks</th><th>Share</th><th>Rank</th><th>Alerts</th><th>Build</th></tr></thead>
+          <tbody>${fl.nodes.map(row).join('')}</tbody>
+        </table>
+        ${fl.combinedSharePercent !== undefined
+          ? `<div class="sub">combined share of the chain: ${fl.combinedSharePercent}%</div>`
+          : `<div class="sub">No combined share: each node scans its own window, and shares only add up when
+              they cover the same blocks. The block counts above are each node's own tally.</div>`}
+        ${fl.rejected?.length ? `<div class="sub warn">ignored: ${fl.rejected.map(esc).join('; ')}</div>` : ''}
+        <div class="sub">peers polled every ${num(fl.pollSeconds)}s · each is another dashboard, never the chain</div>
       </section>`)
     }
   }
@@ -1201,6 +1260,7 @@ function render(d) {
     'Latency',
     'Rewards',
     'Alerts',
+    'Fleet',
     'XL1 Network',
     'Block time',
     'Raspberry Pi',
@@ -1242,6 +1302,9 @@ function render(d) {
     'XL1 Network': 9.5,
     'Block time': 9.6,
     'Producer movement': 9.7,
+    // Full width, with the other wide cards. Above standings because it is the
+    // question standings answers for one node, asked about all of them.
+    Fleet: 9.8,
     'Software & host': 9,
     'Producer standings': 10,
     'Producer log': 11,

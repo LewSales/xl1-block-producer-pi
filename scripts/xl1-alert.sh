@@ -292,3 +292,35 @@ fi
 # Atomically: a SIGKILL partway through this write leaves a truncated state
 # file, after which every condition looks new and re-fires at full priority.
 printf '%s' "${NEW_STATE}" > "${STATE}.tmp" && mv "${STATE}.tmp" "${STATE}"
+
+# --------------------------------------------------------------- what is armed
+#
+# Which channels are configured, so the dashboard can say so. The state file
+# next to this one says what is FIRING, and that is a different question from
+# whether anything is listening -- an alerter with every channel blank writes an
+# empty state file on every run and looks exactly like a quiet, healthy node.
+#
+# Names only. No URL, no topic, no password: this file sits in the state
+# directory the dashboard mounts, and the dashboard has no business holding a
+# credential it does not need.
+CHANNELS=""
+[[ -n "${NTFY_TOPIC}" ]] && CHANNELS="${CHANNELS}\"ntfy\","
+[[ -n "${WEBHOOK}" ]] && CHANNELS="${CHANNELS}\"webhook\","
+[[ -n "${EMAIL}" ]] && CHANNELS="${CHANNELS}\"email\","
+CHANNELS="${CHANNELS%,}"
+
+# The dead-man switch is reported on its own, because it is the only check here
+# that keeps working when nothing else can -- and an operator who has set up
+# three channels and skipped this one has covered every failure except the
+# total ones.
+DEADMAN_SET=false
+[[ -n "${DEADMAN_URL}" ]] && DEADMAN_SET=true
+
+STATUS_FILE="$(dirname "${STATE}")/.alert-status"
+# Advisory only, and never fatal: a dashboard that cannot read this shows one
+# row less, but an alerter that died writing its own telemetry would be a
+# monitoring tool defeated by itself.
+printf '{"node":"%s","ranAt":"%s","channels":[%s],"deadman":%s,"cooldownSeconds":%s,"stallBlocks":%s,"launchGraceSeconds":%s}' \
+  "${NODE_NAME}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CHANNELS}" "${DEADMAN_SET}" \
+  "${COOLDOWN}" "${STALL_BLOCKS}" "${LAUNCH_GRACE}" \
+  > "${STATUS_FILE}.tmp" 2>/dev/null && mv "${STATUS_FILE}.tmp" "${STATUS_FILE}" 2>/dev/null || true

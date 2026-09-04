@@ -60,8 +60,19 @@ REMOTE_SUM="$(ssh -o ConnectTimeout=10 "${HOST}" "cat ${DEST}/server.mjs ${DEST}
 ok "files match on the far side (${LOCAL_SUM:0:12})"
 
 # Restart-always brings it back on the same image with the new files. No sudo:
-# xl1pi is in the docker group.
-ssh -o ConnectTimeout=10 "${HOST}" 'docker rm -f xl1-dashboard >/dev/null 2>&1 || true'
+# xl1pi is in the docker group, and `stop` needs no more privilege than `rm -f`.
+#
+# stop, not rm -f. server.mjs handles SIGTERM by flushing the standings before it
+# exits -- the cursor, the day buckets and the block-time histogram are one
+# atomic write every five minutes, and the flush exists so a deploy does not
+# discard the minutes since the last one. rm -f is SIGKILL: it skipped the
+# handler entirely, so every deploy rolled the tally back to the last write and
+# made the scan re-read those blocks. Nothing was counted twice and nothing was
+# lost -- the cursor rolled back with the counts -- but it threw away work on
+# the one occasion the author had specifically written code to preserve it.
+#
+# -t 20 against the flush plus a 3s exit timer, with room for a Pi under load.
+ssh -o ConnectTimeout=10 "${HOST}" 'docker stop -t 20 xl1-dashboard >/dev/null 2>&1 || docker rm -f xl1-dashboard >/dev/null 2>&1 || true'
 for _ in $(seq 1 30); do
   sleep 2
   STATUS="$(ssh -o ConnectTimeout=10 "${HOST}" 'docker ps --filter name=xl1-dashboard --format "{{.Status}}"' 2>/dev/null || true)"

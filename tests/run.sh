@@ -98,6 +98,9 @@ if bash "${HERE}/collect.test.sh"; then ok "collector tests passed"; else bad "c
 step "Alerter behaviour"
 if bash "${HERE}/alert.test.sh"; then ok "alerter tests passed"; else bad "alerter tests failed"; fi
 
+step "Panel parsing"
+if bash "${HERE}/screen.test.sh"; then ok "screen tests passed"; else bad "screen tests failed"; fi
+
 printf '\n'
 if (( FAILED )); then
   printf '%s✗ %d check(s) failed%s\n\n' "${RED}" "${FAILED}" "${RESET}"

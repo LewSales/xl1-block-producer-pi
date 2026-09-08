@@ -42,6 +42,24 @@ const m = await import('../dashboard/server.mjs')
 
 // ---------------------------------------------------------------- pure logic
 
+test('the stale-scan escalation accepts either collector\u2019s field name', () => {
+  // The Pi's collector emits aptAgeHours; the Windows one emits updatesAgeHours.
+  // Reading only the first meant Windows could never trip the check, which is
+  // how a stale zero stays invisible -- exactly the failure the check exists for.
+  const stale = { updates: 0, securityUpdates: 0, rebootRequired: false }
+  const problemsFor = (os) => {
+    const out = []
+    const scanAge = os.updatesAgeHours ?? os.aptAgeHours
+    if (scanAge > 168) out.push('stale')
+    return out
+  }
+  assert.deepEqual(problemsFor({ ...stale, aptAgeHours: 210 }), ['stale'], 'pi field')
+  assert.deepEqual(problemsFor({ ...stale, updatesAgeHours: 210 }), ['stale'], 'windows field')
+  assert.deepEqual(problemsFor({ ...stale, updatesAgeHours: 2 }), [], 'fresh scan is not a problem')
+  // A host reporting no age at all must not be treated as fresh by accident.
+  assert.deepEqual(problemsFor({ ...stale }), [], 'absent age escalates nothing, and shows as unknown')
+})
+
 test('nextReleaseDelay retries a failure sooner than it rechecks a success', () => {
   // The registry check runs seconds after start. On a machine that just booted
   // that is usually before DNS is up, and on the success cadence alone that one
@@ -218,7 +236,9 @@ test('a blocked producer surfaces every real fault', async () => {
   assert.match(joined, /5\.2\.2 behind published 5\.3\.0/)
   assert.match(joined, /security update/i)
   assert.match(joined, /reboot required/i)
-  assert.match(joined, /apt lists .* stale/i)
+  // Wording is platform-neutral now: the same escalation fires for a Pi reading
+  // stale apt lists and a Windows box reading a stale update scan.
+  assert.match(joined, /update scan .* stale/i)
 })
 
 test('perHour uses elapsed time, not sample count', () => {

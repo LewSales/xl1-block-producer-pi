@@ -860,7 +860,9 @@ function render(d) {
 
     // apt answers against its last refresh, so the count is only as good as the
     // lists. Show the age beside it rather than letting a stale zero pass as news.
-    const aptAge = osi?.aptAgeHours
+    // The Pi reports aptAgeHours, Windows reports updatesAgeHours; both mean the
+    // age of the scan the count came from.
+    const aptAge = osi?.updatesAgeHours ?? osi?.aptAgeHours
     const ageCell = aptAge === undefined ? '<span class="sub">unknown</span>'
       : aptAge > 168 ? `<span class="bad">${Math.round(aptAge / 24)}d — count unreliable</span>`
       : aptAge > 48 ? `<span class="warn">${Math.round(aptAge / 24)}d</span>`
@@ -875,7 +877,9 @@ function render(d) {
         rel.ok === false && !rel.disabled && ['Registry', `<span class="warn">${esc(rel.error ?? 'unreachable')}</span>`],
         osi && ['Host updates', osi.updates > 0 ? `<span class="warn">${num(osi.updates)} pending</span>` : '<span class="ok">none pending</span>'],
         osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],
-        osi && ['apt lists', ageCell],
+        // "apt lists" is a lie on Windows, and a card that names the wrong tool
+        // is a card people stop trusting on the details that matter.
+        osi && [d.system?.platform === 'windows' ? 'update scan' : 'apt lists', ageCell],
         osi?.rebootRequired && ['Reboot', '<span class="bad">required</span>'],
         // Ours, not XYO's. The tag never changes across deploys, so this is the
         // only thing on the page that says which dashboard build is answering.

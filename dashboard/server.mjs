@@ -2260,7 +2260,11 @@ function overall() {
     if (osInfo.rebootRequired) problems.push('host reboot required')
     // A zero read off month-old lists is the worst answer this can give, so the
     // staleness is escalated rather than shown quietly beside the count.
-    if (osInfo.aptAgeHours > 168) problems.push(`apt lists ${Math.round(osInfo.aptAgeHours / 24)}d stale — update count is not trustworthy`)
+    // Either name: the Pi's collector says aptAgeHours, the Windows one says
+    // updatesAgeHours. The figure means the same thing -- how old the scan
+    // behind the count is -- and the escalation is the same either way.
+    const scanAge = osInfo.updatesAgeHours ?? osInfo.aptAgeHours
+    if (scanAge > 168) problems.push(`update scan ${Math.round(scanAge / 24)}d stale — update count is not trustworthy`)
   }
 
   const critical = !state.health.ok

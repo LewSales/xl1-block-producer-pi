@@ -1883,18 +1883,23 @@ function priceView() {
   return {
     ...p,
     network: NETWORK,
-    // On sequence this is the whole answer, and the card leads with it: the
-    // balance is real, its cash value is zero, and the thing that is worth
-    // something is the block count next to it.
+    // XL1 trades. What does not is a balance held on a test network.
+    //
+    // The earlier wording said the token "trades nowhere", which was simply
+    // wrong -- XL1 is listed, and the price above is its real one. The thing
+    // that makes these coins worth nothing is the NETWORK they sit on: the SDK
+    // this node runs describes sequence as "Test Network for XYO Layer 1", and
+    // test tokens are what you build against before going live.
     marketNote: hypothetical
-      ? `XL1 on ${NETWORK} is a test token — it trades nowhere and this balance is worth nothing in currency.`
+      ? `These are ${NETWORK} balances — the test network — so they are not the traded asset. The price above is real XL1; this balance is not.`
       : undefined,
-    ...(p.ok && Number.isFinite(balance) && Number.isFinite(p.value) ? {
+    // Deliberately absent on a test network. Multiplying test balances by the
+    // real mainnet price produces a precise, confident, meaningless number --
+    // and a figure that looks like money is read as money however it is
+    // labelled. The price is a fact worth showing; that product is not.
+    ...(p.ok && !hypothetical && Number.isFinite(balance) && Number.isFinite(p.value) ? {
       notional: Number((balance * p.value).toFixed(2)),
       notionalOf: balance,
-      // Named so it cannot be read as earnings. It is what the balance would be
-      // worth if XL1 traded at the tracked token's price, which it does not.
-      hypothetical,
     } : {}),
   }
 }

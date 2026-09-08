@@ -1623,9 +1623,12 @@ test('a testnet balance is never given a cash value it does not have', async () 
   const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}`)
   fresh.state.chain = { ok: true, balances: { reward: { xl1: '47,230.0853' } } }
   const v = fresh.priceView()
-  assert.ok(v.marketNote, 'sequence must carry the note that it trades nowhere')
-  assert.match(v.marketNote, /trades nowhere/)
-  assert.equal(v.hypothetical ?? true, true)
+  assert.ok(v.marketNote, 'sequence must carry the note explaining why')
+  // The note is about the NETWORK, not the token. XL1 is listed and traded --
+  // asserting it "trades nowhere" pinned a claim that was simply false.
+  assert.match(v.marketNote, /test network/i)
+  assert.doesNotMatch(v.marketNote, /trades nowhere/i)
+  assert.equal(v.notional, undefined, 'and no cash value is produced at all')
 })
 
 test('sequence and local have no market; mainnet does', async () => {
@@ -1644,16 +1647,28 @@ test('with no price source configured, nothing is quoted at all', async () => {
   assert.equal(v.notional, undefined, 'no source means no number, not a zero')
 })
 
-test('a conversion always travels with the reason it may mean nothing', async () => {
-  // Even when a price IS configured on a testnet, the figure must carry the
-  // hypothetical flag and the note -- a caller cannot get one without the other.
+test('a testnet balance gets no conversion, however it is labelled', async () => {
+  // The previous rule was that a conversion had to travel with a caveat. That is
+  // not enough: a figure that looks like money is read as money whatever the
+  // caption says, and multiplying test-network coins by the real mainnet price
+  // produces something precise, confident and meaningless.
   const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}d`)
   fresh.state.chain = { ok: true, balances: { reward: { xl1: '1,000.0000' } } }
-  fresh.state.price = { configured: true, ok: true, hasMarket: false, id: 'xyo-network', currency: 'usd', value: 0.01 }
+  fresh.state.price = { configured: true, ok: true, hasMarket: false, id: 'xl1', currency: 'usd', value: 0.01 }
+  const v = fresh.priceView()
+  assert.equal(v.notional, undefined, 'no cash value on a test network')
+  assert.equal(v.value, 0.01, 'but the real price is still reported -- it is a fact')
+  assert.ok(v.marketNote, 'with the reason these coins are not that asset')
+})
+
+test('a mainnet balance still gets its conversion', async () => {
+  // The withholding must be about the network, not a blanket refusal to convert.
+  const fresh = await import(`../dashboard/server.mjs?price=${Date.now()}d2`)
+  fresh.state.chain = { ok: true, balances: { reward: { xl1: '1,000.0000' } } }
+  fresh.state.price = { configured: true, ok: true, hasMarket: true, id: 'xl1', currency: 'usd', value: 0.01 }
   const v = fresh.priceView()
   assert.equal(v.notional, 10, '1000 at 0.01 is 10')
-  assert.equal(v.hypothetical, true, 'and it is flagged as hypothetical')
-  assert.ok(v.marketNote, 'and the note comes with it')
+  assert.equal(v.marketNote, undefined, 'and no caveat, because none is needed')
 })
 
 test('a failed price poll keeps the last quote rather than blanking', async () => {

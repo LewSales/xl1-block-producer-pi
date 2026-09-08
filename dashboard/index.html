@@ -601,10 +601,10 @@ function render(d) {
       cards.push(`<section style="--c: var(--c-worth)">
         <h2><span class="ico" aria-hidden="true">⚖️</span>What it is worth</h2>
         ${pr.marketNote
-          // The honest answer first, because on a test network it is the whole
-          // answer. "$0.00" would read as a broken feed rather than as the truth
-          // about a token that trades nowhere.
-          ? `<div class="big sub" style="font-size:19px">nothing, yet</div>
+          // The headline is about these coins, not about the token. XL1 trades;
+          // a test-network balance of it is not the traded asset, and saying
+          // "nothing, yet" about the token was simply false.
+          ? `<div class="big sub" style="font-size:19px">not the traded asset</div>
              <div class="sub">${esc(pr.marketNote)}</div>`
           : pr.notional !== undefined
             ? `<div class="big">${esc(cur)} ${num(pr.notional)}</div>
@@ -616,11 +616,19 @@ function render(d) {
             ['Tracked price', `${esc(cur)} ${pr.value ?? '—'}
               ${pr.change24h !== undefined ? `<span class="${pr.change24h >= 0 ? 'ok' : 'bad'}">${pr.change24h >= 0 ? '▲' : '▼'} ${Math.abs(pr.change24h)}%</span>` : ''}
               <span class="sub">${esc(pr.id ?? '')}</span>`],
-            pr.notional !== undefined && pr.marketNote &&
-              ['If it traded at that', `${esc(cur)} ${num(pr.notional)} <span class="sub">a scale, not an amount</span>`],
-            sinceWorth && sinceXl1 > 0 &&
-              ['Since dashboard start', `${esc(b.reward.sinceStart.xl1)} XL1 <span class="sub">≈ ${esc(sinceWorth)}</span>`],
-            blockWorth && ['Per accepted block', `~50 XL1 <span class="sub">≈ ${esc(blockWorth)}</span>`],
+            // No hypothetical conversion on a test network: server.mjs withholds
+            // notional there precisely so this row cannot appear. A figure that
+            // looks like money is read as money whatever the caption says.
+            pr.notional !== undefined && !pr.marketNote &&
+              ['Balance value', `${esc(cur)} ${num(pr.notional)}`],
+            // The XL1 figure is worth showing either way; its cash conversion is not,
+            // on a network whose coins are not the traded asset.
+            sinceXl1 > 0 && ['Since dashboard start',
+              pr.marketNote
+                ? `${esc(b.reward.sinceStart.xl1)} XL1`
+                : `${esc(b.reward.sinceStart.xl1)} XL1 <span class="sub">≈ ${esc(sinceWorth)}</span>`],
+            // Also withheld on a test network, for the same reason as the balance.
+          blockWorth && !pr.marketNote && ['Per accepted block', `~50 XL1 <span class="sub">≈ ${esc(blockWorth)}</span>`],
             // A quote that stopped updating is worse than none: it looks current.
             pr.ok === false && ['Quote', `<span class="warn">stale — ${esc(pr.error)}</span>`],
           ])}

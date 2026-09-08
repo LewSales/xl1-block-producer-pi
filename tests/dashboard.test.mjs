@@ -42,6 +42,42 @@ const m = await import('../dashboard/server.mjs')
 
 // ---------------------------------------------------------------- pure logic
 
+test('nextReleaseDelay retries a failure sooner than it rechecks a success', () => {
+  // The registry check runs seconds after start. On a machine that just booted
+  // that is usually before DNS is up, and on the success cadence alone that one
+  // failure is what the card shows for six hours -- as "fetch failed", which
+  // reads as the registry being down rather than as this node being 19s old.
+  assert.equal(m.nextReleaseDelay(true, m.CLI_RETRY_MS), m.CLI_CHECK_MS)
+  assert.equal(m.nextReleaseDelay(false, m.CLI_RETRY_MS), m.CLI_RETRY_MS * 2)
+})
+
+test('nextReleaseDelay backs off while failing but never past the normal cadence', () => {
+  // A registry that is genuinely down must not be polled every five minutes
+  // forever, and must never be polled LESS often than a healthy one.
+  let d = m.CLI_RETRY_MS
+  for (let i = 0; i < 20; i++) d = m.nextReleaseDelay(false, d)
+  assert.equal(d, m.CLI_CHECK_MS)
+  assert.ok(d <= m.CLI_CHECK_MS)
+})
+
+test('nextReleaseDelay resets on the first success, so the next blip clears fast', () => {
+  // Without the reset, one bad day would leave the retry pinned at six hours and
+  // the next boot failure would sit there just as long as before the fix.
+  let d = m.CLI_RETRY_MS
+  for (let i = 0; i < 5; i++) d = m.nextReleaseDelay(false, d)
+  assert.ok(d > m.CLI_RETRY_MS, 'backed off while failing')
+  d = m.nextReleaseDelay(true, d)
+  assert.equal(d, m.CLI_CHECK_MS)
+  assert.equal(m.nextReleaseDelay(false, m.CLI_RETRY_MS), m.CLI_RETRY_MS * 2, 'and a later failure starts low again')
+})
+
+test('nextReleaseDelay lifts a too-small current delay to the floor', () => {
+  // Guards against a caller passing 0 or a stale tiny value and turning the
+  // retry into a busy loop against someone else's registry.
+  assert.equal(m.nextReleaseDelay(false, 0), m.CLI_RETRY_MS * 2)
+  assert.equal(m.nextReleaseDelay(false, 1), m.CLI_RETRY_MS * 2)
+})
+
 test('versionLag compares numerically and refuses to guess', () => {
   assert.equal(m.versionLag('5.2.2', '5.3.0'), 'behind')
   assert.equal(m.versionLag('5.3.0', '5.3.0'), 'current')

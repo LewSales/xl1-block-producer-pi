@@ -130,6 +130,25 @@ const explorerBlock = (n) => (Number.isFinite(Number(n)) ? `${EXPLORER_URL}/bloc
 const CLI_REGISTRY = process.env.DASH_CLI_REGISTRY ?? 'https://registry.npmjs.org/@xyo-network/xl1-cli/latest'
 // Four times a day is plenty for something that changes every few weeks.
 const CLI_CHECK_MS = envNum('DASH_CLI_CHECK_MS', 21_600_000, 60_000)
+// How soon to try again after a FAILED registry check, as opposed to how often
+// to re-check a successful one. The first poll runs seconds after start, which
+// on a machine that just booted is usually before DNS is up; retrying that on
+// the six-hour success cadence means one unlucky moment is what the card shows
+// for six hours -- and it shows it as "fetch failed", which reads as the
+// registry being down rather than as this node having been alive for nineteen
+// seconds.
+const CLI_RETRY_MS = envNum('DASH_CLI_RETRY_MS', 300_000, 30_000)
+
+/** How long to wait before the next registry check.
+ *
+ * Doubles while failing so a genuinely unreachable registry is not polled every
+ * five minutes indefinitely, and never exceeds the normal cadence. Resets the
+ * moment one succeeds, so the next boot blip is again cleared in minutes.
+ */
+function nextReleaseDelay(ok, current) {
+  if (ok) return CLI_CHECK_MS
+  return Math.min(Math.max(current, CLI_RETRY_MS) * 2, CLI_CHECK_MS)
+}
 
 // Not every complaint the node makes applies to every network. Sequence is
 // federated: producers are authorized by an allowlist, and staking is not part
@@ -2891,7 +2910,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -2926,7 +2945,17 @@ if (isMain) {
   setInterval(guard(persistTrend, 'persistTrend'), 60_000).unref()
   setInterval(guard(persistPeers, 'persistPeers'), 60_000).unref()
   setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')(); guard(pollAlerts, 'pollAlerts')() }, LOCAL_POLL_MS).unref()
-  setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
+  // Self-rescheduling rather than a fixed interval, so the delay can depend on
+  // whether the last attempt actually worked.
+  let releaseWait = state.release?.ok ? CLI_CHECK_MS : CLI_RETRY_MS
+  const scheduleRelease = () => {
+    setTimeout(async () => {
+      try { await pollRelease() } catch (error) { console.error('xl1-dashboard: pollRelease failed —', error) }
+      releaseWait = nextReleaseDelay(state.release?.ok, releaseWait)
+      scheduleRelease()
+    }, releaseWait).unref()
+  }
+  scheduleRelease()
   if (PRICE_ID) setInterval(guard(pollPrice, 'pollPrice'), PRICE_POLL_MS).unref()
   if (FLEET.peers.length) setInterval(guard(pollFleet, 'pollFleet'), FLEET_POLL_MS).unref()
 

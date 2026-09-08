@@ -1,0 +1,16 @@
+[Unit]
+Description=Check for a newer XL1 producer bundle and install it
+Documentation=https://github.com/LewSales/xl1-block-producer-pi
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Root: xl1ctl update loads images and restarts services.
+ExecStart=/usr/local/bin/xl1-autoupdate.sh
+# A checked, verified update that cannot finish must not look like a crash loop.
+# The script leaves the running image untouched on failure and says so; the next
+# timer firing tries again.
+SuccessExitStatus=0 1
+TimeoutStartSec=1800

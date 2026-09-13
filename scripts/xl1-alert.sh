@@ -24,6 +24,16 @@ URL="${XL1_ALERT_URL:-http://127.0.0.1:8088/api/status}"
 TOKEN="${XL1_ALERT_TOKEN:-}"
 STATE="${XL1_ALERT_STATE:-/var/lib/xl1/.alert-state}"
 COOLDOWN="${XL1_ALERT_COOLDOWN:-21600}"     # re-nag an ongoing problem after 6h
+# Chain blocks that may pass with none of ours counted before that is a fault
+# rather than luck. At a ~7% share we lose about thirteen races for every one we
+# win, so short gaps are normal and must not alert; 90 blocks is roughly 85
+# minutes, and at p=0.07 the chance of an honest run that long is about 1 in 700.
+STALL_BLOCKS="${XL1_ALERT_STALL_BLOCKS:-90}"
+# Seconds a container may run without building anything before that is taken as
+# a launch that never entered production. Generous on purpose: a build needs a
+# pending transaction, and while the chain always has some, the cost of a false
+# "restart me" is worse than noticing fifteen minutes later.
+LAUNCH_GRACE="${XL1_ALERT_LAUNCH_GRACE:-900}"
 NODE_NAME="${XL1_ALERT_NAME:-$(hostname)}"
 
 # A URL that must be pinged regularly, watched by something that is not this
@@ -114,7 +124,7 @@ else
   # another field errored, jq exited non-zero, stderr went to /dev/null, and the
   # timer reported nothing wrong every sixty seconds. Silence that looks exactly
   # like good news is the worst failure an alerter has.
-  CONDITIONS="$(printf '%s' "${JSON}" | jq -r '
+  CONDITIONS="$(printf '%s' "${JSON}" | jq -r --argjson stall "${STALL_BLOCKS}" --argjson grace "${LAUNCH_GRACE}" '
     . as $s |
     [
       (if $s.status == "down"
@@ -151,7 +161,37 @@ else
       (if $s.node.os.rebootRequired // false
         then "reboot-required|default|Host reboot required" else empty end),
       (if ($s.system.swap.usedPercent // 0) > 60
-        then "swapping|default|Heavy swap use — the Pi is short of RAM" else empty end)
+        then "swapping|default|Heavy swap use — the Pi is short of RAM" else empty end),
+      # The one every other check here misses. On 2026-08-31 this node went two
+      # hours without landing a block while the container was up, /livez was
+      # green, the chain was reachable, nothing was throttling and the log was
+      # still printing a clean "Published block:" every minute. Every predicate
+      # above said healthy, because every one of them was — the candidates were
+      # simply losing every race. Not producing is the only symptom that failure
+      # has, and it is the one that costs money, so it is worth a notification
+      # even though nothing is technically broken.
+      #
+      # Counted from the chain, not from the log: "Published" means submitted,
+      # and a node can submit all day without a single block being accepted.
+      # A producer that never entered production on this launch, as distinct
+      # from one that is producing and losing. It cannot recover on its own —
+      # /livez passes on a node that has never built a block, so the container
+      # is never unhealthy, never exits, and no restart policy fires. Only an
+      # operator restarting it clears this, which is exactly why it pages.
+      #
+      # Guarded on the container actually running, so a stopped container
+      # reports container-stopped and not this.
+      (if ($s.node.container.running // false)
+          and (($s.node.runSeconds // 0) > $grace)
+          and (($s.node.buildsThisRun // 1) == 0)
+        then "never-produced|urgent|Producer has been up "
+             + ((($s.node.runSeconds // 0) / 60) | floor | tostring)
+             + " min and has never built a block — it came up in the non-producing state and will not recover without a restart" else empty end),
+      (if ($s.derived.blocksSinceLast // 0) > $stall
+        then "not-producing|high|No block counted in "
+             + ($s.derived.blocksSinceLast|tostring) + " chain blocks (~"
+             + ((($s.derived.blocksSinceLast * ($s.derived.secondsPerBlock // 57)) / 60) | floor | tostring)
+             + " min) — the node looks healthy but is not landing anything" else empty end)
     ] | .[]
   ')"
 
@@ -252,3 +292,35 @@ fi
 # Atomically: a SIGKILL partway through this write leaves a truncated state
 # file, after which every condition looks new and re-fires at full priority.
 printf '%s' "${NEW_STATE}" > "${STATE}.tmp" && mv "${STATE}.tmp" "${STATE}"
+
+# --------------------------------------------------------------- what is armed
+#
+# Which channels are configured, so the dashboard can say so. The state file
+# next to this one says what is FIRING, and that is a different question from
+# whether anything is listening -- an alerter with every channel blank writes an
+# empty state file on every run and looks exactly like a quiet, healthy node.
+#
+# Names only. No URL, no topic, no password: this file sits in the state
+# directory the dashboard mounts, and the dashboard has no business holding a
+# credential it does not need.
+CHANNELS=""
+[[ -n "${NTFY_TOPIC}" ]] && CHANNELS="${CHANNELS}\"ntfy\","
+[[ -n "${WEBHOOK}" ]] && CHANNELS="${CHANNELS}\"webhook\","
+[[ -n "${EMAIL}" ]] && CHANNELS="${CHANNELS}\"email\","
+CHANNELS="${CHANNELS%,}"
+
+# The dead-man switch is reported on its own, because it is the only check here
+# that keeps working when nothing else can -- and an operator who has set up
+# three channels and skipped this one has covered every failure except the
+# total ones.
+DEADMAN_SET=false
+[[ -n "${DEADMAN_URL}" ]] && DEADMAN_SET=true
+
+STATUS_FILE="$(dirname "${STATE}")/.alert-status"
+# Advisory only, and never fatal: a dashboard that cannot read this shows one
+# row less, but an alerter that died writing its own telemetry would be a
+# monitoring tool defeated by itself.
+printf '{"node":"%s","ranAt":"%s","channels":[%s],"deadman":%s,"cooldownSeconds":%s,"stallBlocks":%s,"launchGraceSeconds":%s}' \
+  "${NODE_NAME}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CHANNELS}" "${DEADMAN_SET}" \
+  "${COOLDOWN}" "${STALL_BLOCKS}" "${LAUNCH_GRACE}" \
+  > "${STATUS_FILE}.tmp" 2>/dev/null && mv "${STATUS_FILE}.tmp" "${STATUS_FILE}" 2>/dev/null || true

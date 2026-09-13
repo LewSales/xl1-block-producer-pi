@@ -292,6 +292,73 @@ on the panel rather than dropped:
 
 ---
 
+### The XL1 Network view
+
+Every other card on the page answers one question — how is *my producer* doing.
+Three cards answer the other one: how is *the chain* doing.
+
+**XL1 Network** is the headline. It reports how many producers have been seen,
+what share the largest one holds, and the **Nakamoto coefficient** — the fewest
+producers whose combined output passes 50%. That number is the one worth
+watching: it says how many parties would have to agree to control block
+production. On an eight-producer chain an even split would give everyone 12.5%;
+the leader currently holds about 25%, and it takes three of them to reach a
+majority. A coefficient of 1 or 2 is a chain one or two operators could dictate.
+
+It is a strict majority, deliberately. Two producers at exactly 50% each is not
+control, so that reads as 2 rather than 1 — an off-by-one there would understate
+concentration, which is the one direction this must never fail in.
+
+**Block time** is a distribution, not an average, because the average here is
+actively misleading. A two-hundred-block sample of live Sequence looked like
+this: twenty-six intervals in the 55s bucket, twenty-three in the 60s, and
+sixty-four at 300s or worse. The mean of that is 144 seconds, which describes
+neither half of it. The histogram shows both modes at a glance; a single number
+cannot.
+
+The percentiles are read off the histogram, so they are bucket floors rather
+than decimals — the page prints `≥ 55s` for exactly that reason, and will not
+pretend to a precision the counters do not hold. The mean, minimum and maximum
+are exact.
+
+Only **consecutive** blocks are measured. The gap across a range the scan never
+read is this dashboard's own downtime, not the chain's block time, and an hour
+of it in the tail of a chart about a one-minute chain would be a lie that looks
+like a finding. Intervals refused for that reason are counted and shown rather
+than dropped silently.
+
+**Producer movement** compares this week's share against the week before, and
+lists who has newly appeared and who has gone quiet. It needs two full weeks of
+day buckets before it will compare anything; until then it says so instead of
+inventing a trend from three days of data.
+
+#### Where the numbers come from
+
+All of it, without exception, is derived from blocks the standings scan has
+**already read**. The scan hands each block to one more accumulator on its way
+past and the cost is a few integer increments — there is not one additional
+gateway call anywhere in this section, which was the constraint the whole design
+was built around.
+
+The block-time histogram is fixed buckets rather than retained observations, so
+it is twenty-seven integers however long the node runs. Share drift and churn
+come out of the same thirty-five days of day buckets the standings windows use,
+so the two can never disagree about the same week.
+
+#### What it does not claim
+
+This dashboard reads a window of one chain through one gateway. It is not an
+indexer and has not seen the chain from genesis, so every figure here is
+**observed**, not authoritative, and the block range it rests on is printed
+beside it. A producer that never appeared in that window is not counted, and
+nothing here can prove one has stopped — which is why the wording is *quiet* and
+*last seen* rather than *dead*.
+
+After upgrading, the block-time histogram starts empty and fills forward. The
+standings file it lives in carries no interval history from before the feature
+existed, and there is no honest way to reconstruct it: the day buckets record
+who produced each block, not when. Give it an hour of chain.
+
 ## Alerting
 
 Nothing here alerts until you configure a channel. `sudo nano /etc/xl1/alert.env`,
@@ -330,6 +397,35 @@ definite failure alarms immediately rather than waiting out the grace period.
 A run that could not read the status document deliberately sends **no** ping.
 
 ---
+
+## Which role reads the chain how
+
+`XL1_ROLE` in `/etc/xl1/sequence-producer.env` picks one of two role presets,
+both of them mounted by the unit:
+
+| | chain reads | mempool |
+|---|---|---|
+| `producer` | JSON-RPC | JSON-RPC |
+| `producer-rest` | the REST CDNs — `blocks`, `state` and `indexes.sequence.xyo.space` | JSON-RPC |
+
+This node runs `producer-rest`, and the reason is a night in September 2026. The
+gateway's RPC schema began requiring an `$epoch` argument on viewer calls, and
+every client older than that change failed on **every** call: the producer
+stopped producing, the dashboard lost the chain, and the network dropped from a
+block every ~50s to one every five minutes while operators rebuilt. A
+`producer-rest` node reads the chain from the CDNs and would have kept building
+through it — only submission goes over RPC.
+
+Switching is an env edit and a restart, not a unit edit:
+
+```bash
+sudo sed -i 's/^XL1_ROLE=.*/XL1_ROLE=producer-rest/' /etc/xl1/sequence-producer.env
+sudo systemctl restart xl1-producer
+```
+
+`presets/roles/producer-rest.json` is upstream's file with one field changed —
+the same `blockProductionCheckInterval` override the RPC preset carries, for the
+same reason. Every other binding is theirs.
 
 ## When a healthy node produces nothing
 
@@ -670,7 +766,7 @@ reads both limits and distinguishes the two.
 | `0x8` | Clocked down for heat **right now** — check the fan. |
 | `0x50000` | Undervoltage since boot: a power supply problem, not a heat one. |
 
-### Memory limits are not enforced by default
+### Memory limits: off by default, enabled on this Pi
 
 `xl1-producer.service` passes `--memory 768m --memory-swap 2g`, and
 `xl1-dashboard.service` passes `--memory 256m`. **On stock Raspberry Pi OS none
@@ -710,9 +806,28 @@ cgroup_enable=memory cgroup_memory=1
 Then `memory` appears in `/sys/fs/cgroup/cgroup.controllers` and the limits
 bite — `docker inspect` reports `805306368` instead of `0`, and `docker stats`
 shows real per-container figures for the first time. Do this when you can watch
-the node: it activates a 768 MB cap that has never been live, and a container
-that exceeds it is killed rather than slowed. The cost of enabling it is roughly
-1% of RAM in kernel accounting structures.
+the node: it activates a 768 MB cap, and a container that exceeds it is killed
+rather than slowed. The cost of enabling it is roughly 1% of RAM in kernel
+accounting structures.
+
+**On xl1pi this is already done** — since the 2026-08-30 reboot, so everything
+above describes a stock Pi, not this one. Confirmed 2026-09-01:
+
+```
+/boot/firmware/cmdline.txt      … cgroup_enable=memory cgroup_memory=1
+/sys/fs/cgroup/cgroup.controllers   cpuset cpu io memory pids
+docker inspect → Memory=805306368   container's own memory.max = 805306368
+```
+
+So the 768 MB cap is live and the failure mode is now a kill, not a stall. Two
+ceilings are stacked: Node's 512 MB heap inside a hard 768 MB container. The
+gap between them is Node's non-heap overhead, and if the heap ever actually
+reached its ceiling the container would be the thing that gives way first.
+Measured headroom is comfortable — 159.5 MB against 768 MB, `RestartCount=0`
+and `OOMKilled=false` across a 14-hour window — but check `OOMKilled` first if
+the producer ever disappears without a log. Jim reports on Discord that an
+incorrectly set heap stops an RPi 3 producer from running at all; this is the
+form that would take here.
 
 A useful side effect: Node reads its container's memory limit when one exists.
 Without it the dashboard sized its heap against all 955 MB of host RAM while

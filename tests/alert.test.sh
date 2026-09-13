@@ -25,6 +25,7 @@ cat > "${WORK}/status.json" <<'JSON'
          "eligibilityIgnored":false,"cliVersion":"5.2.2",
          "os":{"securityUpdates":30,"rebootRequired":false}},
  "release":{"ok":true,"latest":"5.3.0","installed":"5.2.2","lag":"behind"},
+ "derived":{"blocksSinceLast":150,"secondsPerBlock":57},
  "system":{"throttle":{"undervoltageNow":false},"swap":{"usedPercent":0}}}
 JSON
 python3 -m http.server ${PORT} --bind 127.0.0.1 --directory "${WORK}" >/dev/null 2>&1 &
@@ -38,13 +39,37 @@ XL1_ALERT_NAME=testnode
 ENV
 A() { XL1_ALERT_ENV="${WORK}/alert.env" bash "${ALERT}" "$@" 2>&1; }
 
+# A launch that came up non-producing, served separately so the state-machine
+# sequence below is not perturbed. --status only; it writes nothing.
+mk2() {
+cat > "${WORK}/status2.json" <<JSON
+{"status":"ok","health":{"ok":true},"chain":{"ok":true},
+ "node":{"ok":true,"stale":false,"container":{"running":true},
+         "eligibility":{"blocked":false},"runSeconds":${1},"buildsThisRun":${2}},
+ "release":{"ok":true},"derived":{"blocksSinceLast":0},
+ "system":{"throttle":{"undervoltageNow":false},"swap":{"usedPercent":0}}}
+JSON
+cat > "${WORK}/alert2.env" <<ENV
+XL1_ALERT_URL=http://127.0.0.1:${PORT}/status2.json
+XL1_ALERT_STATE=${WORK}/.alert-state2
+XL1_ALERT_NAME=testnode
+ENV
+XL1_ALERT_ENV="${WORK}/alert2.env" bash "${ALERT}" --status 2>&1; }
+
+has   "a launch that never produced is caught"  "never-produced" "$(mk2 1800 0)"
+hasnt "a producing launch is not accused"       "never-produced" "$(mk2 1800 4)"
+hasnt "a young container is given its grace"    "never-produced" "$(mk2 60 0)"
+
 OUT="$(A --status)"
 has  "real conditions are detected"      "ineligible"   "${OUT}"
 has  "version lag is detected"           "cli-behind"   "${OUT}"
 has  "security updates are detected"     "os-security"  "${OUT}"
+# A node that is up, healthy and winning nothing looked perfectly fine to every
+# other predicate for two hours on 2026-08-31.
+has  "a healthy node winning nothing is caught" "not-producing" "${OUT}"
 
 OUT="$(A)"
-check "first run tracks all three"       "$(wc -l < "${WORK}/.alert-state")" "3"
+check "first run tracks all four"        "$(wc -l < "${WORK}/.alert-state")" "4"
 OUT="$(A)"
 hasnt "second run is silent"             "XL1 testnode" "${OUT}"
 
@@ -54,7 +79,7 @@ for _ in $(seq 1 20); do curl -fsS --max-time 1 -o /dev/null 2>/dev/null "http:/
 OUT="$(A)"
 has   "outage itself is reported"        "did not answer" "${OUT}"
 hasnt "no false recovery for ineligible" "recovered"      "${OUT}"
-check "prior conditions preserved"       "$(grep -c . "${WORK}/.alert-state")" "4"
+check "prior conditions preserved"       "$(grep -c . "${WORK}/.alert-state")" "5"
 
 OUT="$(A --status)"
 has  "--status admits it could not look" "COULD NOT READ STATUS" "${OUT}"

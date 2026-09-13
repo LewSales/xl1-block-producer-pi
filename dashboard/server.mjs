@@ -6,10 +6,10 @@
 //   node    — producer container state, written by the host collector timer
 //   system  — Pi vitals from /proc and /sys (temp, throttle, RAM, swap, disk)
 
-import { readFile, appendFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { readFile, readdir, appendFile, writeFile, mkdir, rename, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createServer } from 'node:http'
-import { statfs } from 'node:fs'
+import { statfs, readFileSync } from 'node:fs'
 import { promisify } from 'node:util'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
@@ -48,9 +48,67 @@ const PORT = envNum('DASH_PORT', 8088)
 const BIND = envStr('DASH_BIND', '0.0.0.0')
 const HEALTH_URL = envStr('XL1_HEALTH_URL', 'http://127.0.0.1:9099')
 const STATUS_FILE = envStr('XL1_STATUS_FILE', '/var/lib/xl1/producer-status.json')
+
+// Read once at import rather than per request. Falls back rather than throwing:
+// a dashboard that will not start because it cannot find its own version number
+// is a worse outcome than one that says "unknown".
+const DASH_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
+// The build stamp can also travel as a file beside server.mjs, and when it does
+// it wins over the environment.
+//
+// This exists because of how the code is deployed. Baking the stamp into the
+// image works only while the image and the code are the same thing. Once
+// server.mjs and index.html are bind-mounted over the image — which is the
+// difference between a 110 MB transfer and a 200 KB one — the code changes and
+// the image's environment does not, so the page would confidently report the
+// commit of whichever image happened to be underneath it. That is worse than no
+// stamp: it is a wrong answer to "which build am I looking at", on the one
+// panel built to answer exactly that.
+//
+// Absent file, absent field, malformed JSON: each falls through to the
+// environment rather than failing, so an image-only deploy behaves as before.
+const BUILD_STAMP = (() => {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('./build.json', import.meta.url), 'utf8'))
+    return (raw && typeof raw === 'object') ? raw : {}
+  } catch {
+    return {}
+  }
+})()
 // statfs('/') inside a container reports the overlay filesystem, not the SD
 // card. Point this at a host bind-mount so the disk figure is the real one.
 const DISK_PATH = envStr('DASH_DISK_PATH', '/var/lib/xl1')
+/** The fix for "the state directory is not there", in the operator's own terms.
+ *  DASH_HOST_PLATFORM says which host this is; unset means the Pi, so the unit
+ *  file that has never set it keeps the wording it has always had.
+ *
+ *  The remedy is not the same sentence on the two hosts, and the wrong one
+ *  sends a Windows operator off to edit a systemd unit that does not exist on
+ *  their machine. On Windows the cause is usually not a missing mount in the
+ *  compose file at all: Docker Desktop resolves a bind mount created from
+ *  inside WSL through a per-distro shim, and that shim is gone once Docker
+ *  Desktop restarts — which it does before the WSL distro is up. The restart
+ *  policy then brings the container back onto a source path that no longer
+ *  resolves, the mount silently becomes an empty directory, and it stays that
+ *  way until the container is recreated. Nothing about the compose file is
+ *  wrong; only the container running from it, which is why the remedy is a
+ *  recreate and not an edit. */
+// Which machine this dashboard is attached to, as configured rather than as
+// inferred. The container cannot tell by looking: on Windows it runs inside a
+// Linux VM whose /proc describes the VM.
+const HOST_PLATFORM = envStr('DASH_HOST_PLATFORM', 'pi')
+
+const mountRemedy = () => (envStr('DASH_HOST_PLATFORM', 'pi') === 'windows'
+  ? 'recreate the container from PowerShell (.\\scripts\\xl1ctl.ps1 restart)'
+  : 'xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)')
+
 // Empty is a real setting: no token required.
 const TOKEN = process.env.DASH_TOKEN ?? ''
 const CHAIN_POLL_MS = envNum('DASH_CHAIN_POLL_MS', 15_000, 1000)
@@ -72,6 +130,25 @@ const explorerBlock = (n) => (Number.isFinite(Number(n)) ? `${EXPLORER_URL}/bloc
 const CLI_REGISTRY = process.env.DASH_CLI_REGISTRY ?? 'https://registry.npmjs.org/@xyo-network/xl1-cli/latest'
 // Four times a day is plenty for something that changes every few weeks.
 const CLI_CHECK_MS = envNum('DASH_CLI_CHECK_MS', 21_600_000, 60_000)
+// How soon to try again after a FAILED registry check, as opposed to how often
+// to re-check a successful one. The first poll runs seconds after start, which
+// on a machine that just booted is usually before DNS is up; retrying that on
+// the six-hour success cadence means one unlucky moment is what the card shows
+// for six hours -- and it shows it as "fetch failed", which reads as the
+// registry being down rather than as this node having been alive for nineteen
+// seconds.
+const CLI_RETRY_MS = envNum('DASH_CLI_RETRY_MS', 300_000, 30_000)
+
+/** How long to wait before the next registry check.
+ *
+ * Doubles while failing so a genuinely unreachable registry is not polled every
+ * five minutes indefinitely, and never exceeds the normal cadence. Resets the
+ * moment one succeeds, so the next boot blip is again cleared in minutes.
+ */
+function nextReleaseDelay(ok, current) {
+  if (ok) return CLI_CHECK_MS
+  return Math.min(Math.max(current, CLI_RETRY_MS) * 2, CLI_CHECK_MS)
+}
 
 // Not every complaint the node makes applies to every network. Sequence is
 // federated: producers are authorized by an allowlist, and staking is not part
@@ -212,13 +289,12 @@ async function persistTrend() {
         trendError = undefined
         return
       } catch {
-        trendError = `${dirname(TREND_FILE)} does not exist and cannot be created`
-          + ' — xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)'
+        trendError = `${dirname(TREND_FILE)} does not exist and cannot be created — ${mountRemedy()}`
         return
       }
     }
     trendError = error.code === 'EACCES' || error.code === 'EROFS'
-      ? `${dirname(TREND_FILE)} is mounted read-only — update xl1-dashboard.service and daemon-reload`
+      ? `${dirname(TREND_FILE)} is mounted read-only — ${mountRemedy()}`
       : error.message?.slice(0, 160)
   }
 }
@@ -309,7 +385,18 @@ const production = {
   // Highest block already read. Lives here rather than in a module-local so the
   // scan's entire state is one object — inspectable, resettable, persistable.
   cursor: undefined,
+  // The last N blocks in chain order: { n, mine, t }. Two things need it and
+  // neither can come from the log — the pulse strip, and how many blocks this
+  // node actually WON in a window. "Published block" in the log means submitted,
+  // not accepted; only the chain says who won, and this repo has already been
+  // wrong once by trusting the log for exactly that.
+  recent: [],
 }
+
+// About an hour of chain at sequence's ~58s cadence, which is the window the
+// collector totals losses over. Kept small deliberately: it is persisted, and a
+// pulse strip nobody can read at a glance is not worth the bytes.
+const RECENT_BLOCKS = envNum('DASH_RECENT_BLOCKS', 64, 8)
 
 // ------------------------------------------------------------ peer producers
 //
@@ -332,6 +419,465 @@ const PEERS_TOP = envNum('DASH_PEERS_TOP', 12, 1)
 // dashboard that was down overnight must catch up over several polls rather
 // than issuing hundreds of requests in one.
 const PEERS_CATCHUP = envNum('DASH_PRODUCTION_CATCHUP', 1000, 200)
+
+// ------------------------------------------------------------- day buckets
+//
+// A cumulative total answers "who has produced most since this dashboard
+// started", which is not the question being asked when one node was offline for
+// two days and another was not. "We are 200 behind today but 700 up overall" is
+// two different measurements, and only the first one says anything about how
+// the node is running right now.
+//
+// Every BoundWitness carries `$epoch` in milliseconds, so the scan that already
+// reads the signer list can bucket the block by its own day at no extra cost.
+// Bucketing by arrival time instead would have been simpler and wrong: a
+// dashboard catching up after an outage would file yesterday's blocks under
+// today and invent a spike on every restart.
+const DAYS_KEPT = envNum('DASH_PEERS_DAYS', 35, 2)
+// Days are local to whoever reads the page. "Today" is a human word, and on a
+// UTC container an operator in Denver would watch it roll over at 18:00. The
+// container's own clock stays UTC — only the bucket key is zoned.
+const DAY_TZ = envStr('DASH_DAY_TZ', 'UTC')
+
+let dayTzError
+const dayFormatter = (() => {
+  const build = (tz) => new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  })
+  try {
+    return build(DAY_TZ)
+  } catch {
+    // An unusable zone must not take the standings down with it, but silently
+    // falling back to UTC would leave "today" wrong with nothing on the page to
+    // explain why the day rolls over six hours early.
+    dayTzError = `DASH_DAY_TZ="${DAY_TZ}" is not a known time zone — bucketing by UTC instead`
+    return build('UTC')
+  }
+})()
+
+/** epoch ms → 'YYYY-MM-DD' in DAY_TZ. en-CA is ISO order by definition. */
+function dayKey(epochMs) {
+  return dayFormatter.format(new Date(epochMs))
+}
+
+/** 'YYYY-MM-DD' for today, and the N keys ending today, newest first. */
+function todayKey() { return dayKey(Date.now()) }
+function recentKeys(n) {
+  const out = []
+  const now = Date.now()
+  for (let i = 0; i < n; i++) out.push(dayKey(now - i * 86_400_000))
+  return out
+}
+
+/** day key → { scanned, counts: Map(address → blocks) }. Same blocks as the
+ *  cumulative tally, split by the day the block says it was made. */
+const days = new Map()
+
+function bucket(dayKeyStr, signers) {
+  let day = days.get(dayKeyStr)
+  if (!day) {
+    day = { scanned: 0, counts: new Map() }
+    days.set(dayKeyStr, day)
+  }
+  day.scanned += 1
+  for (const addr of signers) day.counts.set(addr, (day.counts.get(addr) ?? 0) + 1)
+}
+
+/** Drop buckets older than DAYS_KEPT so the file cannot grow without bound.
+ *  Keyed by string comparison, which is date order for ISO dates. */
+function pruneDays() {
+  if (days.size <= DAYS_KEPT) return
+  const keep = new Set([...days.keys()].sort().slice(-DAYS_KEPT))
+  for (const k of [...days.keys()]) if (!keep.has(k)) days.delete(k)
+}
+
+// The cumulative tally is one entry per distinct producer address ever seen, and
+// it was the only structure on this page with nothing bounding it. On a
+// federated chain of eight that is theoretical; on a chain that opens up, or one
+// where producers rotate addresses, it is a slow leak into a file that is
+// rewritten every five minutes and parsed on every boot.
+//
+// The two obvious caps are both wrong. Evicting the smallest deletes exactly the
+// minor producers the concentration figures exist to count -- it would make the
+// chain look more decentralised the longer the dashboard ran. Evicting the
+// oldest needs an age, and this map stores a lifetime total, not a date.
+//
+// But the recency is already recorded next door: an address in any retained day
+// bucket produced within DAYS_KEPT. So the rule is that a producer seen in the
+// retained window is never evicted, whatever the cap says. The cap only ever
+// reaches addresses that have been silent for over a month, and in normal
+// operation it evicts nothing at all.
+//
+// If the active set alone exceeds the cap, nothing is evicted and the overflow
+// is reported. A leaderboard missing producers that are demonstrably producing
+// is a worse failure than a map larger than intended, and the honest bound on
+// this structure was always "the chain's active producer set" rather than a
+// number chosen here.
+const PEERS_MAX = envNum('DASH_PEERS_MAX', 500, 16)
+
+/** Addresses dropped from the cumulative tally, and what they took with them.
+ *  Surfaced rather than swallowed: the totals stop summing to the blocks
+ *  scanned once anything is evicted, and a column that quietly stops adding up
+ *  is how a reader learns to distrust the whole table. */
+const peersEvicted = { addresses: 0, blocks: 0, overCap: false }
+
+function prunePeers() {
+  peersEvicted.overCap = false
+  if (peers.size <= PEERS_MAX) return
+
+  // Everyone who has produced inside the retained day buckets. Protected.
+  const active = new Set()
+  for (const day of days.values()) for (const addr of day.counts.keys()) active.add(addr)
+
+  // Only the silent are candidates, smallest first -- of the producers that
+  // stopped over a month ago, the one that produced least is the least missed.
+  const candidates = [...peers.entries()]
+    .filter(([addr]) => !active.has(addr))
+    .sort((a, b) => a[1] - b[1])
+
+  for (const [addr, blocks] of candidates) {
+    if (peers.size <= PEERS_MAX) break
+    peers.delete(addr)
+    peersEvicted.addresses += 1
+    peersEvicted.blocks += blocks
+  }
+
+  // Still over: every remaining address produced within the window, so the cap
+  // yields to the truth rather than the other way round.
+  if (peers.size > PEERS_MAX) peersEvicted.overCap = true
+}
+
+// ------------------------------------------------------- network observation
+//
+// Every figure below is derived from blocks the standings scan has ALREADY
+// read. No poller of its own, no gateway call, no second opinion: the scan
+// hands each block to one more accumulator on its way past, and the cost is a
+// few integer increments per block.
+//
+// The distinction this section exists to draw is the one nothing else on the
+// page draws. Every other card answers "how is my producer doing". These answer
+// "how is XL1 doing" — block cadence, concentration, who is arriving and who
+// has gone quiet — which is a question about the chain, not about this node.
+//
+// What it can honestly claim is bounded by what the scan saw. This dashboard
+// reads a window of blocks; it is not an indexer and does not see the chain's
+// whole history, so everything here is labelled as observed rather than as
+// protocol fact, and the window it rests on is reported beside it.
+
+// Block-time buckets, in seconds, each edge the INCLUSIVE floor of its bucket.
+// Fixed edges so the histogram is a handful of counters rather than a list of
+// observations: adding a block is one increment and the memory never grows.
+//
+// Dense between 40 and 80 because sequence targets about a minute and that is
+// where the shape actually lives; coarse in the tail, where the only question
+// left is how bad the worst ones were. The final bucket is everything above the
+// last edge, so no observation can fall outside the histogram.
+const GAP_EDGES = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 90, 100, 120, 150, 180, 240, 300, 420, 600, 900]
+
+const chainObs = {
+  gaps: {
+    buckets: new Array(GAP_EDGES.length).fill(0),
+    count: 0,
+    sum: 0,
+    min: undefined,
+    max: undefined,
+    // Intervals refused, and why. A histogram that silently swallowed bad data
+    // would be worse than one that admits it — the shape is the entire point,
+    // and one negative interval from a re-read block would drag the mean.
+    rejected: { nonPositive: 0, nonConsecutive: 0, undated: 0 },
+  },
+  // The newest dated block the gap accumulator has consumed. Only ever moves
+  // forward, which is what stops a backfill of older history from inventing
+  // intervals that run backwards.
+  last: undefined,
+}
+
+/** Which bucket an interval falls in. Linear over 27 edges — a binary search
+ *  would be faster in a way nothing here can measure and harder to read. */
+function gapBucket(seconds) {
+  for (let i = GAP_EDGES.length - 1; i >= 0; i--) if (seconds >= GAP_EDGES[i]) return i
+  return 0
+}
+
+/** One observed interval between consecutive blocks.
+ *
+ *  Only consecutive block numbers are admitted. The gap across a range the scan
+ *  skipped — a restart, a gateway refusing a window — is the dashboard's
+ *  downtime, not the chain's block time, and counting it would put an hour-long
+ *  outage in the tail of a chart about a one-minute chain. */
+function observeGap(prev, cur) {
+  const g = chainObs.gaps
+  if (cur.n !== prev.n + 1) { g.rejected.nonConsecutive += 1; return }
+  const ms = cur.t - prev.t
+  // Zero or backwards means the two blocks disagree about time. Refused rather
+  // than clamped: a clamped zero is indistinguishable from a genuinely fast
+  // block, and this chain does not produce those.
+  if (!(ms > 0)) { g.rejected.nonPositive += 1; return }
+  const seconds = ms / 1000
+  g.buckets[gapBucket(seconds)] += 1
+  g.count += 1
+  g.sum += seconds
+  if (g.min === undefined || seconds < g.min) g.min = seconds
+  if (g.max === undefined || seconds > g.max) g.max = seconds
+}
+
+/** Feed a batch of freshly scanned blocks to the gap accumulator.
+ *
+ *  Sorted here rather than relying on the caller: blocksByNumber answers
+ *  newest-first, and an unsorted walk would reject every interval as running
+ *  backwards. Blocks at or below the accumulator's high-water mark are dropped,
+ *  so a re-read range cannot be counted twice. */
+function observeBatch(dated) {
+  if (!dated.length) return
+  const sorted = dated.slice().sort((a, b) => a.n - b.n)
+  for (const cur of sorted) {
+    if (chainObs.last === undefined) { chainObs.last = cur; continue }
+    if (cur.n <= chainObs.last.n) continue
+    observeGap(chainObs.last, cur)
+    chainObs.last = cur
+  }
+}
+
+/** Percentile off the histogram. Returns the floor of the bucket the
+ *  percentile lands in, so it is accurate to the bucket width and never
+ *  pretends to more precision than the counters hold — which is why the page
+ *  prints these as "≥ 55s" rather than as a decimal. */
+function gapPercentile(p) {
+  const g = chainObs.gaps
+  if (!g.count) return undefined
+  const target = g.count * p
+  let seen = 0
+  for (let i = 0; i < g.buckets.length; i++) {
+    seen += g.buckets[i]
+    if (seen >= target) return GAP_EDGES[i]
+  }
+  return GAP_EDGES.at(-1)
+}
+
+/** Sum a set of day buckets into one tally. Hoisted out of peerBoard so the
+ *  standings, the drift and the churn all read the same arithmetic over the
+ *  same buckets — three answers that disagreed about one week would be worse
+ *  than any one of them being absent. */
+function sumDays(keys) {
+  const counts = new Map()
+  let denominator = 0
+  let covered = 0
+  for (const key of keys) {
+    const day = days.get(key)
+    if (!day) continue
+    covered += 1
+    denominator += day.scanned
+    for (const [addr, n] of day.counts) counts.set(addr, (counts.get(addr) ?? 0) + n)
+  }
+  return { counts, denominator, covered }
+}
+
+/** The N day keys ending `offset` days ago, newest first. recentKeys(n) is
+ *  this with offset 0; drift needs the window before that one. */
+function dayKeysBack(offset, count) {
+  const out = []
+  const now = Date.now()
+  for (let i = offset; i < offset + count; i++) out.push(dayKey(now - i * 86_400_000))
+  return out
+}
+
+/** How concentrated production is among the producers actually observed.
+ *
+ *  The denominator is the sum of every producer's blocks, not the number of
+ *  blocks scanned. They differ when a block carries more than one signer, and
+ *  using the block count there would make the shares sum past 100% and the
+ *  Nakamoto coefficient come out too low — an understatement of decentralisation
+ *  is the one direction this must not fail in. */
+function concentration(counts) {
+  const blocks = [...counts.values()].filter((n) => n > 0).sort((a, b) => b - a)
+  const total = blocks.reduce((a, b) => a + b, 0)
+  if (!total) return undefined
+
+  const share = (n) => Number(((n / total) * 100).toFixed(2))
+  const cumulative = (k) => blocks.slice(0, k).reduce((a, b) => a + b, 0)
+
+  // The fewest producers whose combined output passes a majority. Strictly
+  // greater than the threshold: exactly half is not a majority, and a two-way
+  // 50/50 split is a Nakamoto coefficient of 2, not 1.
+  const nakamotoAt = (threshold) => {
+    let acc = 0
+    for (let i = 0; i < blocks.length; i++) {
+      acc += blocks[i]
+      if (acc / total > threshold) return i + 1
+    }
+    return undefined
+  }
+
+  return {
+    producers: blocks.length,
+    blocks: total,
+    leaderShare: share(blocks[0]),
+    top3Share: share(cumulative(Math.min(3, blocks.length))),
+    nakamoto: nakamotoAt(0.5),
+    nakamoto67: nakamotoAt(0.67),
+    // An even split would give every producer this much. The leader's share
+    // against it is the whole story in one number.
+    evenShare: Number((100 / blocks.length).toFixed(2)),
+  }
+}
+
+/** Who is gaining and who is fading, from the day buckets already on disk.
+ *
+ *  Deliberately the simplest comparison that answers the question — this week's
+ *  share against last week's — rather than a regression over thirty days. The
+ *  extra machinery would not change which name an operator looks at, and a
+ *  number nobody can recompute by hand is a number nobody trusts. */
+function shareDrift(labels) {
+  const now = sumDays(dayKeysBack(0, 7))
+  const prev = sumDays(dayKeysBack(7, 7))
+  // Two partial windows compare two different amounts of chain, and the
+  // difference would read as movement that never happened.
+  const comparable = now.covered >= 2 && prev.covered >= 2
+
+  const rows = []
+  for (const addr of new Set([...now.counts.keys(), ...prev.counts.keys()])) {
+    const nowBlocks = now.counts.get(addr) ?? 0
+    const prevBlocks = prev.counts.get(addr) ?? 0
+    const nowShare = now.denominator > 0 ? (nowBlocks / now.denominator) * 100 : undefined
+    const prevShare = prev.denominator > 0 ? (prevBlocks / prev.denominator) * 100 : undefined
+    rows.push({
+      address: addr,
+      label: labels.get(addr),
+      url: explorerAddress(addr),
+      blocks: nowBlocks,
+      previousBlocks: prevBlocks,
+      sharePercent: nowShare === undefined ? undefined : Number(nowShare.toFixed(2)),
+      previousSharePercent: prevShare === undefined ? undefined : Number(prevShare.toFixed(2)),
+      deltaPercent: (nowShare === undefined || prevShare === undefined)
+        ? undefined : Number((nowShare - prevShare).toFixed(2)),
+    })
+  }
+  rows.sort((a, b) => (b.deltaPercent ?? -Infinity) - (a.deltaPercent ?? -Infinity))
+
+  return {
+    comparable,
+    daysWithData: now.covered,
+    previousDaysWithData: prev.covered,
+    scannedBlocks: now.denominator,
+    previousScannedBlocks: prev.denominator,
+    rows,
+  }
+}
+
+/** Producer lifecycle, from the same day buckets.
+ *
+ *  Nothing here says a producer has stopped. This dashboard sees a window of
+ *  one chain through one gateway, which is enough to say "not observed since
+ *  Tuesday" and nowhere near enough to say "gone" — so the words are `quiet`
+ *  and `lastSeen`, and the retention that bounds them is stated beside them. */
+function producerChurn(labels) {
+  const CHURN_QUIET_DAYS = 7
+  const history = Math.min(DAYS_KEPT, 28)
+
+  const lastSeen = new Map()
+  const firstSeen = new Map()
+  for (const key of [...days.keys()].sort()) {
+    for (const addr of days.get(key).counts.keys()) {
+      if (!firstSeen.has(addr)) firstSeen.set(addr, key)
+      lastSeen.set(addr, key)
+    }
+  }
+
+  const recent = sumDays(dayKeysBack(0, CHURN_QUIET_DAYS))
+  const earlier = sumDays(dayKeysBack(CHURN_QUIET_DAYS, history - CHURN_QUIET_DAYS))
+  const today = sumDays([todayKey()])
+
+  // "Newly observed" means "produced this week and not before it", which needs a
+  // before. With five days of buckets there is no earlier window at all, so
+  // every producer on the chain qualified and the card listed seven of eight as
+  // new arrivals -- an artefact of when the dashboard was installed, presented
+  // as a fact about the chain. Withheld until there is something to compare
+  // against, the same way share drift already withholds.
+  const comparable = earlier.covered >= 2
+
+  const decorate = (addr) => ({
+    address: addr,
+    label: labels.get(addr),
+    url: explorerAddress(addr),
+    firstSeen: firstSeen.get(addr),
+    lastSeen: lastSeen.get(addr),
+  })
+
+  return {
+    quietAfterDays: CHURN_QUIET_DAYS,
+    historyDays: history,
+    daysStored: days.size,
+    seenToday: today.counts.size,
+    seenThisWeek: recent.counts.size,
+    // Both lists are a comparison against the earlier window, so both wait for
+    // one. Empty here means "cannot yet say", which `comparable` distinguishes
+    // from "nobody arrived".
+    comparable,
+    earlierDaysWithData: earlier.covered,
+    arrived: comparable
+      ? [...recent.counts.keys()].filter((a) => !earlier.counts.has(a)).map(decorate) : [],
+    // Produced earlier in the retained history and nothing since.
+    quiet: comparable
+      ? [...earlier.counts.keys()].filter((a) => !recent.counts.has(a)).map(decorate) : [],
+  }
+}
+
+/** Everything above, assembled once.
+ *
+ *  Memoised on what it is derived from — the scan cursor, the day buckets and
+ *  the interval count. A browser refresh between two scans recomputes nothing;
+ *  the page is served the same object it was served five seconds ago, which is
+ *  correct, because nothing it describes has changed. */
+let networkCache = { key: undefined, value: undefined }
+
+function networkView(board) {
+  const key = `${production.scannedTo}|${days.size}|${chainObs.gaps.count}|${peers.size}`
+  if (networkCache.key === key) return networkCache.value
+
+  const { byAddress: labels } = resolveLabels([...peers.keys()])
+  const g = chainObs.gaps
+  const mean = g.count > 0 ? Number((g.sum / g.count).toFixed(2)) : undefined
+
+  const value = {
+    // What every number here rests on, stated first so nothing below can be
+    // mistaken for a claim about the whole chain.
+    observed: {
+      blocks: production.scanned || 0,
+      fromBlock: production.scannedFrom,
+      toBlock: production.scannedTo,
+      since: peersSince,
+      behind: production.behind,
+      daysStored: days.size,
+      daysKept: DAYS_KEPT,
+      // The scan reads a window and resumes from a cursor; it has not read the
+      // chain from genesis and must not be quoted as though it had.
+      complete: false,
+    },
+    blockTime: {
+      samples: g.count,
+      meanSeconds: mean,
+      medianSeconds: gapPercentile(0.5),
+      p90Seconds: gapPercentile(0.9),
+      p95Seconds: gapPercentile(0.95),
+      p99Seconds: gapPercentile(0.99),
+      minSeconds: g.min === undefined ? undefined : Number(g.min.toFixed(2)),
+      maxSeconds: g.max === undefined ? undefined : Number(g.max.toFixed(2)),
+      // Sent as counts against their floors so the browser draws bars without
+      // ever seeing an observation. A month of chain is 27 integers.
+      edges: GAP_EDGES,
+      buckets: g.buckets.slice(),
+      rejected: { ...g.rejected },
+    },
+    concentration: concentration(peers),
+    drift: shareDrift(labels),
+    churn: producerChurn(labels),
+    // The standings already computed this; quoted rather than recomputed.
+    selfShare: board?.self?.sharePercent,
+  }
+
+  networkCache = { key, value }
+  return value
+}
 
 // Names for addresses, so the standings read as producers rather than hex.
 //
@@ -415,12 +961,55 @@ async function loadPeers() {
     production.scannedFrom = doc.scannedFrom
     production.scannedTo = doc.scannedTo
     production.scanned = Number(doc.scanned) || 0
+    peersEvicted.addresses = Number(doc.evicted?.addresses) || 0
+    peersEvicted.blocks = Number(doc.evicted?.blocks) || 0
     production.multiSigner = Boolean(doc.multiSigner)
     peersSince = doc.since
     // Resume where the last run stopped rather than re-scanning a fresh window.
     // Re-scanning would double-count every block in the overlap, inflating both
     // our total and everyone else's by however long the dashboard was down.
     if (Number.isFinite(Number(doc.scannedTo))) production.cursor = Number(doc.scannedTo)
+    // v1 files carry no day buckets. Left empty rather than seeded from the
+    // totals: there is no honest way to split a cumulative number across the
+    // days it came from, and backfillDays re-reads those blocks instead.
+    days.clear()
+    for (const [key, day] of Object.entries(doc.days ?? {})) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) continue
+      const counts = new Map()
+      for (const [addr, n] of Object.entries(day?.counts ?? {})) {
+        if (typeof n === 'number' && Number.isFinite(n) && n > 0) counts.set(addr, n)
+      }
+      if (counts.size > 0) days.set(key, { scanned: Number(day.scanned) || 0, counts })
+    }
+    pruneDays()
+    prunePeers()
+    // The histogram only means anything if the bucket edges it was built with
+    // are the ones being read. Edges that have changed since it was written
+    // make every count refer to a different range, so it is dropped rather than
+    // silently reinterpreted -- the distribution rebuilds itself from the scan.
+    const g = doc.gaps
+    if (g && Array.isArray(g.buckets) && Array.isArray(g.edges)
+        && g.edges.length === GAP_EDGES.length && g.edges.every((e, i) => e === GAP_EDGES[i])) {
+      chainObs.gaps.buckets = GAP_EDGES.map((_, i) => Number(g.buckets[i]) || 0)
+      chainObs.gaps.count = Number(g.count) || 0
+      chainObs.gaps.sum = Number(g.sum) || 0
+      chainObs.gaps.min = Number.isFinite(Number(g.min)) ? Number(g.min) : undefined
+      chainObs.gaps.max = Number.isFinite(Number(g.max)) ? Number(g.max) : undefined
+      chainObs.gaps.rejected = {
+        nonPositive: Number(g.rejected?.nonPositive) || 0,
+        nonConsecutive: Number(g.rejected?.nonConsecutive) || 0,
+        undated: Number(g.rejected?.undated) || 0,
+      }
+      // Resumed so the first block after a restart is measured against the one
+      // before it -- but only if they turn out to be consecutive, which
+      // observeGap checks and a restart of any length will fail.
+      chainObs.last = Number.isFinite(Number(g.last?.n)) && Number.isFinite(Number(g.last?.t))
+        ? { n: Number(g.last.n), t: Number(g.last.t) } : undefined
+    }
+    production.daysFrom = Number.isFinite(Number(doc.daysFrom)) ? Number(doc.daysFrom) : undefined
+    production.recent = Array.isArray(doc.recent)
+      ? doc.recent.filter((r) => Number.isFinite(Number(r?.n))).slice(-RECENT_BLOCKS)
+      : []
     const self = PRODUCER_ADDRESS || REWARD_ADDRESS
     if (self) production.counted = peers.get(self) ?? 0
     peersError = undefined
@@ -435,7 +1024,10 @@ async function persistPeers(force = false) {
 
   peersSince ??= new Date().toISOString()
   const doc = {
-    v: 1,
+    // v3 adds `gaps`. A v2 reader ignores it; this reader treats its absence as
+    // an empty histogram, so the two versions are compatible in both directions
+    // and a downgrade costs the distribution, not the standings.
+    v: 3,
     since: peersSince,
     updatedAt: new Date().toISOString(),
     scannedFrom: production.scannedFrom,
@@ -443,6 +1035,35 @@ async function persistPeers(force = false) {
     scanned: production.scanned,
     multiSigner: production.multiSigner,
     counts: Object.fromEntries([...peers.entries()].sort((a, b) => b[1] - a[1])),
+    // Carried across restarts. Rebuilding it is impossible -- the evidence was
+    // the rows that were deleted -- and a total that silently starts summing
+    // correctly again after a reboot would hide that anything was ever dropped.
+    evicted: peersEvicted,
+    // Lowest block represented in the day buckets. Without it a restart cannot
+    // tell a backfill that finished from one that never ran, and the standings
+    // would re-read the same history on every boot forever.
+    daysFrom: production.daysFrom,
+    // Persisted so the pulse is populated on the first paint after a restart.
+    // Rebuilding it from the scan alone would take an hour of chain to refill,
+    // during which the strip would understate this node for no reason.
+    recent: production.recent.slice(-RECENT_BLOCKS),
+    days: Object.fromEntries([...days.entries()].sort().map(([key, day]) => [key, {
+      scanned: day.scanned,
+      counts: Object.fromEntries([...day.counts.entries()].sort((a, b) => b[1] - a[1])),
+    }])),
+    // Block-time histogram. Twenty-seven integers and four scalars, whatever
+    // the window: it is counters, not observations, which is the entire reason
+    // it can be kept forever without bounding anything.
+    gaps: {
+      edges: GAP_EDGES,
+      buckets: chainObs.gaps.buckets,
+      count: chainObs.gaps.count,
+      sum: chainObs.gaps.sum,
+      min: chainObs.gaps.min,
+      max: chainObs.gaps.max,
+      rejected: chainObs.gaps.rejected,
+      last: chainObs.last,
+    },
   }
 
   try {
@@ -459,13 +1080,12 @@ async function persistPeers(force = false) {
         await mkdir(dirname(PEERS_FILE), { recursive: true })
         peersError = undefined
       } catch {
-        peersError = `${dirname(PEERS_FILE)} does not exist and cannot be created`
-          + ' — xl1-dashboard.service needs a rw bind mount for it (systemctl daemon-reload after updating the unit)'
+        peersError = `${dirname(PEERS_FILE)} does not exist and cannot be created — ${mountRemedy()}`
       }
       return
     }
     peersError = error.code === 'EACCES' || error.code === 'EROFS'
-      ? `${dirname(PEERS_FILE)} is mounted read-only — update xl1-dashboard.service and daemon-reload`
+      ? `${dirname(PEERS_FILE)} is mounted read-only — ${mountRemedy()}`
       : error.message?.slice(0, 160)
   }
 }
@@ -476,6 +1096,27 @@ async function persistPeers(force = false) {
  *  read — an earlier version asked for the newest 200 and then jumped the
  *  cursor to the head, which after any real outage booked the skipped middle as
  *  scanned and lost those blocks from every total for good. */
+/** A block's own millisecond timestamp.
+ *
+ *  Two places carry it and only one of them is dependable. `$epoch` is metadata
+ *  the datalake attaches, and on 2 September 2026 it stopped arriving on new
+ *  blocks while remaining on every older one — so a reader that knows only
+ *  about `$epoch` files everything from that day forward as undated, and the
+ *  day windows quietly stop counting while the totals keep rising. The time
+ *  payload is inside the block itself and was present on every block sampled,
+ *  new and old, which makes it the fallback rather than the other way round:
+ *  `$epoch` still wins where it exists, so nothing about the history already on
+ *  disk shifts by a millisecond. */
+function blockEpoch(bw, payloads) {
+  const meta = Number(bw?.$epoch)
+  if (Number.isFinite(meta) && meta > 0) return meta
+  const list = Array.isArray(payloads) ? payloads : []
+  const timed = list.find((p) => p?.schema === 'network.xyo.time' && Number.isFinite(Number(p?.epoch)))
+  const fallback = timed ?? list.find((p) => Number.isFinite(Number(p?.epoch)) && Number(p.epoch) > 0)
+  const epoch = Number(fallback?.epoch)
+  return Number.isFinite(epoch) && epoch > 0 ? epoch : undefined
+}
+
 async function scanProduction(viewer, currentNum) {
   const self = PRODUCER_ADDRESS || REWARD_ADDRESS
   if (!Number.isFinite(currentNum)) return
@@ -506,6 +1147,14 @@ async function scanProduction(viewer, currentNum) {
         break
       }
 
+      // Timestamped blocks from this batch, handed to the block-time
+      // accumulator once the batch is done. Collected rather than observed
+      // inline because intervals need chain order and blocksByNumber answers
+      // newest-first. backfillDays walks OLDER blocks and deliberately has no
+      // equivalent: an interval across the seam it works back through would be
+      // the scan's own gap, not the chain's.
+      const dated = []
+
       for (const entry of blocks) {
         const bw = Array.isArray(entry) ? entry[0] : entry
         const n = Number(bw?.block)
@@ -520,12 +1169,40 @@ async function scanProduction(viewer, currentNum) {
         production.scanned += 1
         for (const addr of signers) peers.set(addr, (peers.get(addr) ?? 0) + 1)
 
+        // A block with no timestamp in either place is counted in the totals and
+        // left out of every day window rather than filed under an invented
+        // date; the count is surfaced so a chain that stopped carrying one
+        // shows up as undated blocks instead of as days that quietly stop
+        // adding up.
+        const epoch = blockEpoch(bw, Array.isArray(entry) ? entry[1] : undefined)
+        if (Number.isFinite(epoch) && epoch > 0) {
+          bucket(dayKey(epoch), signers)
+          dated.push({ n, t: epoch })
+          if (production.daysFrom === undefined || n < production.daysFrom) production.daysFrom = n
+        } else {
+          production.undated = (production.undated ?? 0) + 1
+        }
+
+        production.recent.push({ n, mine: Boolean(self && signers.has(self)), t: epoch || undefined })
+
         // Our own figure comes out of the same pass, over the same definition
         // of "produced", so the headline and the table can never disagree.
         if (self && signers.has(self)) {
           production.counted += 1
           if (production.lastBlock === undefined || n > production.lastBlock) production.lastBlock = n
         }
+      }
+
+      // Block times, off the same blocks, before the ring below is trimmed.
+      // One sort of the batch and one integer increment per interval.
+      observeBatch(dated)
+
+      // blocksByNumber answers newest-first, so pushing in iteration order would
+      // build the pulse strip backwards — it reads oldest-left, like the chain.
+      // Sorted after the batch rather than per block: 64 entries, once a poll.
+      production.recent.sort((a, b) => a.n - b.n)
+      if (production.recent.length > RECENT_BLOCKS) {
+        production.recent.splice(0, production.recent.length - RECENT_BLOCKS)
       }
 
       production.cursor = top
@@ -535,10 +1212,66 @@ async function scanProduction(viewer, currentNum) {
       if (!production.error) production.error = undefined
     }
     if (from > currentNum) production.error = undefined
+    pruneDays()
+    prunePeers()
     production.behind = Math.max(0, currentNum - (production.scannedTo ?? currentNum))
   } catch (error) {
     // Leave the cursor alone so the same range is retried rather than skipped.
     production.error = error.message?.slice(0, 160)
+  }
+}
+
+/** Fill day buckets for blocks the totals already contain.
+ *
+ *  Upgrading from a v1 file leaves the standings with two days of totals and no
+ *  history to split them by, so the windows would read zero while the total read
+ *  three thousand. This walks the already-counted range backwards, bucketing
+ *  only — it never touches `peers` or `production.scanned`, because those blocks
+ *  are counted there already and adding them twice is exactly the failure the
+ *  cursor logic exists to prevent.
+ *
+ *  Runs after the forward scan and shares its per-poll budget, so catching up on
+ *  the head always wins over reconstructing the past. */
+async function backfillDays(viewer) {
+  if (production.scannedFrom === undefined || production.daysFrom === undefined) return
+  let to = production.daysFrom - 1
+  if (to < production.scannedFrom) return
+
+  let budget = PEERS_CATCHUP
+  try {
+    while (to >= production.scannedFrom && budget > 0) {
+      const from = Math.max(production.scannedFrom, to - 199)
+      const limit = to - from + 1
+      const blocks = await viewer.block.blocksByNumber(to, limit)
+      if (!blocks?.length) {
+        // Same reasoning as the forward scan: an empty answer is the gateway
+        // declining, and moving daysFrom past it would mark those days filled.
+        production.daysError = `gateway returned no blocks for ${from}-${to}`
+        break
+      }
+
+      for (const entry of blocks) {
+        const bw = Array.isArray(entry) ? entry[0] : entry
+        const n = Number(bw?.block)
+        if (!Number.isFinite(n) || n < from || n > to) continue
+        const epoch = blockEpoch(bw, Array.isArray(entry) ? entry[1] : undefined)
+        if (!Number.isFinite(epoch) || epoch <= 0) continue
+        const signers = new Set((bw?.addresses ?? [])
+          .map((a) => String(a).replace(/^0x/i, '').toLowerCase())
+          .filter(Boolean))
+        if (signers.size === 0) continue
+        bucket(dayKey(epoch), signers)
+      }
+
+      production.daysFrom = from
+      to = from - 1
+      budget -= limit
+      production.daysError = undefined
+    }
+    pruneDays()
+    prunePeers()
+  } catch (error) {
+    production.daysError = error.message?.slice(0, 160)
   }
 }
 
@@ -550,19 +1283,56 @@ function peerBoard() {
   const scanned = production.scanned || 0
   const { byAddress: labels, ambiguous, unmatched } = resolveLabels([...peers.keys()])
 
-  const rows = [...peers.entries()]
-    .map(([address, blocks]) => ({
-      address,
-      blocks,
-      sharePercent: scanned > 0 ? Number(((blocks / scanned) * 100).toFixed(2)) : undefined,
-      isSelf: Boolean(self) && address === self,
-      label: labels.get(address),
-      url: explorerAddress(address),
-    }))
-    // Ties broken by address so the order does not jitter between polls.
-    .sort((a, b) => b.blocks - a.blocks || a.address.localeCompare(b.address))
+  /** One ranked table over one tally. Every window is built by this, so a row
+   *  means the same thing whichever column it is read from. */
+  const rank = (counts, denominator) => {
+    const rows = [...counts.entries()]
+      .map(([address, blocks]) => ({
+        address,
+        blocks,
+        sharePercent: denominator > 0 ? Number(((blocks / denominator) * 100).toFixed(2)) : undefined,
+        isSelf: Boolean(self) && address === self,
+        label: labels.get(address),
+        url: explorerAddress(address),
+      }))
+      // Ties broken by address so the order does not jitter between polls.
+      .sort((a, b) => b.blocks - a.blocks || a.address.localeCompare(b.address))
+    rows.forEach((r, i) => { r.rank = i + 1 })
+    // The gap to this node, which is the number actually being asked for when
+    // one producer is chasing another. Positive means they are ahead of us.
+    const mineHere = rows.find((r) => r.isSelf)
+    if (mineHere) for (const r of rows) r.vsSelf = r.blocks - mineHere.blocks
+    return rows
+  }
 
-  rows.forEach((r, i) => { r.rank = i + 1 })
+  // Summing day buckets is sumDays() now, shared with the network drift and
+  // churn figures below. Three answers about one week that disagreed would be
+  // worse than any one of them being missing.
+
+  /** A window as the page consumes it: ranked rows plus what they rest on. */
+  const windowOf = (keys) => {
+    const { counts, denominator, covered } = sumDays(keys)
+    const rows = rank(counts, denominator)
+    const mineHere = rows.find((r) => r.isSelf)
+    return {
+      days: keys.length,
+      daysWithData: covered,
+      from: keys.at(-1),
+      to: keys[0],
+      scannedBlocks: denominator,
+      producers: rows.length,
+      selfRank: mineHere?.rank,
+      self: mineHere,
+      leader: rows[0],
+      top: rows.slice(0, PEERS_TOP),
+      // Every address in the window, not just the visible top. The page lists
+      // rows in total order and reads each one's window figure out of this, so
+      // a producer ranked 3rd overall and 1st today still shows both numbers.
+      blocksByAddress: Object.fromEntries(rows.map((r) => [r.address, r.blocks])),
+    }
+  }
+
+  const rows = rank(peers, scanned)
   const mine = rows.find((r) => r.isSelf)
 
   return {
@@ -575,9 +1345,34 @@ function peerBoard() {
     // loud rather than normalised away, because the page would otherwise look
     // arithmetically broken to anyone who added the column up.
     multiSigner: production.multiSigner,
+    // Present only once something has actually been dropped, so the ordinary
+    // case carries no caveat at all.
+    evicted: peersEvicted.addresses > 0 ? { ...peersEvicted, quietDays: DAYS_KEPT } : undefined,
+    peersMax: PEERS_MAX,
     selfRank: mine?.rank,
     self: mine,
     top: rows.slice(0, PEERS_TOP),
+    // Windows over the same blocks as the total above, split by the day each
+    // block reports. A producer that was offline for two days is behind on the
+    // total and level for today, and only one of those is news.
+    windows: {
+      today: windowOf([todayKey()]),
+      week: windowOf(recentKeys(7)),
+    },
+    dayTz: DAY_TZ,
+    dayTzError,
+    daysKept: DAYS_KEPT,
+    daysStored: days.size,
+    // How far back the day buckets reach, against how far the totals do. While
+    // a backfill is still running these differ, and a week window that is quietly
+    // missing its oldest days would otherwise read as a producer having a quiet
+    // week.
+    daysFrom: production.daysFrom,
+    daysComplete: production.daysFrom !== undefined
+      && production.scannedFrom !== undefined
+      && production.daysFrom <= production.scannedFrom,
+    daysError: production.daysError,
+    undated: production.undated,
     // Labels that could not be applied. Surfaced rather than dropped: a name
     // silently missing from the table looks identical to a producer who has
     // stopped, and the operator would go looking at the wrong thing.
@@ -639,6 +1434,7 @@ async function pollChain() {
     }
 
     await scanProduction(viewer, currentNum)
+    await backfillDays(viewer)
 
     sample('height', currentNum)
     sample('blocks', production.counted)
@@ -749,9 +1545,537 @@ async function pollNode() {
     state.node = {
       ok: false,
       error: error.code === 'ENOENT'
-        ? `collector has not written ${STATUS_FILE} yet`
+        ? await missingStatusReason()
         : error.message?.slice(0, 200),
     }
+  }
+}
+
+/** Two different faults reach this container as the same ENOENT, and only one
+ *  of them is about the collector. A collector that has not run yet leaves the
+ *  rest of the state directory behind it — the trend store, the scan cursors.
+ *  A state directory holding nothing at all is not an idle collector: it is a
+ *  bind mount that is no longer attached to the directory the collector writes
+ *  to, and every panel fed from that file goes blank while the host side is
+ *  perfectly healthy. Sending an operator to look at the collector for that one
+ *  costs an afternoon, so say both things and let the empty directory be the
+ *  evidence. */
+async function missingStatusReason(file = STATUS_FILE) {
+  try {
+    const dir = dirname(file)
+    const entries = await readdir(dir)
+    if (entries.length === 0) {
+      return `${dir} is empty — either the collector has never run, or the state`
+        + ` bind mount is not attached to the directory it writes to: ${mountRemedy()}`
+    }
+  } catch {
+    // Cannot list it either. The plain missing-file wording is still true.
+  }
+  return `collector has not written ${file} yet`
+}
+
+
+// -------------------------------------------------------------- alert source
+//
+// The alerter is a separate program on both hosts -- xl1-alert.sh under a
+// systemd timer on the Pi, xl1-alert.ps1 under Task Scheduler on Windows -- and
+// it owns alerting completely: it decides what is firing, it delivers, it
+// remembers. This reads the file it leaves behind and nothing else.
+//
+// Deliberately one-way. The dashboard does not evaluate conditions, does not
+// send anything, and never writes here. Two programs deciding what "degraded"
+// means is the failure this whole layout exists to avoid, and an alert card
+// that disagreed with the alert you were paged by would be worse than no card.
+//
+// Both hosts put the file at the same path inside the container, because both
+// mount their state directory at /var/lib/xl1 -- so this needs no per-repo
+// configuration despite the two schedulers being nothing alike.
+const ALERT_STATE_FILE = envStr('DASH_ALERT_STATE_FILE', '/var/lib/xl1/.alert-state')
+// What the alerter is armed with, written beside the state file on every run.
+// Channel NAMES only -- never a URL, topic or password: this lives in the
+// directory the dashboard mounts, and the dashboard has no business holding a
+// credential it does not need in order to say "ntfy is configured".
+const ALERT_STATUS_FILE = envStr('DASH_ALERT_STATUS_FILE', '/var/lib/xl1/.alert-status')
+
+// The alerter writes keys, not sentences, because the sentence it delivered is
+// already in the notification. These are for the panel only; an unknown key
+// falls through as itself rather than being hidden, so an alerter newer than
+// the dashboard still displays.
+const ALERT_LABELS = {
+  'node-down': 'Producer is down',
+  'container-missing': 'Producer container does not exist',
+  'container-stopped': 'Producer container is not running',
+  'collector-down': 'Collector is not reporting',
+  'collector-stale': 'Collector snapshot is stale',
+  'health-failing': 'Health probe /livez is failing',
+  'chain-unreachable': 'Chain gateway unreachable',
+  'chain-id': 'Chain id differs from the preset',
+  'ineligible': 'Producer cannot produce',
+  'chain-stalled': 'Chain has stopped advancing',
+  'dry-spell': 'No blocks won',
+  'not-producing': 'Not landing blocks',
+  'never-produced': 'Came up in the non-producing state',
+  'undervoltage': 'Undervolting right now',
+  'overheating': 'SoC hit the hard thermal limit',
+  'thermal-throttle': 'CPU clocked down for heat',
+  'swapping': 'Heavy swap use',
+  'os-security': 'Host security updates pending',
+  'reboot-required': 'Host reboot required',
+  'cli-behind': 'xl1-cli is behind',
+  'disk': 'Disk filling up',
+  'dashboard-unreachable': 'Dashboard API did not answer',
+  'alerter-broken': 'Alerter could not read the status document',
+}
+
+/** How long the state file may go untouched before the alerter is presumed not
+ *  to be running. Both schedulers fire every 60s and the file is rewritten on
+ *  every run, including the runs that find nothing -- so silence here is the
+ *  alerter being gone, which is exactly the thing an alert can never tell you. */
+const ALERT_SILENT_MS = envNum('DASH_ALERT_SILENT_MS', 600_000, 60_000)
+
+async function pollAlerts() {
+  try {
+    const [raw, info] = await Promise.all([
+      readFile(ALERT_STATE_FILE, 'utf8'),
+      stat(ALERT_STATE_FILE),
+    ])
+    const lastRun = info.mtimeMs
+    const age = Date.now() - lastRun
+
+    // key<TAB>epochSeconds, one per firing condition, empty when all clear.
+    // Anything that is not that shape is skipped rather than shown as a
+    // condition named after a corrupt line.
+    const active = []
+    let malformed = 0
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue
+      const [key, ts] = line.split('\t')
+      const since = Number(ts)
+      if (!key || !Number.isFinite(since) || since <= 0) { malformed += 1; continue }
+      active.push({
+        key,
+        label: ALERT_LABELS[key] ?? key,
+        since: new Date(since * 1000).toISOString(),
+        ageSeconds: Math.max(0, Math.round(Date.now() / 1000 - since)),
+      })
+    }
+    active.sort((a, b) => b.ageSeconds - a.ageSeconds)
+
+    // Written by the same run that wrote the state file, so a failure to read
+    // it costs one row rather than the card. An older alerter writes no such
+    // file at all, which is why every field below is optional.
+    let armed
+    try {
+      const doc = JSON.parse(await readFile(ALERT_STATUS_FILE, 'utf8'))
+      armed = {
+        node: typeof doc.node === 'string' ? doc.node : undefined,
+        channels: Array.isArray(doc.channels) ? doc.channels.filter((c) => typeof c === 'string') : [],
+        deadman: Boolean(doc.deadman),
+        cooldownSeconds: Number(doc.cooldownSeconds) || undefined,
+        stallBlocks: Number.isFinite(Number(doc.stallBlocks)) ? Number(doc.stallBlocks) : undefined,
+      }
+    } catch { armed = undefined }
+
+    state.alerts = {
+      ok: true,
+      installed: true,
+      armed,
+      // A file nobody has touched in ten minutes is a stopped timer. Said
+      // plainly, because "no alerts firing" and "nothing is watching" look
+      // identical on a panel and mean opposite things.
+      running: age <= ALERT_SILENT_MS,
+      lastRunAt: new Date(lastRun).toISOString(),
+      lastRunAgeSeconds: Math.round(age / 1000),
+      silentAfterSeconds: Math.round(ALERT_SILENT_MS / 1000),
+      active,
+      malformed,
+      file: ALERT_STATE_FILE,
+    }
+  } catch (error) {
+    // Not installed is the ordinary case on a host whose operator has not set
+    // alerting up, and it is not a fault. Everything else is reported as one.
+    state.alerts = error.code === 'ENOENT'
+      ? { ok: true, installed: false, file: ALERT_STATE_FILE }
+      : { ok: false, installed: true, file: ALERT_STATE_FILE, error: error.message?.slice(0, 160) }
+  }
+}
+
+
+
+
+// ------------------------------------------------------------------ continuity
+//
+// Was it actually working? Not "is it healthy now", which every other card
+// answers, but "how much of the last week did this node spend producing" -- the
+// question you ask after a bad night, and the one nothing here could answer.
+//
+// Computed entirely from the trend store already on disk: every five minutes it
+// records the chain height and this node's chain-counted win total, and the
+// difference between two rows an hour apart is how the chain moved and how much
+// of it was ours. No new source, and it works retroactively over whatever
+// history exists rather than starting from zero today.
+//
+// The distinction that makes it honest: an hour with no SAMPLES is an hour the
+// dashboard was not watching, which is not the same as an hour the node did not
+// produce. One is our ignorance and the other is a fault, they look identical
+// in a bare count, and conflating them would turn every restart into an outage.
+const CONTINUITY_HOURS = envNum('DASH_CONTINUITY_HOURS', 168, 24)
+
+function continuity() {
+  if (trend.length < 2) return undefined
+
+  const now = Date.now()
+  const hourMs = 3_600_000
+  const from = now - CONTINUITY_HOURS * hourMs
+
+  // Bucket the samples by the hour they fall in. Only rows carrying both
+  // numbers are useful: cblocks arrived later than the store did, so early
+  // history has heights without wins.
+  const buckets = new Map()
+  for (const r of trend) {
+    if (r.t < from) continue
+    if (!Number.isFinite(r.cblocks) || !Number.isFinite(r.height)) continue
+    const key = Math.floor(r.t / hourMs)
+    const b = buckets.get(key) ?? { key, first: r, last: r, samples: 0 }
+    if (r.t < b.first.t) b.first = r
+    if (r.t > b.last.t) b.last = r
+    b.samples += 1
+    buckets.set(key, b)
+  }
+  if (!buckets.size) return undefined
+
+  const firstKey = Math.min(...buckets.keys())
+  const lastKey = Math.max(...buckets.keys())
+  const hours = []
+  for (let k = firstKey; k <= lastKey; k++) {
+    const b = buckets.get(k)
+    if (!b || b.samples < 2) {
+      // Not observed. Recorded as such rather than as a zero -- an hour we did
+      // not watch is our gap, not the node's.
+      hours.push({ t: k * hourMs, observed: false })
+      continue
+    }
+    const chain = b.last.height - b.first.height
+    const wins = b.last.cblocks - b.first.cblocks
+    hours.push({
+      t: k * hourMs,
+      observed: true,
+      // A negative delta means the underlying counter was rebuilt, which is not
+      // a negative number of blocks. Withheld rather than shown as nonsense.
+      chainBlocks: chain >= 0 ? chain : undefined,
+      wins: wins >= 0 ? wins : undefined,
+      sharePercent: (chain > 0 && wins >= 0) ? Number(((wins / chain) * 100).toFixed(1)) : undefined,
+    })
+  }
+
+  const observed = hours.filter((h) => h.observed && h.wins !== undefined)
+  const producing = observed.filter((h) => h.wins > 0)
+  // An hour where the chain moved and none of it was ours. This is the number
+  // that matters: the chain standing still is not this node failing.
+  const missed = observed.filter((h) => h.wins === 0 && (h.chainBlocks ?? 0) > 0)
+
+  // The longest unbroken run of those, which is what an outage actually looks
+  // like from the outside.
+  let longest = 0, run = 0, longestEndsAt
+  for (const h of hours) {
+    if (h.observed && h.wins === 0 && (h.chainBlocks ?? 0) > 0) {
+      run += 1
+      if (run > longest) { longest = run; longestEndsAt = h.t }
+    } else if (h.observed && h.wins > 0) { run = 0 }
+    // An unobserved hour neither breaks a run nor extends it: we do not know.
+  }
+
+  return {
+    windowHours: CONTINUITY_HOURS,
+    hours,
+    observedHours: observed.length,
+    unobservedHours: hours.filter((h) => !h.observed).length,
+    producingHours: producing.length,
+    missedHours: missed.length,
+    // Of the hours we actually watched, the share in which this node won
+    // something. Deliberately not called uptime: the container can be up for
+    // every one of them and still win nothing.
+    producingPercent: observed.length
+      ? Number(((producing.length / observed.length) * 100).toFixed(1)) : undefined,
+    longestMissedHours: longest,
+    longestMissedEndedAt: longestEndsAt ? new Date(longestEndsAt).toISOString() : undefined,
+  }
+}
+
+// -------------------------------------------------------------- market price
+//
+// What the earnings are worth, and -- more often -- an honest statement that
+// they are worth nothing yet.
+//
+// XL1 on sequence is a testnet token. It trades nowhere, so any currency figure
+// against a sequence balance is invented, and an invented number on a page whose
+// only job is to be believed costs more than the feature is worth. The card
+// says so plainly rather than printing $0.00, which reads like a broken feed.
+//
+// A price can still be tracked, because the question people actually ask is
+// "what would this be worth if it were the real token" -- so where a source is
+// configured the conversion is shown as the hypothetical it is, labelled in the
+// card, never as an amount earned.
+//
+// The one new outbound request on this page, and it is not to XL1: a price API
+// is not the gateway every producer on the chain is competing over. Fifteen
+// minutes, cached, and failure is a missing row rather than a broken card.
+const PRICE_ID = envStr('DASH_PRICE_ID', '')
+const PRICE_CURRENCY = envStr('DASH_PRICE_CURRENCY', 'usd').toLowerCase()
+const PRICE_POLL_MS = envNum('DASH_PRICE_POLL_MS', 900_000, 300_000)
+const PRICE_URL = envStr('DASH_PRICE_URL', 'https://api.coingecko.com/api/v3/simple/price')
+
+// Networks whose token has no market. Kept as a list rather than "not mainnet"
+// so a new testnet does not silently start quoting prices.
+const NO_MARKET = new Set(['sequence', 'local'])
+
+async function pollPrice() {
+  if (!PRICE_ID) { state.price = { configured: false, hasMarket: !NO_MARKET.has(NETWORK) }; return }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const url = `${PRICE_URL}?ids=${encodeURIComponent(PRICE_ID)}` +
+      `&vs_currencies=${encodeURIComponent(PRICE_CURRENCY)}&include_24hr_change=true`
+    const res = await fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const doc = await res.json()
+    const row = doc?.[PRICE_ID]
+    const value = Number(row?.[PRICE_CURRENCY])
+    if (!Number.isFinite(value)) throw new Error(`no ${PRICE_CURRENCY} price for ${PRICE_ID}`)
+    state.price = {
+      configured: true,
+      ok: true,
+      hasMarket: !NO_MARKET.has(NETWORK),
+      id: PRICE_ID,
+      currency: PRICE_CURRENCY,
+      value,
+      change24h: Number.isFinite(Number(row[`${PRICE_CURRENCY}_24h_change`]))
+        ? Number(Number(row[`${PRICE_CURRENCY}_24h_change`]).toFixed(2)) : undefined,
+      polledAt: new Date().toISOString(),
+      source: new URL(PRICE_URL).host,
+    }
+  } catch (error) {
+    // The last good price is kept beside the error: a quote from twenty minutes
+    // ago is still useful, and a card that empties itself on one failed request
+    // teaches its reader to distrust it.
+    state.price = {
+      ...(state.price ?? {}),
+      configured: true,
+      ok: false,
+      hasMarket: !NO_MARKET.has(NETWORK),
+      error: error.name === 'AbortError' ? 'timeout' : error.message?.slice(0, 120),
+      polledAt: new Date().toISOString(),
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The earnings expressed in currency, where that means anything.
+ *
+ *  Returns the conversion AND the reason it may be meaningless, together, so no
+ *  caller can take the number without the caveat attached to it. */
+function priceView() {
+  const p = state.price ?? { configured: Boolean(PRICE_ID), hasMarket: !NO_MARKET.has(NETWORK) }
+  const balance = Number(String(state.chain?.balances?.reward?.xl1 ?? '').replace(/,/g, ''))
+  const hypothetical = !p.hasMarket
+
+  return {
+    ...p,
+    network: NETWORK,
+    // XL1 trades. What does not is a balance held on a test network.
+    //
+    // The earlier wording said the token "trades nowhere", which was simply
+    // wrong -- XL1 is listed, and the price above is its real one. The thing
+    // that makes these coins worth nothing is the NETWORK they sit on: the SDK
+    // this node runs describes sequence as "Test Network for XYO Layer 1", and
+    // test tokens are what you build against before going live.
+    marketNote: hypothetical
+      ? `These are ${NETWORK} balances — the test network — so they are not the traded asset. The price above is real XL1; this balance is not.`
+      : undefined,
+    // Deliberately absent on a test network. Multiplying test balances by the
+    // real mainnet price produces a precise, confident, meaningless number --
+    // and a figure that looks like money is read as money however it is
+    // labelled. The price is a fact worth showing; that product is not.
+    ...(p.ok && !hypothetical && Number.isFinite(balance) && Number.isFinite(p.value) ? {
+      notional: Number((balance * p.value).toFixed(2)),
+      notionalOf: balance,
+    } : {}),
+  }
+}
+
+// -------------------------------------------------------------- fleet source
+//
+// One page for every node you run, instead of one page each.
+//
+// Nothing here talks to XL1. A peer is another instance of this dashboard, and
+// what is fetched is the summary it has already computed for its own page --
+// so adding a second node to the fleet costs one HTTP request every thirty
+// seconds to a machine you own, and not one additional call to the gateway
+// every producer on the chain is competing for.
+//
+// Deliberately read-only and one-way. Peers do not know they are in a fleet,
+// there is no registration and no push: a node that is switched off simply
+// stops answering, which is the state the card is there to show.
+//
+//   DASH_FLEET=pi=http://xl1pi:8088,laptop=http://192.168.1.20:8088
+//
+// A peer behind a token takes it in the URL, the same way a browser would:
+//   DASH_FLEET=pi=http://xl1pi:8088?token=abc
+const FLEET_POLL_MS = envNum('DASH_FLEET_POLL_MS', 30_000, 5_000)
+const FLEET_TIMEOUT_MS = envNum('DASH_FLEET_TIMEOUT_MS', 6_000, 1_000)
+// A fleet is a handful of machines somebody owns. The cap is here so a
+// mis-pasted variable cannot turn one poll into a hundred outbound requests.
+const FLEET_MAX = envNum('DASH_FLEET_MAX', 12, 1)
+
+/** `label=url` pairs. Malformed entries are reported rather than dropped: a
+ *  node silently missing from a fleet card looks exactly like a node that is
+ *  switched off, and only one of those is worth getting out of bed for. */
+const FLEET = (() => {
+  const raw = envStr('DASH_FLEET', '')
+  const peers = []
+  const rejected = []
+  if (!raw) return { peers, rejected }
+
+  for (const item of raw.split(',').map((x) => x.trim()).filter(Boolean)) {
+    const eq = item.indexOf('=')
+    if (eq < 1) { rejected.push(`${item} — expected label=url`); continue }
+    const label = item.slice(0, eq).trim()
+    const url = item.slice(eq + 1).trim()
+    if (!label) { rejected.push(`${item} — no label`); continue }
+    let parsed
+    try { parsed = new URL(url) } catch { rejected.push(`${item} — "${url}" is not a URL`); continue }
+    if (!/^https?:$/.test(parsed.protocol)) { rejected.push(`${item} — ${parsed.protocol} is not http`); continue }
+    if (peers.length >= FLEET_MAX) { rejected.push(`${item} — over the ${FLEET_MAX} peer limit`); continue }
+    // Accept either the page or the API; ask for the API either way.
+    if (!parsed.pathname.endsWith('/api/status')) {
+      parsed.pathname = `${parsed.pathname.replace(/\/+$/, '')}/api/status`
+    }
+    peers.push({ label, url: parsed.toString() })
+  }
+  return { peers, rejected }
+})()
+
+/** Last answer from each peer, keyed by label. Bounded by FLEET_MAX, and each
+ *  entry is the handful of fields the card draws -- never the peer's whole
+ *  document, which is 30KB of history and standings this node has no use for. */
+const fleet = new Map()
+
+/** Everything the card needs out of a peer's status document, and nothing else.
+ *  Written as an explicit projection so a peer running a newer or older build
+ *  cannot push unexpected shape into this node's payload. */
+function fleetSummary(doc) {
+  const d = doc?.derived ?? {}
+  const p = doc?.peers ?? {}
+  return {
+    status: ['ok', 'degraded', 'down'].includes(doc?.status) ? doc.status : 'unknown',
+    problems: Array.isArray(doc?.problems) ? doc.problems.slice(0, 4) : [],
+    version: doc?.build?.version,
+    commit: doc?.build?.commit,
+    chainBlock: doc?.chain?.currentBlock,
+    // Blocks won, on the two windows worth comparing between machines.
+    blocks24h: d.blocksByWindow?.day24h,
+    blocksTotal: p.self?.blocks,
+    sharePercent: p.self?.sharePercent,
+    rank: p.self?.rank,
+    producers: p.producers,
+    scannedBlocks: p.scannedBlocks,
+    address: p.self?.address,
+    // A fleet card that showed everything green while one node was paging
+    // somebody would be worse than no fleet card.
+    alertsFiring: Array.isArray(doc?.alerts?.active) ? doc.alerts.active.length : undefined,
+    alerterRunning: doc?.alerts?.installed ? Boolean(doc.alerts.running) : undefined,
+    uptimeSeconds: doc?.node?.runSeconds,
+    cliVersion: doc?.node?.cliVersion,
+  }
+}
+
+async function pollFleet() {
+  if (!FLEET.peers.length) return
+  await Promise.all(FLEET.peers.map(async ({ label, url }) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FLEET_TIMEOUT_MS)
+    const started = Date.now()
+    try {
+      const res = await fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const doc = await res.json()
+      fleet.set(label, {
+        label,
+        ok: true,
+        ...fleetSummary(doc),
+        latencyMs: Date.now() - started,
+        polledAt: new Date().toISOString(),
+      })
+    } catch (error) {
+      // A peer that is down is the thing this card exists to show, so it is a
+      // row rather than an omission -- and the last good reading is kept beside
+      // the error, because "unreachable, was at 11% an hour ago" says more than
+      // "unreachable".
+      const previous = fleet.get(label)
+      fleet.set(label, {
+        ...(previous ?? {}),
+        label,
+        ok: false,
+        error: error.name === 'AbortError' ? 'timeout' : error.message?.slice(0, 120),
+        lastSeenAt: previous?.ok ? previous.polledAt : previous?.lastSeenAt,
+        polledAt: new Date().toISOString(),
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }))
+}
+
+/** This node in the same shape as its peers, so the card draws one table and
+ *  not two. Built from the snapshot's own inputs rather than by fetching
+ *  ourselves, which would be a request to answer a question we already know. */
+function fleetView(board) {
+  if (!FLEET.peers.length && !FLEET.rejected.length) return undefined
+
+  const self = {
+    label: envStr('DASH_FLEET_SELF', os.hostname()),
+    ok: true,
+    isSelf: true,
+    status: overall().status,
+    version: BUILD_STAMP.version ?? DASH_VERSION,
+    chainBlock: state.chain?.currentBlock,
+    blocksTotal: board?.self?.blocks,
+    sharePercent: board?.self?.sharePercent,
+    rank: board?.self?.rank,
+    producers: board?.producers,
+    scannedBlocks: board?.scannedBlocks,
+    address: board?.self?.address,
+    alertsFiring: state.alerts?.active?.length,
+    alerterRunning: state.alerts?.installed ? Boolean(state.alerts.running) : undefined,
+    cliVersion: state.node?.cliVersion,
+  }
+
+  const nodes = [self, ...FLEET.peers.map(({ label }) => fleet.get(label) ?? { label, ok: false, error: 'not polled yet' })]
+
+  // Combined production, over the nodes that could actually be read. Stated
+  // with a count of how many contributed, because a total that silently drops
+  // an unreachable machine reads as that machine having produced nothing.
+  const counted = nodes.filter((n) => Number.isFinite(n.blocksTotal))
+  const combinedBlocks = counted.reduce((a, n) => a + n.blocksTotal, 0)
+
+  return {
+    nodes,
+    reachable: nodes.filter((n) => n.ok).length,
+    total: nodes.length,
+    combinedBlocks: counted.length ? combinedBlocks : undefined,
+    combinedFrom: counted.length,
+    // Shares are only additive when every node read the same blocks. They do
+    // not here -- each scans its own window -- so the combined share is offered
+    // only when the windows match, and withheld rather than approximated.
+    combinedSharePercent: (() => {
+      const scans = new Set(counted.map((n) => n.scannedBlocks))
+      if (counted.length < 2 || scans.size !== 1) return undefined
+      const shares = counted.reduce((a, n) => a + (n.sharePercent ?? 0), 0)
+      return Number(shares.toFixed(2))
+    })(),
+    rejected: FLEET.rejected,
+    pollSeconds: Math.round(FLEET_POLL_MS / 1000),
   }
 }
 
@@ -846,6 +2170,28 @@ async function pollSystem() {
     // natively there and supplies the real figures — same division of labour as
     // the throttle reading on the Pi, for the same reason.
     const hostMetrics = state.node?.host
+
+    // Configured platform, which this process knows even when the collector has
+    // told it nothing. Without consulting it, a Windows dashboard that has lost
+    // its snapshot silently presents the container's own /proc as the host --
+    // the Docker VM's 7.6 GB and its container-id hostname, under a Raspberry Pi
+    // heading, on a 16 GB Windows laptop. Every figure looks like a measurement
+    // and every one of them describes the wrong machine.
+    if (HOST_PLATFORM === 'windows' && !hostMetrics) {
+      state.system = {
+        ok: true,
+        platform: 'windows',
+        // Withheld, not guessed. These are the container's numbers and they are
+        // not about the machine anyone is asking about.
+        hostUnavailable: true,
+        hostUnavailableReason: state.node?.ok === false
+          ? 'the collector is not reporting'
+          : 'the collector has not written host metrics yet',
+        polledAt: new Date().toISOString(),
+      }
+      return
+    }
+
     if (hostMetrics?.platform === 'windows') {
       state.system = {
         ...state.system,
@@ -919,7 +2265,11 @@ function overall() {
     if (osInfo.rebootRequired) problems.push('host reboot required')
     // A zero read off month-old lists is the worst answer this can give, so the
     // staleness is escalated rather than shown quietly beside the count.
-    if (osInfo.aptAgeHours > 168) problems.push(`apt lists ${Math.round(osInfo.aptAgeHours / 24)}d stale — update count is not trustworthy`)
+    // Either name: the Pi's collector says aptAgeHours, the Windows one says
+    // updatesAgeHours. The figure means the same thing -- how old the scan
+    // behind the count is -- and the escalation is the same either way.
+    const scanAge = osInfo.updatesAgeHours ?? osInfo.aptAgeHours
+    if (scanAge > 168) problems.push(`update scan ${Math.round(scanAge / 24)}d stale — update count is not trustworthy`)
   }
 
   const critical = !state.health.ok
@@ -931,7 +2281,7 @@ function overall() {
 /** Figures worth showing that are not a reading of anything — each is a
  *  relationship between two readings the page would otherwise make the reader
  *  work out by eye. */
-function derived() {
+function derived(board = peerBoard()) {
   const observedSeconds = history.height.length > 1
     ? Math.round((history.height.at(-1).t - history.height[0].t) / 1000) : 0
   const chainRate = perHour('height')
@@ -957,6 +2307,306 @@ function derived() {
       ? Number(((nodeRate / chainRate) * 100).toFixed(3)) : undefined,
     observedSeconds,
     samples: history.height.length,
+
+    // Blocks this node produced, split by window. A single cumulative count
+    // cannot distinguish a node that earned steadily from one that earned it all
+    // yesterday and has done nothing since.
+    //
+    // Each window comes from the source that can answer it honestly. The hour is
+    // the recent-blocks ring, which is chain truth but only reaches back as far
+    // as it reaches — so the span it actually covers is reported beside it and
+    // the number is withheld until it covers most of an hour. Today and the week
+    // come from the day buckets, which are the same blocks the standings count.
+    blocksByWindow: (() => {
+      const ring = (production.recent ?? []).filter((b) => Number.isFinite(b.t))
+      const hourAgo = Date.now() - 3_600_000
+      const inHour = ring.filter((b) => b.t >= hourAgo)
+      const coverage = ring.length > 1
+        ? Math.round((Date.now() - Math.max(ring[0].t, hourAgo)) / 1000) : 0
+      // A rolling 24 hours, from the trend store rather than the day buckets.
+      //
+      // "Today" is a calendar day and collapses at local midnight: at 00:10 it
+      // reads 2 while the rolling hour beside it reads 12, which looks broken
+      // and is merely two different windows. A producer restart does the same
+      // thing to anything counted in-process. This number does neither — cblocks
+      // is chain-derived and cumulative, sampled every five minutes and kept for
+      // thirty days, so it survives a restart of the producer, the dashboard, or
+      // both, and it never resets at a wall-clock boundary.
+      const day = (() => {
+        if (trend.length < 2) return {}
+        const cutoff = Date.now() - 86_400_000
+        const withC = trend.filter((r) => Number.isFinite(r.cblocks))
+        if (withC.length < 2) return {}
+        // The oldest sample still inside the window, or the oldest we have.
+        const first = withC.find((r) => r.t >= cutoff) ?? withC[0]
+        const last = withC.at(-1)
+        const spanSeconds = Math.round((last.t - first.t) / 1000)
+        const delta = last.cblocks - first.cblocks
+        return {
+          // Negative means the underlying counter was reset — peers.json lost or
+          // rebuilt — and a negative block count is nonsense, so say nothing.
+          day24h: delta >= 0 ? delta : undefined,
+          day24hSpanSeconds: spanSeconds,
+          // Below about twenty hours this is a partial window wearing a
+          // twenty-four hour label, so the page says how much it actually covers.
+          day24hComplete: spanSeconds >= 72_000,
+        }
+      })()
+
+      return {
+        // Withheld rather than understated: a ring covering twenty minutes would
+        // report a third of the hour's blocks as if it were the hour's total.
+        hour: coverage >= 3000 ? inHour.filter((b) => b.mine).length : undefined,
+        hourCoverageSeconds: coverage,
+        today: board.windows?.today?.self?.blocks ?? 0,
+        week: board.windows?.week?.self?.blocks ?? 0,
+        total: board.self?.blocks,
+        ...day,
+      }
+    })(),
+
+    // Age of the newest block seen, from the block's own $epoch. The chain
+    // height alone cannot say whether the chain is moving — a stalled chain and
+    // a healthy one show the same number until you watch it for a while.
+    headAgeSeconds: (() => {
+      const last = (production.recent ?? []).filter((b) => Number.isFinite(b.t)).at(-1)
+      return last ? Math.max(0, Math.round((Date.now() - last.t) / 1000)) : undefined
+    })(),
+
+    // When the reward balance last moved, and by how much. The balance says how
+    // much has been earned; this says whether it is still being earned, which a
+    // cumulative figure can never show — a node that stopped an hour ago reads
+    // identically to one still winning.
+    ...(() => {
+      const r = history.reward ?? []
+      for (let i = r.length - 1; i > 0; i--) {
+        const delta = Number(r[i].v) - Number(r[i - 1].v)
+        if (Number.isFinite(delta) && delta > 0) {
+          return {
+            lastPayoutSeconds: Math.max(0, Math.round((Date.now() - r[i].t) / 1000)),
+            lastPayoutXl1: Number(delta.toFixed(4)),
+          }
+        }
+      }
+      return {}
+    })(),
+
+    // Operator summaries, all of them arithmetic over data already in this
+    // payload. No new request, no new telemetry, no work in the producer.
+    operations: (() => {
+      const race = state.node?.race
+      const lat = state.node?.latency
+      const ring = production.recent ?? []
+
+      // -- efficiency score ------------------------------------------------
+      //
+      // Transparent by construction: every component is published beside the
+      // total, and the total is the mean of whichever components could be
+      // computed. A score whose parts are hidden is a vanity number, and a
+      // score that silently treats a missing part as zero is worse than none.
+      //
+      // Thresholds are stated here rather than tuned to flatter this node:
+      //  - latency: the producer's own produceBlock budget is 1000ms. A cycle
+      //    at or under half the budget is full marks; at twice the budget, zero.
+      //  - race health: the share of builds that were NOT rejected locally.
+      //  - win rate: measured against an even split of the chain, not against
+      //    100% — with seven producers, parity is 1/7 and that is what 100 means.
+      //  - reliability: restarts and errors seen in the collector's window.
+      const clamp = (n) => Math.max(0, Math.min(100, Math.round(n)))
+      const components = []
+
+      if (Number.isFinite(lat?.cycleP50Ms)) {
+        components.push(['Latency', clamp(100 * (2000 - lat.cycleP50Ms) / 1500), `cycle p50 ${lat.cycleP50Ms}ms vs a 1000ms budget`])
+      }
+      if (Number.isFinite(race?.built) && race.built > 0) {
+        const lost = Object.values(race.lost ?? {}).reduce((a, b) => a + b, 0)
+        components.push(['Race health', clamp(100 * (1 - lost / race.built)), `${lost} of ${race.built} builds rejected locally`])
+      }
+      const producers = board.producers || 0
+      const ourShare = board.self?.sharePercent
+      if (producers > 0 && Number.isFinite(ourShare)) {
+        const fair = 100 / producers
+        components.push(['Win rate', clamp(100 * (ourShare / fair)), `${ourShare}% of the chain against a ${fair.toFixed(1)}% even split`])
+      }
+      const restarts = Number(state.node?.container?.restartCount)
+      if (Number.isFinite(restarts)) {
+        components.push(['Reliability', clamp(100 - restarts * 10), restarts === 0 ? 'no container restarts' : `${restarts} container restart(s)`])
+      }
+
+      const score = components.length > 0
+        ? Math.round(components.reduce((a, [, v]) => a + v, 0) / components.length)
+        : undefined
+
+      // -- streaks, from the persisted ring --------------------------------
+      const sinceWin = (() => {
+        for (let i = ring.length - 1, gap = 0; i >= 0; i--, gap++) if (ring[i].mine) return gap
+        return undefined   // no win inside the ring at all — not "zero"
+      })()
+      let longestGap
+      if (ring.some((b) => b.mine)) {
+        let run = 0
+        longestGap = 0
+        for (const b of ring) {
+          if (b.mine) { longestGap = Math.max(longestGap, run); run = 0 } else run++
+        }
+        longestGap = Math.max(longestGap, run)
+      }
+
+      // -- network competition ---------------------------------------------
+      const shares = (board.top ?? []).map((r) => r.sharePercent).filter(Number.isFinite).sort((a, b) => b - a)
+      const median = shares.length > 0 ? shares[Math.floor(shares.length / 2)] : undefined
+      const competition = shares.length > 0 ? {
+        producers,
+        leaderShare: shares[0],
+        topThreeShare: Number(shares.slice(0, 3).reduce((a, b) => a + b, 0).toFixed(2)),
+        ourShare,
+        medianShare: median,
+        vsMedian: Number.isFinite(ourShare) && Number.isFinite(median)
+          ? Number((ourShare - median).toFixed(2)) : undefined,
+        vsLeader: Number.isFinite(ourShare) ? Number((ourShare - shares[0]).toFixed(2)) : undefined,
+      } : undefined
+
+      // -- bottleneck: one statement, derived, never guessed ----------------
+      const bottleneck = (() => {
+        const lost = race?.lost ?? {}
+        const lostTotal = Object.values(lost).reduce((a, b) => a + b, 0)
+        if (lostTotal >= 5) {
+          const pct = (n) => Math.round((n / lostTotal) * 100)
+          if (pct(lost.txAlreadyFinalized ?? 0) >= 50) {
+            return { key: 'mempool', text: `Stale mempool data caused ${pct(lost.txAlreadyFinalized)}% of rejected candidates.` }
+          }
+          if (pct(lost.behindFinalizedHead ?? 0) >= 50) {
+            return { key: 'competition', text: `Head advanced first on ${pct(lost.behindFinalizedHead)}% of rejections — we are being outrun, not failing.` }
+          }
+        }
+        if (Number.isFinite(lat?.localMs) && Number.isFinite(lat?.wireFloorMs) && lat.localMs > lat.wireFloorMs) {
+          return { key: 'local', text: `Local work dominates: ${lat.localMs}ms of a ${lat.typicalMs}ms head fetch is this machine, not the network.` }
+        }
+        // A cycle over budget only matters if it is costing something, and the
+        // producer publishes exactly that: a check skipped because the previous
+        // one was still running, or a publish the chain refused. With both at
+        // zero this is a characteristic of the hardware, not a fault — the
+        // producer's own log agrees, warning only at 10x. Saying "bottleneck"
+        // in amber over a node sitting 3rd of 7 trains an operator to ignore
+        // the card, which costs more than the milliseconds do.
+        //
+        // p95 also mixes two populations: ~88% of checks are idle at a few
+        // hundred ms, and the tail is producing cycles, which are inherently
+        // longer. That is stated rather than smoothed away.
+        if (Number.isFinite(lat?.cycleP95Ms) && lat.cycleP95Ms > 2000) {
+          const skipped = Number(state.node?.latency?.skippedChecks)
+          const rejected = Number(state.node?.latency?.rejectedPublishes)
+          const strained = (Number.isFinite(skipped) && skipped > 0) || (Number.isFinite(rejected) && rejected > 0)
+          return strained
+            ? {
+              key: 'cycle',
+              text: `Cycle p95 is ${lat.cycleP95Ms}ms against a 1000ms budget, and it is costing work: `
+                + `${skipped || 0} check(s) skipped, ${rejected || 0} publish(es) rejected.`,
+            }
+            : {
+              key: 'none',
+              text: `Cycle p95 is ${lat.cycleP95Ms}ms against a 1000ms budget — the producing tail, not the typical `
+                + `cycle. No check skipped and no publish rejected, so it is costing nothing measurable.`,
+            }
+        }
+        if (!race && !lat) return { key: 'unknown', text: 'Insufficient data.' }
+        return { key: 'none', text: 'No local performance constraint detected.' }
+      })()
+
+      return {
+        score,
+        components: components.map(([label, value, why]) => ({ label, value, why })),
+        sinceWin,
+        longestGap,
+        ringBlocks: ring.length || undefined,
+        competition,
+        bottleneck,
+        // Stage timings are p50s of separate, NESTED distributions — cycle
+        // contains headFetch and blockProduction, and blockProduction contains
+        // the mempool calls. They deliberately are not rendered as a waterfall
+        // summing to 100%, because they do not sum and saying they do would
+        // invent a decomposition the instrumentation cannot support.
+        stages: lat?.stages ?? state.node?.latency?.stages,
+      }
+    })(),
+
+    // The candidate race: why blocks are being lost, and how often.
+    //
+    // Deliberately mixed-source, and the sources are not interchangeable.
+    // Losses and retries come from the producer's log, which is the only place
+    // that says WHY a candidate died. Wins come from the chain scan, because a
+    // log line saying "Published block" means submitted, not accepted — the
+    // distinction this repo already got wrong once, when a dashboard reported
+    // zero blocks for a node producing several every ten minutes.
+    //
+    // The two windows differ and are reported separately rather than blended:
+    // the log window is whatever the collector totalled, the chain window is
+    // however far the recent-blocks ring reaches back.
+    race: (() => {
+      const r = state.node?.race
+      const lost = r?.lost ?? {}
+      const reasons = [
+        ['behindFinalizedHead', 'head advanced first', lost.behindFinalizedHead],
+        ['txAlreadyFinalized', 'tx already finalized', lost.txAlreadyFinalized],
+        ['blockNumberMismatch', 'built on another head', lost.blockNumberMismatch],
+      ].filter(([, , n]) => Number.isFinite(n))
+      const lostTotal = reasons.reduce((a, [, , n]) => a + n, 0)
+
+      // Wins over the ring, which is chain truth. Reported with the span it
+      // covers so it is never mistaken for the log window's hour.
+      const ring = production.recent ?? []
+      const timed = ring.filter((b) => Number.isFinite(b.t))
+      const chainWindowSeconds = timed.length > 1
+        ? Math.round((timed.at(-1).t - timed[0].t) / 1000) : undefined
+
+      if (!r && ring.length === 0) return undefined
+      return {
+        windowSeconds: r?.windowSeconds,
+        observedSeconds: r?.observedSeconds,
+        built: r?.built,
+        retries: r?.retries,
+        lostTotal: reasons.length > 0 ? lostTotal : undefined,
+        // Share of losses, not of builds: this answers "when we lose, why",
+        // which is the question. Omitted entirely rather than shown as 0% each
+        // when nothing has been lost yet.
+        reasons: lostTotal > 0
+          ? reasons
+            .map(([key, label, n]) => ({ key, label, count: n, percent: Math.round((n / lostTotal) * 100) }))
+            .sort((a, b) => b.count - a.count)
+          : [],
+        won: ring.length > 0 ? ring.filter((b) => b.mine).length : undefined,
+        chainBlocks: ring.length || undefined,
+        chainWindowSeconds,
+        // The strip itself: chain order, oldest first, one entry per block.
+        pulse: ring.map((b) => (b.mine ? 1 : 0)),
+      }
+    })(),
+
+    // Latency, split into the two things an operator is actually guessing
+    // between. headFetch runs on every check, so its min is the wire floor to
+    // the gateway and its p50 includes the local work of parsing and validating
+    // the answer. Their difference is this box's own contribution — the number
+    // that says "the network is slow" or "this machine is slow" rather than
+    // leaving both on the table.
+    //
+    // Measured by the producer itself and read off its health port, so nothing
+    // here costs a chain request.
+    latency: (() => {
+      const l = state.node?.latency
+      if (!l || l.headFetchP50Ms === undefined) return undefined
+      const wire = l.headFetchMinMs
+      const typical = l.headFetchP50Ms
+      return {
+        wireFloorMs: wire,
+        typicalMs: typical,
+        p95Ms: l.headFetchP95Ms,
+        localMs: (typeof wire === 'number' && typeof typical === 'number')
+          ? Math.round(typical - wire) : undefined,
+        cycleP50Ms: l.cycleP50Ms,
+        cycleP95Ms: l.cycleP95Ms,
+        samples: l.samples,
+      }
+    })(),
     rewardEqualsProducer: Boolean(b?.reward && b?.producer && b.reward.address === b.producer.address),
 
     // The last block this node actually landed, and how far the chain has moved
@@ -991,13 +2641,235 @@ const snapshot = () => ({
   ...overall(),
   generatedAt: new Date().toISOString(),
   dashboardStartedAt: state.startedAt,
+  // Which build of this dashboard is answering. The image tag is the same
+  // string before and after every deploy, so without this a redeploy can only
+  // be confirmed by watching some number change and hoping it was ours.
+  // Read from the environment the image baked in — no filesystem, no cost.
+  build: (() => {
+    const commit = BUILD_STAMP.commit ?? envStr('DASH_COMMIT', 'unknown')
+    // Where this build's source lives. Configurable because the same file runs
+    // two dashboards from two repositories, and the footer had the Pi's URL
+    // hardcoded — so the Windows page has been pointing at the wrong source.
+    const source = envStr('DASH_SOURCE_URL', 'https://github.com/LewSales/xl1-block-producer-pi')
+      .replace(/\/+$/, '')
+    // A dirty build is not on GitHub. Linking its hash would land on a 404, and
+    // an invitation to "verify the code" that 404s is worse than no link — so
+    // the commit link only exists when the tree it was built from was clean.
+    const clean = commit !== 'unknown' && !commit.endsWith('-dirty')
+    return {
+      version: BUILD_STAMP.version ?? DASH_VERSION,
+      commit,
+      builtAt: BUILD_STAMP.builtAt ?? envStr('DASH_BUILT_AT', 'unknown'),
+      source,
+      commitUrl: clean ? `${source}/commit/${commit}` : undefined,
+      // Who wrote each half. Configurable rather than hardcoded so a fork does
+      // not end up crediting someone else's brand for its own dashboard.
+      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
+      upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
+    }
+  })(),
   ...state,
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
-  derived: derived(),
-  peers: peerBoard(),
-  history,
+  // One board per response. It was being rebuilt three times -- once in the
+  // payload and twice inside derived() -- over the same tally, for three
+  // identical answers.
+  ...(() => {
+    const board = peerBoard()
+    return { derived: derived(board), peers: board, network: networkView(board), fleet: fleetView(board), price: priceView(), continuity: continuity() }
+  })(),
+  // Values only. The browser reads `.v` and has never read `.t`, and at 240
+  // points across four series the timestamps were three quarters of the whole
+  // response -- resent every five seconds to draw sparklines that plot by
+  // index. perHour() still reads the timestamped ring; this is the wire format,
+  // not the store.
+  history: Object.fromEntries(Object.entries(history).map(([k, v]) => [k, v.map((p) => p.v)])),
   trend: { daily: trendDaily(), points: trend.length, retainDays: TREND_RETAIN_DAYS, error: trendError },
 })
+
+
+// -------------------------------------------------------------- public view
+//
+// The subset of this page that is safe to put on the open internet, served at
+// /api/public for a publisher to copy somewhere else. Nothing computes here --
+// it is a projection of numbers the page already holds.
+//
+// An ALLOW-LIST, and deliberately not a deny-list. A field added to the payload
+// next month must be invisible here until somebody chooses to publish it; the
+// opposite default publishes it because nobody remembered to exclude it, and
+// that mistake is only discovered by the person who finds it.
+//
+// The split turns out to be clean, because almost everything interesting on
+// this page is already public: the reward address, the balance, who produced
+// which block and every producer's share are all readable from the explorer by
+// anyone who cares. What must not leave is the machine -- its hostname, its RAM
+// and disk, its container image and uptime, the raw producer log, the health
+// endpoint, the alerter's channels, and the labels and URLs of other nodes.
+// None of that is catastrophic on its own; together it is a fingerprint of a
+// specific computer in a specific house, offered to strangers for nothing.
+//
+// `problems` is withheld for a subtler reason: the status is a word this file
+// controls, but the problem STRINGS are assembled from error messages, and an
+// error message is exactly where a filesystem path or a hostname arrives
+// without anyone deciding it should.
+const PUBLIC_LABEL = envStr('DASH_PUBLIC_LABEL', '')
+
+function publicView(board) {
+  const dv = derived(board)
+  const nw = networkView(board)
+  const b = state.chain?.balances
+  const bw = dv.blocksByWindow ?? {}
+
+  return {
+    // Bumped when the shape changes, so a page built against an older payload
+    // can say "this is newer than I understand" instead of drawing nothing.
+    schema: 1,
+    label: PUBLIC_LABEL || undefined,
+    generatedAt: new Date().toISOString(),
+
+    // A word, never the sentences behind it.
+    status: overall().status,
+    problemCount: overall().problems.length,
+
+    chain: state.chain?.ok ? {
+      network: NETWORK,
+      networkName: state.chain.networkName,
+      chainId: state.chain.chainId,
+      currentBlock: state.chain.currentBlock,
+      finalizedBlock: state.chain.finalizedBlock,
+      finalizationLag: state.chain.finalizationLag,
+      explorerUrl: state.chain.explorerUrl,
+    } : { ok: false },
+
+    // This node, in the terms the chain already describes it.
+    producer: {
+      address: board?.self?.address,
+      url: board?.self?.url,
+      rank: board?.self?.rank,
+      producers: board?.producers,
+      sharePercent: board?.self?.sharePercent,
+      blocks: {
+        total: board?.self?.blocks,
+        today: bw.today,
+        week: bw.week,
+        day24h: bw.day24h,
+        day24hComplete: bw.day24hComplete,
+      },
+      lastBlock: dv.lastBlock,
+      lastBlockUrl: dv.lastBlockUrl,
+      blocksSinceLast: dv.blocksSinceLast,
+      rewardXl1: b?.reward?.xl1,
+      rewardAddressUrl: b?.reward?.url,
+    },
+
+    // The chain-level figures, which are the reason to publish anything at all:
+    // they are about XL1 rather than about this machine, and nobody else is
+    // measuring them.
+    network: {
+      observed: nw?.observed,
+      concentration: nw?.concentration,
+      blockTime: nw?.blockTime,
+      // Addresses and counts only. Operator-chosen labels are included because
+      // they are names for public addresses, but no window internals and no
+      // per-node detail beyond what the explorer already shows.
+      standings: (board?.top ?? []).map((r) => ({
+        address: r.address,
+        label: r.label,
+        blocks: r.blocks,
+        sharePercent: r.sharePercent,
+        rank: r.rank,
+        isSelf: r.isSelf,
+        url: r.url,
+      })),
+      multiSigner: board?.multiSigner,
+    },
+
+    // How the node competes. Counters the producer keeps about its own work --
+    // nothing here describes the machine, only what it did on a public chain,
+    // and "we are being outrun rather than failing" is the single most useful
+    // thing this whole dashboard learned.
+    race: state.node?.race ? {
+      windowSeconds: state.node.race.windowSeconds,
+      built: state.node.race.built,
+      retries: state.node.race.retries,
+      lost: state.node.race.lost,
+    } : undefined,
+
+    // The 0-100 summary and what drives it. Arithmetic over figures already
+    // published above, so it reveals nothing new -- it just saves the reader
+    // doing it.
+    operations: dv.operations ? {
+      score: dv.operations.score,
+      components: dv.operations.components,
+      bottleneck: dv.operations.bottleneck,
+    } : undefined,
+
+    // Timings the producer measured on itself. Included because the interesting
+    // claim on this page -- that the network is not the constraint -- is only
+    // checkable if the numbers behind it are visible.
+    latency: state.node?.latency ? {
+      headFetchMinMs: state.node.latency.headFetchMinMs,
+      headFetchP50Ms: state.node.latency.headFetchP50Ms,
+      headFetchP95Ms: state.node.latency.headFetchP95Ms,
+      cycleP50Ms: state.node.latency.cycleP50Ms,
+      cycleP95Ms: state.node.latency.cycleP95Ms,
+      stages: state.node.latency.stages,
+      samples: state.node.latency.samples,
+    } : undefined,
+
+    // Daily production and earnings, from the chain scan. The same rows the
+    // Trends card draws.
+    trend: { daily: trendDaily(), retainDays: TREND_RETAIN_DAYS },
+
+    // Hour by hour, was it producing. Chain-derived and the honest answer to
+    // "has this thing actually been working".
+    continuity: (() => {
+      const c = continuity()
+      if (!c) return undefined
+      // The per-hour array is the useful part; the rest is summary. Capped so a
+      // long window cannot bloat a file served to strangers.
+      return { ...c, hours: c.hours.slice(-168) }
+    })(),
+
+    // Who is gaining and who has gone quiet, over the same day buckets as the
+    // standings.
+    movement: nw?.drift && nw?.churn ? {
+      comparable: nw.drift.comparable,
+      rows: nw.drift.rows.slice(0, 12),
+      seenToday: nw.churn.seenToday,
+      seenThisWeek: nw.churn.seenThisWeek,
+      arrived: nw.churn.arrived,
+      quiet: nw.churn.quiet,
+      quietAfterDays: nw.churn.quietAfterDays,
+    } : undefined,
+
+    // What it is worth, and the reason that is usually nothing.
+    price: (() => {
+      const pv = priceView()
+      return {
+        marketNote: pv.marketNote,
+        currency: pv.currency,
+        value: pv.value,
+        change24h: pv.change24h,
+        id: pv.id,
+        notional: pv.notional,
+        hypothetical: pv.hypothetical,
+      }
+    })(),
+
+    // Which build produced this, so a stale page is identifiable as one.
+    build: {
+      version: BUILD_STAMP.version ?? DASH_VERSION,
+      commit: BUILD_STAMP.commit ?? envStr('DASH_COMMIT', 'unknown'),
+      source: envStr('DASH_SOURCE_URL', '').replace(/\/+$/, '') || undefined,
+      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
+      upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
+    },
+  }
+}
 
 // ---------------------------------------------------------------------- server
 
@@ -1019,6 +2891,16 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  // Public-safe projection, for a publisher to copy to a website. Behind the
+  // same token as everything else: this runs on the producer's own machine, and
+  // the publisher can supply a token as easily as a browser can.
+  if (url.pathname === '/api/public') {
+    const board = peerBoard()
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      .end(JSON.stringify(publicView(board), null, 2))
+    return
+  }
+
   if (url.pathname === '/api/status') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       .end(JSON.stringify(snapshot(), null, 2))
@@ -1037,7 +2919,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { formatXl1, versionLag, decodeThrottle, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, peers, production }
+export { nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -1059,7 +2941,7 @@ if (isMain) {
   // from a fresh window instead would re-count every block in the overlap.
   await loadPeers()
   if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
-  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease()])
+  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet(), pollPrice()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
 
   // Each poller catches internally, but a rejection escaping one of them would
@@ -1071,11 +2953,25 @@ if (isMain) {
   // enough time has passed, so the cadence lives in one place.
   setInterval(guard(persistTrend, 'persistTrend'), 60_000).unref()
   setInterval(guard(persistPeers, 'persistPeers'), 60_000).unref()
-  setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')() }, LOCAL_POLL_MS).unref()
-  setInterval(guard(pollRelease, 'pollRelease'), CLI_CHECK_MS).unref()
+  setInterval(() => { guard(pollHealth, 'pollHealth')(); guard(pollNode, 'pollNode')(); guard(pollSystem, 'pollSystem')(); guard(pollAlerts, 'pollAlerts')() }, LOCAL_POLL_MS).unref()
+  // Self-rescheduling rather than a fixed interval, so the delay can depend on
+  // whether the last attempt actually worked.
+  let releaseWait = state.release?.ok ? CLI_CHECK_MS : CLI_RETRY_MS
+  const scheduleRelease = () => {
+    setTimeout(async () => {
+      try { await pollRelease() } catch (error) { console.error('xl1-dashboard: pollRelease failed —', error) }
+      releaseWait = nextReleaseDelay(state.release?.ok, releaseWait)
+      scheduleRelease()
+    }, releaseWait).unref()
+  }
+  scheduleRelease()
+  if (PRICE_ID) setInterval(guard(pollPrice, 'pollPrice'), PRICE_POLL_MS).unref()
+  if (FLEET.peers.length) setInterval(guard(pollFleet, 'pollFleet'), FLEET_POLL_MS).unref()
 
   server.listen(PORT, BIND, () => {
-    console.log(`xl1-dashboard listening on http://${BIND}:${PORT} (network=${NETWORK}${TOKEN ? ', token required' : ''})`)
+    const fleetNote = FLEET.peers.length ? `, fleet of ${FLEET.peers.length + 1}` : ''
+    console.log(`xl1-dashboard listening on http://${BIND}:${PORT} (network=${NETWORK}${TOKEN ? ', token required' : ''}${fleetNote})`)
+    for (const r of FLEET.rejected) console.warn(`xl1-dashboard: fleet entry ignored — ${r}`)
   })
 
   for (const sig of ['SIGTERM', 'SIGINT']) {

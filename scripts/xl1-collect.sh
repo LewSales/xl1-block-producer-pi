@@ -33,6 +33,9 @@ CLI_CHECK_INTERVAL="${XL1_CLI_CHECK_INTERVAL:-21600}"   # 6h
 OS_UPDATE_INTERVAL="${XL1_OS_UPDATE_INTERVAL:-21600}"   # 6h when nothing pending
 OS_PENDING_INTERVAL="${XL1_OS_PENDING_INTERVAL:-900}"   # 15m while something is
 CLI_CACHE="${STATE_DIR}/.cli-version"
+HEALTH_PORT="${XL1_HEALTH_CHECK_PORT:-9099}"
+RACE_WINDOW="${XL1_RACE_WINDOW:-3600}"          # 1h of candidate-race history
+RACE_STATE="${STATE_DIR}/.race-buckets"
 OS_CACHE="${STATE_DIR}/.os-updates"
 
 mkdir -p "${STATE_DIR}"
@@ -63,10 +66,10 @@ cache_age() {
 # told to `rm` a specific dotfile — and until they are, a short read leaves a
 # field empty, the emitted JSON fails validation, and the previous snapshot is
 # served unchanged for up to six hours while the page looks perfectly alive.
-CACHE_SCHEMA=4
+CACHE_SCHEMA=5
 SCHEMA_STAMP="${STATE_DIR}/.cache-schema"
 if [[ "$(cat "${SCHEMA_STAMP}" 2>/dev/null || echo 0)" != "${CACHE_SCHEMA}" ]]; then
-  rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}" "${STATE_DIR}/.last-published"
+  rm -f "${CLI_CACHE}" "${OS_CACHE}" "${ELIG_CACHE}" "${STATE_DIR}/.last-published" "${STATE_DIR}/.run-builds"
   printf '%s' "${CACHE_SCHEMA}" > "${SCHEMA_STAMP}"
   echo "xl1-collect: cache schema changed — derived values will be re-read" >&2
 fi
@@ -98,9 +101,11 @@ read -r STATE RUNNING STARTED RESTARTS IMAGE HEALTH IMAGE_ID <<< "${INSPECT}"
 }
 
 UPTIME="unknown"
+RUN_SECONDS=""
 if [[ "${RUNNING}" == "true" && -n "${STARTED}" ]]; then
   if START_EPOCH=$(date -d "${STARTED}" +%s 2>/dev/null); then
     SECS=$(( $(date +%s) - START_EPOCH ))
+    RUN_SECONDS="${SECS}"
     D=$((SECS/86400)); H=$((SECS%86400/3600)); M=$((SECS%3600/60))
     if   (( D > 0 )); then UPTIME="${D}d ${H}h"
     elif (( H > 0 )); then UPTIME="${H}h ${M}m"
@@ -110,13 +115,22 @@ fi
 
 # Read only the log slice since the previous run, so the cost stays flat as the
 # container's log grows, and keep a running total across runs.
+#
+# --timestamps here, once, rather than in a second `docker logs` call later
+# purely to stamp the recent-log panel -- that used to cost a second exec on a
+# Pi 3 every single cycle, forever.
 SINCE="$(cat "${CURSOR}" 2>/dev/null || echo "")"
 if [[ -n "${SINCE}" ]]; then
-  NEW_LOG="$(docker logs --since "${SINCE}" "${CONTAINER}" 2>&1 | tail -n 2000)"
+  RAW_NEW_LOG="$(docker logs --timestamps --since "${SINCE}" "${CONTAINER}" 2>&1 | tail -n 2000)"
 else
-  NEW_LOG="$(docker logs --tail 2000 "${CONTAINER}" 2>&1)"
+  RAW_NEW_LOG="$(docker logs --timestamps --tail 2000 "${CONTAINER}" 2>&1)"
 fi
 echo "${COLLECTED_AT}" > "${CURSOR}"
+
+# Everything below only ever matched on the message, not the stamp just added
+# above -- strip it back off once here rather than teaching every pattern a
+# second shape.
+NEW_LOG="$(printf '%s\n' "${RAW_NEW_LOG}" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z //')"
 
 TOTAL="$(cat "${COUNTER}" 2>/dev/null || echo 0)"
 [[ "${TOTAL}" =~ ^[0-9]+$ ]] || TOTAL=0
@@ -146,8 +160,92 @@ fi
 
 ERRORS="$(printf '%s' "${NEW_LOG}" | grep -c -iE '\b(error|fatal|unhandled|exception)\b' || true)"
 
-# Tail for display comes from the full log so the panel is never empty on a quiet cycle.
+# ------------------------------------------------------------ candidate race
 #
+# Why candidates lose, counted from the log slice this run already read. No
+# extra `docker logs` call: NEW_LOG is everything since the last cursor, so the
+# counters accumulate 30 seconds at a time into a rolling window instead of
+# re-reading an hour of log every run.
+#
+# The anchor line matters. `behind-finalized-head` and `block-number-mismatch`
+# are each logged twice — once by the validation viewer and once by the runner —
+# while `tx-already-finalized` is logged once. Counting the bracketed tag would
+# therefore report 52 losses where 26 happened. "No candidate block can be
+# appended" is emitted exactly once per rejected candidate and carries the tag,
+# so it is the only honest thing to count.
+#
+# Wins are deliberately NOT counted here. A log line saying "Published block"
+# means submitted, not accepted, and treating it as success is the mistake this
+# repo already made once. The dashboard takes wins from the chain scan instead.
+race_anchor() { printf '%s' "${NEW_LOG}" | grep -F 'No candidate block can be appended' | grep -cF "[$1]" || true; }
+
+R_BUILT="$(printf '%s' "${NEW_LOG}" | grep -cE 'Building block [0-9]+$' || true)"
+R_RETRY="$(printf '%s' "${NEW_LOG}" | grep -cF '(retry' || true)"
+R_TXFIN="$(race_anchor tx-already-finalized)"
+R_BEHIND="$(race_anchor behind-finalized-head)"
+R_MISMATCH="$(race_anchor block-number-mismatch)"
+
+NOW_EPOCH="$(date -u +%s)"
+printf '%s %s %s %s %s %s\n' "${NOW_EPOCH}" "${R_BUILT:-0}" "${R_RETRY:-0}" "${R_TXFIN:-0}" "${R_BEHIND:-0}" "${R_MISMATCH:-0}" >> "${RACE_STATE}"
+
+# Prune to the window and total it in one pass. Rewritten whole then renamed so
+# a kill mid-write cannot leave a half-line that poisons every later sum.
+RACE_SUM="$(awk -v cutoff="$(( NOW_EPOCH - RACE_WINDOW ))" -v tmp="${RACE_STATE}.tmp" \
+  'NF == 6 && $1 >= cutoff { print > tmp; b += $2; r += $3; t += $4; h += $5; m += $6; if (first == "") first = $1 }
+   END { printf "%d %d %d %d %d %d", b, r, t, h, m, (first == "" ? 0 : first) }' \
+  "${RACE_STATE}" 2>/dev/null || true)"
+[[ -s "${RACE_STATE}.tmp" ]] && mv "${RACE_STATE}.tmp" "${RACE_STATE}" || rm -f "${RACE_STATE}.tmp"
+read -r W_BUILT W_RETRY W_TXFIN W_BEHIND W_MISMATCH W_FIRST <<< "${RACE_SUM:-0 0 0 0 0 0}"
+
+# ------------------------------------------------- did this run ever produce?
+#
+# A producer can start, log "system ready", pass its /livez healthcheck and
+# never build a single block — reported upstream against xl1-docker-images,
+# reproduced across repeated launches of the same image with the same env. It
+# never recovers: /livez only reports process liveness, so the container is
+# never unhealthy, never exits, and no restart policy fires. Every signal an
+# operator has says normal while the node is absent from consensus.
+#
+# Readiness time was the proposed tell — ~671ms on a bad launch against ~7982ms
+# on a good one. It does not hold here: this node reported ready in 1243ms and
+# built sixteen blocks in the same run. So count the thing itself. A build is
+# the first act of actually producing, and zero of them well past startup is
+# the state that cannot be recovered from.
+#
+# Counted per run, not cumulatively, because the question is about *this*
+# launch. On a restart the count is re-derived from container start — cheap,
+# since the log is by definition short at that point — and incremented from the
+# usual slice thereafter, so the steady-state cost stays one grep.
+RUN_STATE="${STATE_DIR}/.run-builds"
+PREV_STARTED=""; BUILDS=0
+[[ -s "${RUN_STATE}" ]] && IFS=$'\t' read -r PREV_STARTED BUILDS < "${RUN_STATE}"
+[[ "${BUILDS}" =~ ^[0-9]+$ ]] || BUILDS=0
+if [[ "${PREV_STARTED}" != "${STARTED}" ]]; then
+  BUILDS="$(docker logs --since "${STARTED}" "${CONTAINER}" 2>&1 | grep -c -i 'building block' || true)"
+else
+  BUILDS=$(( BUILDS + $(printf '%s' "${NEW_LOG}" | grep -c -i 'building block' || true) ))
+fi
+[[ "${BUILDS}" =~ ^[0-9]+$ ]] || BUILDS=0
+printf '%s\t%s\n' "${STARTED}" "${BUILDS}" > "${RUN_STATE}"
+
+# Tail for display comes from a small rolling buffer kept on disk, topped up
+# from RAW_NEW_LOG above -- which already carries every line that has arrived
+# since the last cycle, timestamps included -- rather than a second `docker
+# logs --tail` fetch every cycle. Never empty on a quiet cycle for the same
+# reason it never was before: the buffer keeps the last LOG_LINES regardless of
+# how few are new this time.
+RECENT_BUFFER="${STATE_DIR}/.recent-log"
+COMBINED="$( { [[ -s "${RECENT_BUFFER}" ]] && cat "${RECENT_BUFFER}"; printf '%s\n' "${RAW_NEW_LOG}"; } | grep -v '^$' )"
+COMBINED_COUNT="$(printf '%s\n' "${COMBINED}" | grep -c '^')"
+if (( COMBINED_COUNT < LOG_LINES )); then
+  # Only reachable right after this buffer is first introduced, right after a
+  # state wipe, or after a quiet spell longer than the buffer's own history --
+  # a cold start earns one extra fetch rather than shipping a half-full panel.
+  COMBINED="$(docker logs --timestamps --tail "${LOG_LINES}" "${CONTAINER}" 2>&1 | grep -v '^$')"
+fi
+RECENT_LINES="$(printf '%s\n' "${COMBINED}" | tail -n "${LOG_LINES}")"
+printf '%s\n' "${RECENT_LINES}" > "${RECENT_BUFFER}"
+
 # With timestamps, because every question the panel gets asked is about *when*:
 # did it stop an hour ago or a minute ago, is it still attempting a block a
 # minute, did that error come before the last publish or after it. Without them
@@ -161,7 +259,7 @@ TZ_OFFSET="$(date +%z)"                       # e.g. -0600
 TZ_SECS=$(( 10#${TZ_OFFSET:1:2} * 3600 + 10#${TZ_OFFSET:3:2} * 60 ))
 [[ "${TZ_OFFSET:0:1}" == "-" ]] && TZ_SECS=$(( -TZ_SECS ))
 
-TAIL_LOG="$(docker logs --timestamps --tail "${LOG_LINES}" "${CONTAINER}" 2>&1 |
+TAIL_LOG="$(printf '%s\n' "${RECENT_LINES}" |
   awk -v off="${TZ_SECS}" '
       # Rewrite only lines carrying the fixed-width docker stamp; anything else
       # (a wrapped line, an error from docker itself) passes through intact.
@@ -196,6 +294,15 @@ BLOCKED_REASON=""; BLOCKED_KEY=""
 ELIG_LOG="$(docker logs --since "${ELIGIBILITY_WINDOW}" "${CONTAINER}" 2>&1 | tail -n 4000 | tr '[:upper:]' '[:lower:]')"
 if [[ -n "${ELIG_LOG}" ]]; then
   # needle|reason — the protocol's own phrasing on the left, plain English right.
+  # Every needle here is an authorization or stake gate — a reason the node is
+  # not *allowed* to produce. `behind-finalized-head` was in this list and did
+  # not belong: it is emitted per candidate, by every producer, whenever the
+  # head advances during a build. On a 3 B+ that is the ordinary steady state,
+  # so it pinned "Producer cannot produce" on a node that had produced 179
+  # blocks and paged high priority every six hours forever. Losing a race is not
+  # ineligibility. The condition worth waking someone for is not winning at all,
+  # and xl1-alert.sh measures that directly from the chain as `not-producing`.
+  #
   # needle|key|reason. The key is stable and machine-readable; the reason is
   # prose and may be reworded. Anything classifying these must use the key —
   # whether a complaint matters depends on the network, and that decision is
@@ -216,7 +323,6 @@ no-intent|no-intent|no stake intent declared
 unseasoned-or-understaked|unseasoned|stake too new or too small
 unseasoned|unseasoned|stake not yet seasoned
 insufficient-self-bond|self-bond|self-bond below the minimum
-behind-finalized-head|too-slow|blocks rejected: built too slowly for the chain
 PATTERNS
 fi
   # Only cache a result we actually derived. An empty log means `docker logs`
@@ -335,6 +441,60 @@ if (( OS_UPDATE_INTERVAL > 0 )); then
   fi
 fi
 
+# ---------------------------------------------------------------- latency
+#
+# The producer already measures this. ProducerActor times every stage and the
+# status server hands the whole snapshot over on the health port, so the numbers
+# below cost one request to 127.0.0.1 against in-memory counters — no chain RPC,
+# no work the node was not doing anyway. That matters: a dashboard that pinged
+# the gateway itself would add load to the shared endpoint this node is judged
+# on, to answer a question the node had already answered.
+#
+# headFetch is the honest latency signal. It runs on every single check, and its
+# min is the wire floor to the gateway while its p50 includes the local work of
+# parsing and validating what came back — so the two together separate "the
+# network is slow" from "this box is slow", which is the thing an operator is
+# actually guessing at.
+#
+# --max-time keeps a wedged status server from stalling the whole snapshot; a
+# failed read omits the field rather than reporting a zero that reads as "fast".
+STATZ="$(curl -fsS --max-time 2 "http://127.0.0.1:${HEALTH_PORT}/statz" 2>/dev/null || true)"
+
+# One stage's object out of the compact JSON, then one number out of that. Each
+# stage name occurs once, so the greedy match cannot cross into a neighbour.
+statz_num() {
+  [[ -z "${STATZ}" ]] && return 0
+  printf '%s' "${STATZ}" \
+    | sed -n "s/.*\"$1\":{\([^}]*\)}.*/\1/p" \
+    | sed -n "s/.*\"$2\":\([0-9][0-9.]*\).*/\1/p"
+}
+
+HF_MIN="$(statz_num headFetch minMs)"
+HF_P50="$(statz_num headFetch p50Ms)"
+HF_P95="$(statz_num headFetch p95Ms)"
+HF_N="$(statz_num headFetch count)"
+CYC_P50="$(statz_num productionCycle p50Ms)"
+CYC_P95="$(statz_num productionCycle p95Ms)"
+
+# Where a cycle's time goes. Same STATZ payload already in hand — no second
+# request — pulled out per stage so the dashboard can show the split instead of
+# a single number.
+#
+# These stages do NOT sum to productionCycle, and the dashboard says so rather
+# than quietly normalising. generateTimePayload and the reward diviner's
+# divine() both sit on the producing path and appear in no ProducerTimingNames
+# entry, so the remainder is real work that the producer does not time. Pretending
+# the parts add up would invent precision the instrumentation does not have.
+# Whether the node is actually keeping up, which is what decides if a slow
+# cycle matters. Both live in the same STATZ payload. "counts" has no nested
+# object, so the same extractor reaches them.
+SKIPPED="$(statz_num counts concurrentChecksSkipped)"
+REJECTED="$(statz_num counts rejectedPublishes)"
+BP_P50="$(statz_num blockProduction p50Ms)"
+MPT_P50="$(statz_num mempoolPendingTransactionsFetch p50Ms)"
+MPB_P50="$(statz_num mempoolPendingBlocksFetch p50Ms)"
+SUB_P50="$(statz_num mempoolSubmitBlock p50Ms)"
+
 {
   printf '{'
   printf '"collectedAt":"%s",' "${COLLECTED_AT}"
@@ -342,7 +502,35 @@ fi
     "$(json_escape "${CONTAINER}")" "$(json_escape "${STATE}")" "${RUNNING}" \
     "$(json_escape "${UPTIME}")" "${RESTARTS}" "$(json_escape "${IMAGE}")" "$(json_escape "${HEALTH}")"
   printf '"blocksPublished":%s,' "${TOTAL}"
+  # Every field or none: a partial latency object would leave the page deciding
+  # what a missing percentile means.
+  if [[ "${HF_P50}" =~ ^[0-9.]+$ && "${HF_P95}" =~ ^[0-9.]+$ && "${HF_N}" =~ ^[0-9]+$ ]]; then
+    printf '"latency":{"headFetchMinMs":%s,"headFetchP50Ms":%s,"headFetchP95Ms":%s,"samples":%s' \
+      "${HF_MIN:-null}" "${HF_P50}" "${HF_P95}" "${HF_N}"
+    [[ "${CYC_P50}" =~ ^[0-9.]+$ ]] && printf ',"cycleP50Ms":%s' "${CYC_P50}"
+    [[ "${CYC_P95}" =~ ^[0-9.]+$ ]] && printf ',"cycleP95Ms":%s' "${CYC_P95}"
+    printf ',"stages":{'
+    STAGE_FIRST=1
+    for pair in "headFetch:${HF_P50}" "blockProduction:${BP_P50}" \
+                "mempoolTx:${MPT_P50}" "mempoolBlocks:${MPB_P50}" "submit:${SUB_P50}"; do
+      v="${pair#*:}"; k="${pair%%:*}"
+      [[ "${v}" =~ ^[0-9.]+$ ]] || continue
+      [[ ${STAGE_FIRST} -eq 1 ]] && STAGE_FIRST=0 || printf ','
+      printf '"%s":%s' "${k}" "${v}"
+    done
+    printf '}'
+    [[ "${SKIPPED}" =~ ^[0-9]+$ ]] && printf ',"skippedChecks":%s' "${SKIPPED}"
+    [[ "${REJECTED}" =~ ^[0-9]+$ ]] && printf ',"rejectedPublishes":%s' "${REJECTED}"
+    printf '},'
+  fi
   printf '"errorCount":%s,' "${ERRORS:-0}"
+  printf '"buildsThisRun":%s,' "${BUILDS:-0}"
+  if [[ "${W_BUILT}" =~ ^[0-9]+$ ]]; then
+    printf '"race":{"windowSeconds":%s,"observedSeconds":%s,"built":%s,"retries":%s,"lost":{"txAlreadyFinalized":%s,"behindFinalizedHead":%s,"blockNumberMismatch":%s}},' \
+      "${RACE_WINDOW}" "$(( W_FIRST > 0 ? NOW_EPOCH - W_FIRST : 0 ))" \
+      "${W_BUILT}" "${W_RETRY}" "${W_TXFIN}" "${W_BEHIND}" "${W_MISMATCH}"
+  fi
+  [[ "${RUN_SECONDS}" =~ ^[0-9]+$ ]] && printf '"runSeconds":%s,' "${RUN_SECONDS}"
 
   # Absence is a real answer here and is reported as absence, not as a zero or a
   # false. "We did not look" and "we looked and found nothing" are different

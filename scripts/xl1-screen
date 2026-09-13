@@ -19,7 +19,7 @@ INTERVAL="${XL1_SCREEN_INTERVAL:-5}"
 # Written by xl1-touch. Absent when nothing is driving touch, in which case the
 # panel behaves exactly as it did before touch existed: page 0, forever.
 PAGE_FILE="${XL1_SCREEN_PAGE_FILE:-/run/xl1-screen/page}"
-PAGES=5
+PAGES=6
 PAGE=0
 ONCE=0
 [[ "${1:-}" == "--once" ]] && ONCE=1
@@ -195,6 +195,23 @@ page_chain() {
   line "  ${D}REWARD${R}   ${B}${FG_G}${REW}${R} XL1"
   [[ -n "${RPD}" ]] && line "  ${D}PER DAY${R}  ~${RPD} XL1 ${D}extrapolated${R}"
   line "  ${D}SHARE${R}    ${SHARE:-0}% ${D}of chain blocks${R}"
+  # What that balance is worth, immediately under the balance -- the same place
+  # the web dashboard puts it, and the first thing anyone asks about a number of
+  # tokens. On sequence the honest answer is nothing, and saying "$0.00" instead
+  # would read as a broken feed rather than as the truth about a test token.
+  if [[ -n "${PNOMKT}" ]]; then
+    line "  ${D}WORTH${R}    ${FG_GR}nothing yet — test token, trades nowhere${R}"
+    [[ -n "${PNOT}" ]] && line "  ${D}IF IT DID${R} ${PCUR} ${PNOT} ${D}a scale, not an amount${R}"
+  elif [[ -n "${PNOT}" ]]; then
+    line "  ${D}WORTH${R}    ${B}${FG_G}${PCUR} ${PNOT}${R}"
+  fi
+  if [[ -n "${PVAL}" ]]; then
+    local pc="${FG_GR}" pa=""
+    if [[ -n "${PCHG}" ]]; then
+      case "${PCHG}" in -*) pc="${FG_R}"; pa="▼ ${PCHG#-}%" ;; *) pc="${FG_G}"; pa="▲ ${PCHG}%" ;; esac
+    fi
+    line "  ${D}PRICE${R}    ${PCUR} ${PVAL} ${pc}${pa}${R} ${D}${PID}${R}"
+  fi
   line ""
   if [[ -n "${LASTBLK}" ]]; then
     line "  ${D}LAST${R}     block ${FG_W}#$(group "${LASTBLK}")${R} ${D}·${R} ${SINCEBLK:-?} blocks ago"
@@ -203,6 +220,39 @@ page_chain() {
   fi
   [[ -n "${ELIG}" ]] && line "  ${D}BLOCKED${R}  ${FG_Y}${ELIG:0:$(( W - 12 ))}${R}"
   [[ -n "${PADDR}" ]] && line "  ${D}SIGNS AS${R} ${FG_GR}${PADDR:0:16}…${R}"
+}
+
+# The chain as a whole, rather than this node's place in it -- the standings
+# page already answers that. Everything here was added to the web dashboard and
+# had nowhere to go on the panel.
+page_network() {
+  line "  ${B}NETWORK${R}"
+  rule
+  if [[ -z "${NAKA}" ]]; then
+    line ""
+    line "  ${D}Not enough of the chain observed yet.${R}"
+    line "  ${D}This fills in as blocks are scanned.${R}"
+    return
+  fi
+  # How many producers would have to agree to control the chain. 1 is capture;
+  # anything near half the field is healthy. The number is the whole point of
+  # the page, so it is the only thing on the screen at full brightness.
+  local nc="${FG_G}"
+  [[ "${NAKA}" -le 2 ]] 2>/dev/null && nc="${FG_R}" || { [[ "${NAKA}" -le 3 ]] 2>/dev/null && nc="${FG_Y}"; }
+  line "  ${D}NAKAMOTO${R} ${B}${nc}${NAKA}${R} ${D}of ${NPROD} producers control a majority${R}"
+  line ""
+  line "  ${D}LEADER${R}   ${LEADSH}%   ${D}TOP 3${R} ${TOP3}%   ${D}even would be${R} ${EVENSH}%"
+  [[ -n "${TOP3}" ]] && line "  ${D}         ${R}$(meter "${TOP3%%.*}" $(( W - 14 )) "${FG_Y}")"
+  line ""
+  if [[ -n "${BTMED}" ]]; then
+    line "  ${D}BLOCK${R}    ${B}${FG_W}${BTMED}s${R} ${D}median${R}  ${BTP90}s ${D}p90${R}  ${BTMEAN}s ${D}mean${R}"
+    local sp; sp="$(sparkline "${BTB}" $(( W - 14 )))"
+    [[ -n "${sp}" ]] && line "  ${D}SPREAD${R}   ${FG_C}${sp}${R}"
+    line "  ${D}         ${R}${D}fast${R}$(pad "" $(( W - 24 )))${D}slow${R}"
+    line "  ${D}SAMPLES${R}  ${BTN} ${D}intervals over ${OBSD}d · $(group "${OBSB}") blocks${R}"
+  else
+    line "  ${D}BLOCK${R}    ${D}no interval samples yet${R}"
+  fi
 }
 
 page_system() {
@@ -289,6 +339,10 @@ render() {
   LOGN=0; LASTBLK=""; SINCEBLK=""; SPB=""; BPH=""; SHARE=""; RPD=""; PADDR=""
   ELIG=""; CLIV=""; CLIL=""; OSU=""; OSS=""; DISK=""; LOAD=""; CUPT=""; RESTARTS=""
   HHEIGHT=""; HTEMP=""; PEERN=""; PEERB=""; PEERRANK=""; PEERMAX="1"
+  NAKA=""; LEADSH=""; TOP3=""; EVENSH=""; NPROD=""; BTMED=""; BTP90=""
+  BTMEAN=""; BTN=""; BTB=""; OBSD=""; OBSB=""
+  PVAL=""; PCHG=""; PID=""; PCUR=""; PNOT=""; PNOMKT=""
+  ALINST=""; ALRUN=""; ALFIRE=0; ALDEAD=""
 
   if (( have_jq )) && [[ -n "${json}" ]]; then
     eval "$(printf '%s' "${json}" | jq -r '
@@ -334,14 +388,46 @@ render() {
       @sh "LOAD=\(.system.loadAverage[0] // "")",
       @sh "CUPT=\(.node.container.uptime // "")",
       @sh "RESTARTS=\(.node.container.restartCount // "")",
-      @sh "HHEIGHT=\([.history.height[]?.v] | join(" "))",
-      @sh "HTEMP=\([.history.tempC[]?.v] | join(" "))",
+      # The trend arrays used to be [{t,v},...] and are now plain numbers -- the
+      # payload was slimmed and this line was not. Indexing a number with .v is
+      # a hard error in jq, and a hard error abandons the REST OF THE PROGRAM:
+      # every field below this point came back empty, which silently emptied the
+      # standings page and both sparklines. Accept either shape so the panel
+      # survives a dashboard that is older or newer than itself.
+      @sh "HHEIGHT=\([.history.height[]? | if type == "object" then .v else . end] | join(" "))",
+      @sh "HTEMP=\([.history.tempC[]? | if type == "object" then .v else . end] | join(" "))",
       @sh "PEERN=\(.peers.producers // "")",
       @sh "PEERB=\(.peers.scannedBlocks // "")",
       @sh "PEERRANK=\(.peers.selfRank // "")",
       # The leader'"'"'s share, so the bars on the standings page scale to the
       # field instead of to an unreachable 100%.
-      @sh "PEERMAX=\([.peers.top[]?.sharePercent] | max // 1)"
+      @sh "PEERMAX=\([.peers.top[]?.sharePercent] | max // 1)",
+      # Everything below arrived with the network and price work and had no way
+      # onto this panel, which on a headless Pi is the only view there is.
+      @sh "NAKA=\(.network.concentration.nakamoto // "")",
+      @sh "LEADSH=\(.network.concentration.leaderShare // "")",
+      @sh "TOP3=\(.network.concentration.top3Share // "")",
+      @sh "EVENSH=\(.network.concentration.evenShare // "")",
+      @sh "NPROD=\(.network.concentration.producers // "")",
+      @sh "BTMED=\(.network.blockTime.medianSeconds // "")",
+      @sh "BTP90=\(.network.blockTime.p90Seconds // "")",
+      @sh "BTMEAN=\(.network.blockTime.meanSeconds // "")",
+      @sh "BTN=\(.network.blockTime.samples // "")",
+      @sh "BTB=\([.network.blockTime.buckets[]?] | join(" "))",
+      @sh "OBSD=\(.network.observed.daysStored // "")",
+      @sh "OBSB=\(.network.observed.blocks // "")",
+      @sh "PVAL=\(.price.value // "")",
+      @sh "PCHG=\(.price.change24h // "")",
+      @sh "PID=\(.price.id // "")",
+      @sh "PCUR=\(.price.currency // "" | ascii_upcase)",
+      @sh "PNOT=\(.price.notional // "")",
+      @sh "PNOMKT=\(if .price.marketNote then "1" else "" end)",
+      # Whether anything would say it stopped -- the one question this panel
+      # cannot answer for itself, because a dead Pi draws no frame at all.
+      @sh "ALINST=\(if .alerts.installed then "1" else "" end)",
+      @sh "ALRUN=\(if .alerts.running then "1" else "" end)",
+      @sh "ALFIRE=\(.alerts.active | length)",
+      @sh "ALDEAD=\(if .alerts.armed.deadman then "1" else "" end)"
     ' 2>/dev/null)"
   elif (( ! have_jq )); then
     PROB="jq not installed"
@@ -382,6 +468,7 @@ render() {
     2) page_chain; return ;;
     3) page_system; return ;;
     4) page_peers "${rows}"; return ;;
+    5) page_network; return ;;
   esac
 
   # --- status banner ------------------------------------------------------
@@ -431,6 +518,17 @@ render() {
   esac
   [[ "${HOTNOW}" == "true" ]] && pw="${ON_Y} CLOCKED DOWN, HOT ${R}"
   line "  ${D}POWER${R}   ${pw}"
+
+  # The one thing this panel can never tell you itself: a Pi that has stopped
+  # draws no frame, so a frozen screen and a dead node look identical. Whether
+  # something off-box is watching belongs here, where it is read every day.
+  local al
+  if [[ -z "${ALINST}" ]]; then al="${FG_Y}not set up${R}"
+  elif [[ -z "${ALRUN}" ]]; then al="${ON_R} ALERTER STOPPED ${R}"
+  elif [[ "${ALFIRE:-0}" -gt 0 ]] 2>/dev/null; then al="${ON_Y} ${ALFIRE} FIRING ${R}"
+  else al="${FG_G}all clear${R}"; [[ -n "${ALDEAD}" ]] && al+=" ${D}· deadman armed${R}"
+  fi
+  line "  ${D}ALERTS${R}  ${al}"
 
   # --- log tail, if the screen is tall enough -----------------------------
   if (( rows >= 18 )) && [[ -n "${LASTLOG}" ]]; then

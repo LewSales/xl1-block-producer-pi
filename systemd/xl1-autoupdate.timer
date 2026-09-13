@@ -1,0 +1,15 @@
+[Unit]
+Description=Check for a newer XL1 producer bundle every 72h
+
+[Timer]
+# 72h, and never at boot: a node that just came back is the worst moment to
+# start pulling images and restarting the producer.
+OnBootSec=6h
+OnUnitActiveSec=72h
+# Spread across an hour so several nodes on one release do not all download,
+# reload and restart in the same minute.
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

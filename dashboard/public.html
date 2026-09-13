@@ -1,0 +1,378 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XL1 Block Producer</title>
+<!--
+  Reads status.json beside it and renders. No build step, no dependencies, no
+  external requests: it is one file that a static host serves and a browser
+  runs, which is the whole reason it can live anywhere.
+
+  Everything it shows comes from /api/public on the node -- an allow-list
+  projection, so this page cannot display something private even by mistake.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#12151a; --muted:#5a6472;
+    --ok:#1a7f47; --warn:#b4690e; --bad:#c0392b; --accent:#2b6f6a;
+    /* One accent per card, the same family the private dashboard uses, so the
+       two look like the same instrument rather than two products. */
+    --c-producer:#2f7ae5; --c-chain:#7a4ddb; --c-network:#2b6f6a; --c-blocktime:#0d7c8f;
+    --c-worth:#1a7f47; --c-race:#6b4ea8; --c-ops:#a3341f; --c-latency:#7a4ddb;
+    --c-continuity:#1f7a5a; --c-movement:#8a5a2b; --c-trend:#0d7c8f; --c-standings:#8a5a2b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1013; --panel:#171a1f; --line:#262b33; --ink:#e6e9ee; --muted:#9aa4b2;
+            --ok:#4ec97f; --warn:#e0a341; --bad:#ff8a7a; --accent:#5fc9c0;
+            --c-producer:#6aa8ff; --c-chain:#a98bff; --c-network:#5fc9c0; --c-blocktime:#48c3d6;
+            --c-worth:#4ec97f; --c-race:#b49bff; --c-ops:#ff9d84; --c-latency:#a98bff;
+            --c-continuity:#5fd6a8; --c-movement:#d7a06a; --c-trend:#48c3d6; --c-standings:#d7a06a; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { padding:18px 20px; border-bottom:1px solid var(--line); background:var(--panel);
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap }
+  h1 { font-size:16px; margin:0; letter-spacing:.2px }
+  .pill { font-size:11px; padding:2px 9px; border-radius:999px; border:1px solid var(--line); color:var(--muted) }
+  .pill.ok { color:var(--ok); border-color:color-mix(in srgb,var(--ok) 40%,transparent) }
+  .pill.warn { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent) }
+  .pill.bad { color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent) }
+  main { padding:16px; columns:330px; column-gap:16px }
+  section { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--c, var(--accent));
+    border-radius:10px; padding:14px 16px; margin:0 0 16px; break-inside:avoid; display:inline-block; width:100% }
+  section.wide { column-span:all }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--c, var(--muted)); margin:0 0 10px;
+       opacity:.95 }
+  .big { font-size:30px; font-weight:650; line-height:1.1 }
+  .sub { font-size:12px; color:var(--muted) }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:12px 0 0; font-size:13px }
+  dt { color:var(--muted) } dd { margin:0; text-align:right }
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:10px }
+  th { text-align:right; font-weight:500; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em }
+  th:first-child,td:first-child { text-align:left }
+  td,th { padding:5px 6px; border-bottom:1px solid var(--line) }
+  tr.self { background:color-mix(in srgb,var(--c, var(--accent)) 14%,transparent); font-weight:650 }
+  .hist { display:flex; align-items:flex-end; gap:2px; height:92px; margin:14px 0 4px }
+  .hist-col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; height:100%; min-width:0 }
+  .hist-bar { background:color-mix(in srgb,var(--accent) 70%,transparent); border-radius:2px 2px 0 0 }
+  .hist-x { font-size:9px; color:var(--muted); text-align:center; padding-top:3px; white-space:nowrap }
+  .bar { display:flex; gap:2px; height:11px; margin-top:10px; border-radius:3px; overflow:hidden; background:var(--line) }
+  .bar > i { display:block; height:100%; background:color-mix(in srgb,var(--c, var(--accent)) 78%,transparent) }
+  .bar > i.self { background:var(--ok) }
+  footer { padding:14px 20px; border-top:1px solid var(--line); color:var(--muted); font-size:12px }
+  a { color:inherit }
+  .stale { background:color-mix(in srgb,var(--warn) 14%,transparent); border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);
+    border-radius:8px; padding:10px 12px; margin:0 16px 16px; font-size:13px }
+</style>
+<header>
+  <h1>⛏️ XL1 Block Producer</h1>
+  <span class="pill" id="label"></span>
+  <span class="pill" id="state">loading…</span>
+  <span class="sub" id="net"></span>
+</header>
+<div id="stale"></div>
+<main id="grid"></main>
+<footer id="foot"></footer>
+<script>
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
+const num = (n) => (n === undefined || n === null || Number.isNaN(n)) ? '—' : Number(n).toLocaleString()
+const dur = (s) => {
+  if (s === undefined || s === null) return '—'
+  if (s < 90) return `${Math.round(s)}s`
+  if (s < 5400) return `${Math.round(s / 60)}m`
+  if (s < 172800) return `${Math.round(s / 3600)}h`
+  return `${Math.round(s / 86400)}d`
+}
+const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
+
+function render(d) {
+  if (d.schema > 1) {
+    $('grid').innerHTML = `<section><h2>Unsupported</h2><div class="sub">This page understands
+      schema 1 and the data is schema ${esc(d.schema)}. It is newer than the page; nothing is drawn
+      rather than drawing it wrong.</div></section>`
+    return
+  }
+  $('label').textContent = d.label || 'producer'
+  const st = d.status === 'ok' ? 'ok' : d.status === 'degraded' ? 'warn' : 'bad'
+  $('state').textContent = d.status ?? 'unknown'
+  $('state').className = `pill ${st}`
+  $('net').textContent = d.chain?.networkName ? `${d.chain.networkName} · chain ${String(d.chain.chainId ?? '').slice(0, 10)}…` : ''
+
+  // A page fed by a file that stopped updating must say so. Without this it
+  // shows yesterday's numbers with total confidence.
+  const age = (Date.now() - new Date(d.generatedAt).getTime()) / 1000
+  $('stale').innerHTML = age > 1800
+    ? `<div class="stale">This page has not been updated in ${dur(age)}. The node stopped publishing —
+       every number below is from ${esc(new Date(d.generatedAt).toLocaleString())} and may no longer be true.</div>`
+    : ''
+
+  const p = d.producer ?? {}, n = d.network ?? {}, c = n.concentration, bt = n.blockTime
+  const cards = []
+
+  cards.push(`<section style="--c: var(--c-producer)">
+    <h2>This producer</h2>
+    <div class="big">${num(p.blocks?.total)}</div>
+    <div class="sub">blocks won${p.producers ? ` · #${num(p.rank)} of ${num(p.producers)}` : ''}</div>
+    ${dl([
+      ['Share of observed', p.sharePercent !== undefined ? `${p.sharePercent}%` : '—'],
+      ['Last 24 hours', p.blocks?.day24h !== undefined ? num(p.blocks.day24h) : '—'],
+      ['Today', num(p.blocks?.today)],
+      ['This week', num(p.blocks?.week)],
+      p.lastBlock !== undefined && ['Last block', p.lastBlockUrl
+        ? `<a href="${esc(p.lastBlockUrl)}" target="_blank" rel="noopener">#${num(p.lastBlock)}</a>` : `#${num(p.lastBlock)}`],
+      p.blocksSinceLast !== undefined && ['Since last win', `${num(p.blocksSinceLast)} block(s)`],
+      p.rewardXl1 && ['Rewards', `${esc(p.rewardXl1)} XL1`],
+      p.address && ['Address', p.rewardAddressUrl
+        ? `<a class="mono" href="${esc(p.rewardAddressUrl)}" target="_blank" rel="noopener">${esc(p.address.slice(0,8))}…${esc(p.address.slice(-4))}</a>`
+        : `<span class="mono">${esc(p.address.slice(0,8))}…</span>`],
+    ])}
+  </section>`)
+
+  if (d.chain?.currentBlock !== undefined) {
+    cards.push(`<section style="--c: var(--c-chain)">
+      <h2>Chain</h2>
+      <div class="big">${num(d.chain.currentBlock)}</div>
+      <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
+      ${dl([
+        ['Finalization lag', `${num(d.chain.finalizationLag)} block(s)`],
+        bt?.medianSeconds !== undefined && ['Block time', `${bt.medianSeconds}s <span class="sub">median of ${num(bt.samples)}</span>`],
+        d.chain.explorerUrl && ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener">open ↗</a>`],
+      ])}
+    </section>`)
+  }
+
+  if (c) {
+    const skew = c.evenShare > 0 ? (c.leaderShare / c.evenShare).toFixed(1) : null
+    cards.push(`<section style="--c: var(--c-network)">
+      <h2>XL1 Network</h2>
+      <div class="big">${num(c.producers)}</div>
+      <div class="sub">producers seen across ${num(n.observed?.blocks)} observed blocks</div>
+      ${dl([
+        ['Nakamoto coefficient', `<span class="${c.nakamoto <= 2 ? 'bad' : c.nakamoto <= 3 ? 'warn' : 'ok'}">${num(c.nakamoto)}</span>
+          <span class="sub" title="The fewest producers whose combined observed output passes 50%. Higher is more decentralised.">of ${num(c.producers)}</span>`],
+        ['Top producer', `${c.leaderShare}%${skew ? ` <span class="sub">· ${skew}× an even split</span>` : ''}`],
+        ['Top 3 combined', `${c.top3Share}%`],
+        ['Even split would be', `<span class="sub">${c.evenShare}% each</span>`],
+        c.nakamoto67 !== undefined && ['To reach 67%', `${num(c.nakamoto67)} producers`],
+      ])}
+      <div class="bar">${(n.standings ?? []).slice(0, 12).map((r) =>
+        `<i class="${r.isSelf ? 'self' : ''}" style="width:${Math.max(0.5, r.sharePercent ?? 0)}%" title="${esc(r.label ?? r.address.slice(0,8))} — ${r.sharePercent}%"></i>`).join('')}</div>
+      <div class="sub" style="margin-top:4px">each block is one producer's share</div>
+    </section>`)
+  }
+
+  if (bt?.samples > 0) {
+    const max = Math.max(1, ...bt.buckets)
+    let lo = bt.buckets.findIndex((x) => x > 0), hi = bt.buckets.length - 1
+    while (hi > lo && bt.buckets[hi] === 0) hi--
+    const cols = []
+    for (let i = lo; i <= hi; i++) cols.push([bt.edges[i], bt.buckets[i], bt.edges[i + 1]])
+    cards.push(`<section style="--c: var(--c-blocktime)">
+      <h2>Block time</h2>
+      <div class="big">${bt.medianSeconds}s</div>
+      <div class="sub">median over ${num(bt.samples)} observed intervals</div>
+      <div class="hist">${cols.map(([e, cnt, nx]) => `
+        <div class="hist-col" title="${e}–${nx ?? '∞'}s · ${num(cnt)} blocks">
+          <div class="hist-bar" style="height:${cnt === 0 ? 0 : Math.max(2, (cnt / max) * 100)}%"></div>
+          <div class="hist-x">${e}</div>
+        </div>`).join('')}</div>
+      <div class="sub" style="text-align:center">seconds between consecutive blocks</div>
+      ${dl([
+        ['Mean', `${bt.meanSeconds}s`],
+        ['P95', `<span title="95% of intervals were at or below this. A bucket floor, not a decimal.">≥ ${bt.p95Seconds}s</span>`],
+        ['P99', `≥ ${bt.p99Seconds}s`],
+        ['Fastest / slowest', `${bt.minSeconds}s / ${bt.maxSeconds}s`],
+      ])}
+    </section>`)
+  }
+
+  const race = d.race, ops = d.operations, lat = d.latency, cont = d.continuity, mv = d.movement
+  const pr = d.price ?? {}
+
+  if (pr.marketNote) {
+    cards.push(`<section style="--c: var(--c-worth)">
+      <h2>What it is worth</h2>
+      <div class="big sub" style="font-size:19px">nothing, yet</div>
+      <div class="sub">${esc(pr.marketNote)}</div>
+      ${pr.notional !== undefined ? dl([
+        ['Tracked price', `${esc((pr.currency ?? '').toUpperCase())} ${pr.value}
+          ${pr.change24h !== undefined ? `<span class="${pr.change24h >= 0 ? 'ok' : 'bad'}">${pr.change24h >= 0 ? '▲' : '▼'} ${Math.abs(pr.change24h)}%</span>` : ''}
+          <span class="sub">${esc(pr.id ?? '')}</span>`],
+        ['If it traded at that', `${esc((pr.currency ?? '').toUpperCase())} ${num(pr.notional)} <span class="sub">a scale, not an amount</span>`],
+      ]) : ''}
+    </section>`)
+  }
+
+  if (race && race.built !== undefined) {
+    const lost = race.lost ?? {}
+    const totalLost = Object.values(lost).reduce((a, b) => a + b, 0)
+    const reason = (k, label) => (lost[k] ?? 0) > 0 &&
+      [label, `${num(lost[k])} <span class="sub">${totalLost ? Math.round((lost[k] / totalLost) * 100) : 0}% of losses</span>`]
+    cards.push(`<section style="--c: var(--c-race)">
+      <h2>Candidate race</h2>
+      <div class="big">${num(race.built)}</div>
+      <div class="sub">candidates built in the last ${Math.round((race.windowSeconds ?? 3600) / 60)} minutes</div>
+      ${dl([
+        ['Rejected locally', num(totalLost)],
+        reason('behindFinalizedHead', 'Head advanced first'),
+        reason('txAlreadyFinalized', 'Tx already finalized'),
+        reason('blockNumberMismatch', 'Block number mismatch'),
+        race.retries ? ['Rebuilt and resubmitted', num(race.retries)] : null,
+      ])}
+      ${lost.behindFinalizedHead > 0 && totalLost > 0
+        ? `<div class="sub" style="margin-top:8px">Losing to "head advanced first" means the candidate was valid and
+           somebody else's landed sooner — being outrun, rather than failing.</div>` : ''}
+    </section>`)
+  }
+
+  if (ops?.score !== undefined) {
+    cards.push(`<section style="--c: var(--c-ops)">
+      <h2>Operations</h2>
+      <div class="big">${num(ops.score)}<span class="sub" style="font-size:16px"> / 100</span></div>
+      <div class="sub">mean of the measured components</div>
+      ${dl((ops.components ?? []).map((c) => [c.label, `${num(c.value)} <span class="sub">${esc(c.why ?? '')}</span>`]))}
+      ${ops.bottleneck?.text ? `<div class="sub" style="margin-top:8px">${esc(ops.bottleneck.text)}</div>` : ''}
+    </section>`)
+  }
+
+  if (lat?.cycleP50Ms !== undefined) {
+    const st = lat.stages ?? {}
+    cards.push(`<section style="--c: var(--c-latency)">
+      <h2>Latency</h2>
+      <div class="big">${num(lat.cycleP50Ms)}<span class="sub" style="font-size:16px"> ms</span></div>
+      <div class="sub">typical production cycle · p95 ${num(lat.cycleP95Ms)} ms · ${num(lat.samples)} samples</div>
+      ${dl([
+        ['Wire floor', `${num(lat.headFetchMinMs)} ms <span class="sub">the network itself</span>`],
+        ['Head fetch p50 / p95', `${num(lat.headFetchP50Ms)} / ${num(lat.headFetchP95Ms)} ms`],
+        ...Object.entries(st).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, `${num(v)} ms`]),
+      ])}
+      <div class="sub" style="margin-top:8px">The wire floor is what the network costs. Everything above it is
+        local work and remote calls the producer has to make anyway.</div>
+    </section>`)
+  }
+
+  if (cont?.producingPercent !== undefined) {
+    const hrs = cont.hours ?? []
+    const max = Math.max(1, ...hrs.map((h) => h.wins ?? 0))
+    cards.push(`<section style="--c: var(--c-continuity)">
+      <h2>Continuity</h2>
+      <div class="big">${cont.producingPercent}<span class="sub" style="font-size:16px">%</span></div>
+      <div class="sub">of the ${num(cont.observedHours)} hours observed had at least one block won</div>
+      <div class="hist" style="height:56px">${hrs.slice(-72).map((h) => `
+        <div class="hist-col" title="${esc(new Date(h.t).toLocaleString())} — ${h.observed ? `${h.wins ?? 0} won of ${h.chainBlocks ?? 0}` : 'not observed'}">
+          <div class="hist-bar" style="height:${h.observed ? Math.max(3, ((h.wins ?? 0) / max) * 100) : 0}%;${
+            h.observed ? '' : 'background:var(--line)'}"></div>
+        </div>`).join('')}</div>
+      <div class="sub" style="text-align:center">last 72 hours · a flat grey column is an hour nobody was watching</div>
+      ${dl([
+        ['Hours producing', num(cont.producingHours)],
+        ['Hours with none', `${num(cont.missedHours)} <span class="sub">while the chain moved</span>`],
+        cont.longestMissedHours > 0 && ['Longest gap', `${num(cont.longestMissedHours)} h`],
+        cont.unobservedHours > 0 && ['Not observed', `${num(cont.unobservedHours)} h <span class="sub">dashboard was down</span>`],
+      ])}
+    </section>`)
+  }
+
+  if (mv) {
+    const movers = (mv.rows ?? []).filter((r) => r.deltaPercent !== undefined && Math.abs(r.deltaPercent) >= 0.5)
+    const nm = (r) => esc(r.label ?? (r.address ?? '').slice(0, 10) + '…')
+    cards.push(`<section style="--c: var(--c-movement)">
+      <h2>Producer movement</h2>
+      <div class="big">${num(mv.seenThisWeek)}</div>
+      <div class="sub">producing in the last 7 days · ${num(mv.seenToday)} today</div>
+      ${mv.comparable === false
+        ? `<div class="sub" style="margin-top:10px">Share drift needs two full weeks of history before it can
+           compare anything, so it is withheld rather than guessed.</div>`
+        : movers.length
+          ? movers.slice(0, 6).map((r) => `<div class="drift-row">
+              <span class="${r.deltaPercent > 0 ? 'ok' : 'warn'}">${r.deltaPercent > 0 ? '▲' : '▼'} ${Math.abs(r.deltaPercent).toFixed(2)} pts</span>
+              <span>${nm(r)}</span><span class="sub">${r.previousSharePercent ?? '—'}% → ${r.sharePercent ?? '—'}%</span></div>`).join('')
+          : '<div class="sub" style="margin-top:10px">no producer moved more than half a point this week</div>'}
+      ${dl([
+        mv.arrived?.length && ['Newly observed', mv.arrived.map(nm).join(', ')],
+        mv.quiet?.length && ['Gone quiet', `<span class="warn">${mv.quiet.map(nm).join(', ')}</span>
+          <span class="sub">no block in ${num(mv.quietAfterDays)} days</span>`],
+      ])}
+    </section>`)
+  }
+
+  if (d.trend?.daily?.length) {
+    const days = d.trend.daily.slice(-14)
+    const maxB = Math.max(1, ...days.map((x) => x.blocks))
+    cards.push(`<section style="--c: var(--c-trend)">
+      <h2>Trends</h2>
+      <div class="big">${num(days.reduce((a, x) => a + x.blocks, 0))}</div>
+      <div class="sub">blocks over ${num(days.length)} day(s)</div>
+      <div class="hist">${days.map((x) => `
+        <div class="hist-col" title="${esc(x.day)} — ${num(x.blocks)} blocks, ${num(Math.round(x.earned))} XL1">
+          <div class="hist-bar" style="height:${x.blocks === 0 ? 0 : Math.max(3, (x.blocks / maxB) * 100)}%"></div>
+          <div class="hist-x">${esc(x.day.slice(5))}</div>
+        </div>`).join('')}</div>
+      <div class="sub" style="text-align:center">blocks won per day · kept ${num(d.trend.retainDays)} days</div>
+    </section>`)
+  }
+
+  if (n.standings?.length) {
+    cards.push(`<section style="--c: var(--c-standings)" class="wide">
+      <h2>Producer standings</h2>
+      <table>
+        <thead><tr><th>#</th><th>Producer</th><th>Blocks</th><th>Share</th></tr></thead>
+        <tbody>${n.standings.map((r) => `<tr class="${r.isSelf ? 'self' : ''}">
+          <td>${num(r.rank)}</td>
+          <td>${r.url ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label ?? r.address.slice(0,10) + '…' + r.address.slice(-4))}</a>`
+                      : `<span class="mono">${esc(r.label ?? r.address)}</span>`}${r.isSelf ? ' <span class="sub">this node</span>' : ''}</td>
+          <td>${num(r.blocks)}</td><td>${r.sharePercent}%</td></tr>`).join('')}</tbody>
+      </table>
+      <div class="sub" style="margin-top:8px">Observed by this node over blocks ${num(n.observed?.fromBlock)}–${num(n.observed?.toBlock)},
+        not a protocol-wide census. A producer that never appeared in that window is not counted.${
+        n.multiSigner ? ' Shares can exceed 100% because some blocks carry more than one signer.' : ''}</div>
+    </section>`)
+  }
+
+  $('grid').innerHTML = cards.join('')
+  const b = d.build ?? {}
+  $('foot').innerHTML = `Updated ${esc(new Date(d.generatedAt).toLocaleString())} · build ${esc(b.version ?? '?')} ${esc(b.commit ?? '')}
+    ${b.source ? ` · <a href="${esc(b.source)}" target="_blank" rel="noopener">source ↗</a>` : ''}
+    <br>Independent community project — <strong>not affiliated with, endorsed by, or supported by
+    ${esc(b.upstreamName ?? 'XYO Network')}</strong>.`
+}
+
+// Where the data lives. The publisher rewrites this line when a live endpoint is
+// configured; left alone, the file sits next to this page.
+//
+// The distinction is the whole difference between "a few minutes behind" and
+// "live": a file shipped through git waits for a commit, a build and a CDN,
+// while one written straight to object storage is simply there.
+const DATA_URL = 'status.json'
+
+// Poll and re-render rather than reloading the document. A reload re-fetches
+// the page, re-parses the CSS and throws away the scroll position, several
+// times an hour, to redraw numbers that came from one small JSON file.
+const REFRESH_MS = 30000
+let failures = 0
+
+async function tick() {
+  // A hidden tab is a tab nobody is reading.
+  if (document.hidden) return
+  try {
+    const res = await fetch(DATA_URL + (DATA_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    render(await res.json())
+    failures = 0
+  } catch (e) {
+    // One failed poll is a hiccup and must not blank a page that is already
+    // showing good data; several in a row is worth saying out loud.
+    if (++failures < 3 && document.getElementById('grid').children.length) return
+    $('state').textContent = 'no data'
+    $('state').className = 'pill bad'
+    $('grid').innerHTML = `<section><h2>No data</h2><div class="sub">${esc(DATA_URL)} could not be read
+      (${esc(e.message)}). The page is here; the node has not published to it yet.</div></section>`
+  }
+}
+tick()
+setInterval(tick, REFRESH_MS)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tick() })
+</script>

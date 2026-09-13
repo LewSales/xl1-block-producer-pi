@@ -7,7 +7,7 @@
 # to be its own failure mode, and a laptop does it in about 80 seconds.
 #
 #   ./build-images.sh
-#   XL1_CLI_VERSION=5.2.4 ./build-images.sh      # pin an older one
+#   XL1_CLI_VERSION=5.3.1 ./build-images.sh      # pin an older one
 #
 # Produces xl1-local-arm64.tar.gz and xl1-dashboard-arm64.tar.gz alongside this
 # script. They are gitignored — they are build artifacts, and each exceeds
@@ -17,7 +17,7 @@ set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${HERE}/.build"
-XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.1}"
+XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.2}"
 # The Pi is arm64; a workstation running the producer natively is amd64, and
 # building for it needs no emulation at all — which is why this is a variable
 # rather than a fork of the script.
@@ -80,7 +80,20 @@ popd >/dev/null
 # --------------------------------------------------------- dashboard image
 
 log "Dashboard image"
-docker build --platform "${PLATFORM}" -t "xl1-dashboard:local-${TARGET_ARCH}" "${HERE}/dashboard"
+# Stamp the build so the running page can identify itself. --dirty matters: a
+# dashboard built from uncommitted edits must not claim to be the commit it was
+# branched from, or a deploy that shipped something else looks identical to one
+# that did not.
+# Bare short sha, not `git describe`: describe prefers the nearest tag and yields
+# something GitHub cannot resolve as a commit, which breaks the dashboard's own
+# "read the code" link as soon as a release is tagged.
+DASH_COMMIT="$(git -C "${HERE}" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+git -C "${HERE}" diff --quiet 2>/dev/null || DASH_COMMIT="${DASH_COMMIT}-dirty"
+DASH_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker build --platform "${PLATFORM}" \
+  --build-arg "DASH_COMMIT=${DASH_COMMIT}" \
+  --build-arg "DASH_BUILT_AT=${DASH_BUILT_AT}" \
+  -t "xl1-dashboard:local-${TARGET_ARCH}" "${HERE}/dashboard"
 
 # ------------------------------------------------------------------ export
 

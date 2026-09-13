@@ -25,30 +25,67 @@ ExecStartPre=-/usr/bin/docker rm -f xl1-producer
 # here is louder and leaves nothing to clean up. provision.sh installs the file,
 # so this only fires on a unit updated without its preset.
 ExecStartPre=/usr/bin/test -s /etc/xl1/presets/roles/producer.json
+ExecStartPre=/usr/bin/test -s /etc/xl1/presets/roles/producer-rest.json
+
+# Both role presets are mounted and XL1_ROLE in the env file picks one.
+# producer reads the chain over RPC; producer-rest reads it from the REST
+# CDNs and keeps only mempool submission on RPC — which is the difference
+# between a node that rides out an RPC schema change and one that stops
+# producing until its client is rebuilt. Mounting the unused one costs
+# nothing and means switching roles is an env edit rather than a unit edit.
 
 # Health port stays on loopback: only the dashboard consumes it.
 # 1 GB of RAM means the Node heap needs an explicit ceiling, or a GC spike
 # pushes the box into swap on the SD card and the node stalls.
 #
 # The role preset is overridden to shorten the block-production interval. The
-# image ships 60000ms in /opt/xl1/presets/roles/producer.json — six times the
-# xl1-cli code default of 10000 — and at that cadence this node learns of a new
-# head up to a minute after it exists, builds a candidate in 3-5s, and offers it
-# for a height the chain settled half a minute ago. Measured on 2026-08-31:
-# every "Found updated head" landed at :17 past the minute for twelve minutes
-# straight, one production attempt per cycle. 15000 is a compromise — 4x the
-# head-discovery resolution, still under a third duty cycle on a 3 B+ that runs
-# 3-5s per attempt, and 4x rather than 6x the poll rate against XYO's RPC.
+# image ships 60000ms in /opt/xl1/presets/roles/producer.json, six times the
+# xl1-cli code default of 10000. Every tick reads both the head and the mempool,
+# so this one number sets how fast the node notices anything at all.
+#
+# At 60000 it lost on head latency: "Found updated head" landed at :17 past the
+# minute for twelve minutes straight, so candidates were built for heights the
+# chain had settled half a minute earlier. 15000 fixed that and exposed the real
+# gate — the producer builds only when it sees a pending transaction. Measured
+# over 40 minutes at 15s: pending=0 declined on 136 of 137 ticks, pending=1
+# built on 20 of 22. A transaction survives in the mempool about six seconds
+# before some producer sweeps it into a block, and sampling that window every
+# 15s caught it on 18 ticks of 154 — usually too late to win the race.
+#
+# So this is really a mempool sampling rate, and the value is a trade against
+# how hard it leans on XYO's RPC. Ticks are 60/interval, and roughly the share
+# of six-second windows caught follows from that:
+#
+#     60000 -> 1/min  ~10%      15000 -> 4/min  ~34%
+#     30000 -> 2/min  ~19%      10000 -> 6/min  ~46%
+#                               5000  -> 12/min ~71%
+#
+# 10000 is xl1-cli's own code default, which makes it the defensible rate to
+# take from a shared endpoint, and it is six times the discovery resolution of
+# the shipped preset. 5000 measurably catches more, and was run for a while, but
+# doubling the read rate against someone else's infrastructure to chase it is
+# not a trade to make silently.
+#
+# Cost on the Pi is not the constraint either way: idle ticks are cheap, and at
+# 15s the producer sat at 6% CPU and 0.25 load across four cores, 65°C,
+# throttled=0x0. Only real builds cost 2-4s, and those stay bounded at roughly
+# one per block whatever the tick rate — ProducerActor holds a Mutex over
+# produceBlock, so a tick arriving mid-build is dropped, not stacked.
 #
 # Only the one field differs from the image's file. Mounting a single file
 # rather than the presets tree keeps the shadow as small as possible: a future
 # xl1-cli that changes producer.json will be overridden here and nowhere else.
 #
-# NODE_OPTIONS is enforced by Node and does its job. --memory does NOT: stock
-# Raspberry Pi OS ships without the memory cgroup controller, so Docker accepts
-# the flag and discards it (docker inspect reports Memory=0). Kept anyway — it
-# costs nothing and becomes real the moment cgroup_enable=memory is added to the
-# kernel cmdline. See "Memory limits are not enforced by default" in README.md.
+# NODE_OPTIONS is enforced by Node and does its job. --memory used to be inert:
+# stock Raspberry Pi OS ships without the memory cgroup controller, so Docker
+# accepted the flag and discarded it (docker inspect reported Memory=0). That is
+# no longer true here — cgroup_enable=memory is on the kernel cmdline since the
+# 2026-08-30 reboot, so the 768m cap is live and a breach is an OOM kill rather
+# than a slowdown. Node's 512 MB heap now sits inside a hard 768 MB container;
+# the producer measures 159.5 MB against it, so the margin is real but it is a
+# margin now rather than an absence. See "Memory limits: off by default, enabled
+# on this Pi" in README.md, and check OOMKilled before anything else if the
+# container ever vanishes without a log.
 ExecStart=/usr/bin/docker run --rm --name xl1-producer \
   --env-file /etc/xl1/sequence-producer.env \
   -e NODE_OPTIONS=--max-old-space-size=512 \
@@ -57,6 +94,7 @@ ExecStart=/usr/bin/docker run --rm --name xl1-producer \
   -p 30303:30303/udp \
   -v /var/lib/xl1/data:/data \
   -v /etc/xl1/presets/roles/producer.json:/opt/xl1/presets/roles/producer.json:ro \
+  -v /etc/xl1/presets/roles/producer-rest.json:/opt/xl1/presets/roles/producer-rest.json:ro \
   --memory 768m --memory-swap 2g \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
   xl1:local

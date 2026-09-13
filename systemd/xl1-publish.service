@@ -1,0 +1,25 @@
+[Unit]
+Description=Publish the XL1 producer's public status page
+Documentation=https://github.com/LewSales/xl1-block-producer-pi
+After=network-online.target xl1-dashboard.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Not root. This needs to read one loopback URL and push to one repository, and
+# the credential it pushes with belongs to the operator, not to the system.
+User=xl1pi
+Group=xl1pi
+# One destination, named explicitly. This used to be a bare invocation that
+# took the default config, and a second ExecStart for the site was added by hand
+# on the running Pi and never written back here -- so reinstalling the unit
+# would have silently returned the node to publishing only into the retired
+# xl1-status-rbpi3 repo (now archived), the live page going stale and nothing
+# on the box to say why.
+#
+# Naming the config here means the unit cannot quietly disagree with the box.
+ExecStart=/usr/bin/env XL1_PUBLISH_ENV=/etc/xl1/publish-site.env /usr/local/bin/xl1-publish.sh
+# A publish that cannot reach GitHub is not a failure of the node. The timer
+# will try again in five minutes and the page says how old it is.
+SuccessExitStatus=0 1
+TimeoutStartSec=120

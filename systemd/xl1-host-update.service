@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply pending OS package upgrades and reboot if required
+Documentation=https://github.com/LewSales/xl1-block-producer-pi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: apt-get upgrade and, when a reboot is required, shutdown.
+ExecStart=/usr/local/bin/xl1-host-update.sh
+TimeoutStartSec=1800

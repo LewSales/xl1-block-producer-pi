@@ -1,0 +1,17 @@
+[Unit]
+Description=Publish the XL1 producer's public status page every 5 minutes
+Documentation=https://github.com/LewSales/xl1-block-producer-pi
+
+[Timer]
+# Five minutes. The page carries a timestamp and says so when it goes stale, and
+# nothing downstream reads it faster than a person refreshing a browser -- so a
+# tighter cadence would only spend the Pi's uplink and GitHub's rate limit.
+OnBootSec=3min
+OnUnitActiveSec=5min
+# Two nodes push to one repository; a spread stops them arriving together and
+# forcing a rebase on every single cycle.
+RandomizedDelaySec=45
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

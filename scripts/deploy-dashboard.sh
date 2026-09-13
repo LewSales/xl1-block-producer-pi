@@ -34,7 +34,13 @@ die() { printf '  %s✗%s %s\n' "${RED}" "${RESET}" "$*" >&2; exit 1; }
 # The sha is the identifier, and it is what makes that link work.
 COMMIT="$(git -C "${HERE}" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
 git -C "${HERE}" diff --quiet 2>/dev/null || COMMIT="${COMMIT}-dirty"
-VERSION="$(node -e "process.stdout.write(require('${HERE}/dashboard/package.json').version)" 2>/dev/null || echo unknown)"
+# Plain grep/sed rather than `node -e require(...)`: a Windows Git Bash shell
+# hands node a POSIX-style path (/c/Users/...) that its own path resolution
+# does not translate, so the require silently failed and shipped a build.json
+# stamped "unknown" -- learned by doing exactly that from an xl1-windows
+# checkout on the operator's own PC, one of the two machines this deploys to.
+VERSION="$(grep -m1 '"version"' "${HERE}/dashboard/package.json" | sed -E 's/.*"version":[[:space:]]*"([^"]+)".*/\1/')"
+[[ -n "${VERSION}" ]] || VERSION=unknown
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STAMP="$(printf '{"version":"%s","commit":"%s","builtAt":"%s"}' "${VERSION}" "${COMMIT}" "${BUILT_AT}")"
 

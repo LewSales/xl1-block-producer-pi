@@ -9,41 +9,86 @@
 
   Everything it shows comes from /api/public on the node -- an allow-list
   projection, so this page cannot display something private even by mistake.
+  DATA_URL, REFRESH_MS and the schema>1 guard below are that boundary and the
+  versioning contract; a redesign changes how this looks, never what it reads.
 -->
 <style>
   :root {
     color-scheme: light dark;
-    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#12151a; --muted:#5a6472;
+    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --fg:#12151a; --muted:#5a6472;
     --ok:#1a7f47; --warn:#b4690e; --bad:#c0392b; --accent:#2b6f6a;
-    /* One accent per card, the same family the private dashboard uses, so the
-       two look like the same instrument rather than two products. */
-    --c-producer:#2f7ae5; --c-chain:#7a4ddb; --c-network:#2b6f6a; --c-blocktime:#0d7c8f;
-    --c-worth:#1a7f47; --c-race:#6b4ea8; --c-ops:#a3341f; --c-latency:#7a4ddb;
-    --c-continuity:#1f7a5a; --c-movement:#8a5a2b; --c-trend:#0d7c8f; --c-standings:#8a5a2b;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#0e1013; --panel:#171a1f; --line:#262b33; --ink:#e6e9ee; --muted:#9aa4b2;
-            --ok:#4ec97f; --warn:#e0a341; --bad:#ff8a7a; --accent:#5fc9c0;
-            --c-producer:#6aa8ff; --c-chain:#a98bff; --c-network:#5fc9c0; --c-blocktime:#48c3d6;
-            --c-worth:#4ec97f; --c-race:#b49bff; --c-ops:#ff9d84; --c-latency:#a98bff;
-            --c-continuity:#5fd6a8; --c-movement:#d7a06a; --c-trend:#48c3d6; --c-standings:#d7a06a; }
+    :root { --bg:#0e1013; --panel:#171a1f; --line:#262b33; --fg:#e6e9ee; --muted:#9aa4b2;
+            --ok:#4ec97f; --warn:#e0a341; --bad:#ff8a7a; --accent:#5fc9c0; }
+  }
+  /* Section accent system -- same palette as the private dashboard, so the
+     two read as one instrument. One hue per DATA CATEGORY, used narrowly: a
+     left border, the heading, the headline metric, that card's own bars/chart.
+     Never a filled card background. Set per card with style="--c: var(--acc-x)". */
+  :root {
+    --acc-producer: #1a7f47; --acc-rewards:  #a6720b; --acc-network: #4f46e5;
+    --acc-chain:    #2f7ae5; --acc-race:     #0891b2; --acc-latency: #c2540d;
+    --acc-ops:      #0f766e; --acc-analytics:#7c3aed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --acc-producer: #4ec97f; --acc-rewards:  #e0a341; --acc-network: #818cf8;
+      --acc-chain:    #6aa8ff; --acc-race:     #22d3ee; --acc-latency: #ff9d52;
+      --acc-ops:      #2dd4bf; --acc-analytics:#c4b5fd;
+    }
   }
   * { box-sizing:border-box }
-  body { margin:0; background:var(--bg); color:var(--ink);
+  body { margin:0; background:var(--bg); color:var(--fg);
     font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
   header { padding:18px 20px; border-bottom:1px solid var(--line); background:var(--panel);
     display:flex; align-items:center; gap:12px; flex-wrap:wrap }
   h1 { font-size:16px; margin:0; letter-spacing:.2px }
   .pill { font-size:11px; padding:2px 9px; border-radius:999px; border:1px solid var(--line); color:var(--muted) }
-  .pill.ok { color:var(--ok); border-color:color-mix(in srgb,var(--ok) 40%,transparent) }
-  .pill.warn { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent) }
-  .pill.bad { color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent) }
-  main { padding:16px; columns:330px; column-gap:16px }
-  section { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--c, var(--accent));
-    border-radius:10px; padding:14px 16px; margin:0 0 16px; break-inside:avoid; display:inline-block; width:100% }
-  section.wide { column-span:all }
-  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--c, var(--muted)); margin:0 0 10px;
-       opacity:.95 }
+  .status-pill { display:inline-flex; align-items:center; gap:6px; padding:2px 9px 2px 7px; border-radius:999px;
+    font-size:11px; font-weight:700; letter-spacing:.03em; border:1px solid transparent }
+  .status-pill .dot { width:6px; height:6px; border-radius:50%; background:currentColor; flex:none }
+  .status-pill.online { color:var(--ok); border-color:color-mix(in srgb,var(--ok) 40%,transparent) }
+  .status-pill.degraded, .status-pill.stale { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent) }
+  .status-pill.offline { color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent) }
+  @media (prefers-reduced-motion:no-preference) { .status-pill.online .dot { animation:pulse-dot 2.2s ease-in-out infinite } }
+  @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .updated { color:var(--muted); font-size:12px }
+  .spacer { flex:1 }
+
+  /* Layout: a single flex column at every width, the same as the private
+     dashboard. Each group is its own CSS grid; mobile promotes cards into the
+     column via display:contents + order, so there is one render path, not two. */
+  main#grid { display:flex; flex-direction:column; gap:18px; padding:16px; max-width:1400px; margin:0 auto }
+  .kpi-row { display:grid; grid-template-columns:repeat(5,1fr); gap:10px }
+  @media (max-width:900px) { .kpi-row { grid-template-columns:repeat(3,1fr) } }
+  /* dense: back-fills the gap a spanning card leaves beside it with whatever
+     comes next that still fits, instead of leaving empty space under a row of
+     small cards until the grid runs out of items. */
+  .group-grid { display:grid; grid-template-columns:repeat(3,1fr); grid-auto-flow:dense; gap:14px; align-items:start }
+  @media (max-width:1100px) { .group-grid { grid-template-columns:repeat(2,1fr) } }
+  .card-full { grid-column:1/-1 }
+  @media (max-width:680px) {
+    main#grid { display:flex }
+    .kpi-row, .group, .group-grid { display:contents }
+    .group-heading { display:none }
+    [style*="--mo"] { order:var(--mo) }
+  }
+  /* A heading and a divider, not another bordered box around the cards. */
+  .group-heading { margin:0; padding-bottom:8px; border-bottom:1px solid var(--line);
+    font-size:11px; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); font-weight:700;
+    display:flex; align-items:center; gap:7px }
+
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; position:relative }
+  /* Category accent, applied narrowly -- a 3px left border, the heading, the
+     headline metric (unless it already carries a status colour, which wins).
+     Bars/charts below pick up the same --c through plain CSS inheritance. */
+  section[style*="--c"] { border-left:3px solid var(--c) }
+  section[style*="--c"] h2 { color:var(--c) }
+  section[style*="--c"] .big:not(.ok):not(.warn):not(.bad) { color:var(--c) }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; opacity:.95;
+    display:flex; align-items:center; gap:7px }
+  .ico { font-size:14px; line-height:1; filter:saturate(1.1) }
   .big { font-size:30px; font-weight:650; line-height:1.1 }
   .sub { font-size:12px; color:var(--muted) }
   dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:12px 0 0; font-size:13px }
@@ -53,24 +98,60 @@
   th { text-align:right; font-weight:500; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em }
   th:first-child,td:first-child { text-align:left }
   td,th { padding:5px 6px; border-bottom:1px solid var(--line) }
-  tr.self { background:color-mix(in srgb,var(--c, var(--accent)) 14%,transparent); font-weight:650 }
+  /* This node's own row: producer-green, not the table's network-purple --
+     which row is mine is a different question from what kind of data this
+     table is. A left border carries it past a quick glance. */
+  tr.self { background:color-mix(in srgb,var(--acc-producer) 16%,transparent); font-weight:650;
+    box-shadow:inset 3px 0 0 0 var(--acc-producer) }
+  .you-badge { display:inline-block; font-size:9px; font-weight:700; letter-spacing:.04em; padding:1px 5px;
+    border-radius:999px; background:var(--acc-producer); color:#fff; margin-left:4px; vertical-align:1px }
+  /* Other producers' identity links: the network accent. */
+  td a.mono { color:var(--acc-network) }
+  tr.self td a.mono { color:inherit }
+  .hist-wrap { position:relative }
   .hist { display:flex; align-items:flex-end; gap:2px; height:92px; margin:14px 0 4px }
   .hist-col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; height:100%; min-width:0 }
-  .hist-bar { background:color-mix(in srgb,var(--accent) 70%,transparent); border-radius:2px 2px 0 0 }
+  .hist-bar { background:color-mix(in srgb,var(--c, var(--accent)) 70%,transparent); border-radius:2px 2px 0 0 }
+  /* Same two named overrides as the private dashboard: Continuity is
+     production data inside an analytics-violet card. */
+  .acc-green .hist-bar { background:color-mix(in srgb,var(--acc-producer) 70%,transparent) }
   .hist-x { font-size:9px; color:var(--muted); text-align:center; padding-top:3px; white-space:nowrap }
+  .hist-tick { position:absolute; top:0; bottom:14px; width:0; border-left:1px dashed var(--muted); pointer-events:none }
+  .hist-tick span { position:absolute; top:-13px; left:3px; font-size:9px; color:var(--muted); white-space:nowrap }
   .bar { display:flex; gap:2px; height:11px; margin-top:10px; border-radius:3px; overflow:hidden; background:var(--line) }
   .bar > i { display:block; height:100%; background:color-mix(in srgb,var(--c, var(--accent)) 78%,transparent) }
   .bar > i.self { background:var(--ok) }
+  .bar > i.nk { outline:2px solid var(--fg); outline-offset:-2px }
+  .reason-stack { display:flex; height:7px; border-radius:4px; overflow:hidden; background:var(--line); margin:8px 0 2px }
+  .reason-stack > i { display:block; height:100%; background:color-mix(in srgb,var(--warn) 65%,transparent); border-right:1px solid var(--panel) }
+  .reason-stack > i:last-child { border-right:0 }
+  .drift-row { display:grid; grid-template-columns:80px 1fr auto; gap:8px; align-items:baseline; padding:3px 0; font-size:12px }
+  .info { display:inline-flex; align-items:center; justify-content:center; width:13px; height:13px; border-radius:50%;
+    border:1px solid var(--line); color:var(--muted); font-size:9px; font-style:normal; line-height:1; background:none;
+    padding:0; cursor:help; font-family:inherit }
+  .info:hover, .info:focus-visible { color:var(--fg); border-color:var(--muted) }
+  a:focus-visible, button:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
   footer { padding:14px 20px; border-top:1px solid var(--line); color:var(--muted); font-size:12px }
   a { color:inherit }
   .stale { background:color-mix(in srgb,var(--warn) 14%,transparent); border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);
     border-radius:8px; padding:10px 12px; margin:0 16px 16px; font-size:13px }
+
+  .kpi { background:var(--panel); border:1px solid var(--line); border-top:2px solid var(--k, var(--line)); border-radius:10px; padding:12px 14px }
+  .kpi .k { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; font-weight:700;
+    display:flex; align-items:center; gap:5px }
+  .kpi .k .ico { font-size:12px }
+  .kpi .v { font-size:24px; font-weight:700; letter-spacing:-.02em; margin-top:5px }
+  .kpi .v.sub { font-size:15px; color:var(--muted); font-weight:600 }
+  .kpi .v.bad { color:var(--bad) }
+  .kpi .n { color:var(--muted); font-size:11px; margin-top:2px }
 </style>
 <header>
   <h1>⛏️ XL1 Block Producer</h1>
   <span class="pill" id="label"></span>
-  <span class="pill" id="state">loading…</span>
   <span class="sub" id="net"></span>
+  <span class="spacer"></span>
+  <span class="updated" id="updated" hidden></span>
+  <span class="status-pill" id="state"><span class="dot" aria-hidden="true"></span>loading…</span>
 </header>
 <div id="stale"></div>
 <main id="grid"></main>
@@ -87,22 +168,71 @@ const dur = (s) => {
   return `${Math.round(s / 86400)}d`
 }
 const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
+// A focusable info glyph rather than a bare title="" on running text: reachable
+// with a keyboard, revealed on :focus-visible as well as :hover.
+const info = (title) => `<button type="button" class="info" title="${esc(title)}" aria-label="${esc(title)}">i</button>`
+
+// The same four-state header this page's private twin uses, layered on top of
+// the raw ok/degraded/down this endpoint sends -- STALE is judged against
+// generatedAt, the same field the existing #stale banner already reads, just a
+// shorter threshold (2 missed polls at REFRESH_MS) than that banner's 30
+// minutes, since a header answering "is this live" should say so sooner.
+function headerState(d, fetchFailed) {
+  if (fetchFailed) return 'offline'
+  if (d.status === 'down') return 'offline'
+  const age = d.generatedAt ? (Date.now() - new Date(d.generatedAt).getTime()) / 1000 : Infinity
+  if (age > REFRESH_MS_FOR_STALE) return 'stale'
+  if (d.status === 'degraded') return 'degraded'
+  return 'online'
+}
+function setStatusPill(state, label) {
+  const el = $('state')
+  el.className = `status-pill ${state}`
+  el.innerHTML = `<span class="dot" aria-hidden="true"></span>${esc(label ?? state.toUpperCase())}`
+}
+
+// The same five numbers the private dashboard leads with, read from the
+// allow-listed fields this endpoint actually carries.
+function kpiRow(d) {
+  const p = d.producer ?? {}
+  const tile = (mo, icon, k, v, n, cls = '', acc = '--line') => `<div class="kpi" style="--k: var(${acc}); --mo:${mo}">
+    <div class="k"><span class="ico" aria-hidden="true">${icon}</span>${esc(k)}</div><div class="v${cls ? ' ' + cls : ''}">${v}</div>${n ? `<div class="n">${esc(n)}</div>` : ''}
+  </div>`
+  const blocksWon = p.blocks?.total
+  const rankVal = p.rank !== undefined ? `#${num(p.rank)}` : '—'
+  const rankSub = p.rank !== undefined ? `of ${num(p.producers)} producers` : 'not seen yet'
+  const last24 = p.blocks?.day24h
+  const shareVal = p.sharePercent !== undefined ? `${p.sharePercent}%` : '—'
+  const blockOk = d.chain?.currentBlock !== undefined
+  const blockVal = blockOk ? num(d.chain.currentBlock) : (d.chain?.ok === false ? 'Unreachable' : '—')
+  return [
+    tile(10, '🏆', 'Blocks won', blocksWon !== undefined ? num(blocksWon) : '—', blocksWon === undefined ? 'none observed' : null, blocksWon === undefined ? 'sub' : '', '--acc-producer'),
+    tile(20, '🏅', 'Network rank', rankVal, rankSub, rankVal === '—' ? 'sub' : '', '--acc-network'),
+    tile(30, '🕐', 'Last 24h', last24 !== undefined ? num(last24) : '—', last24 === undefined ? 'collecting' : null, last24 === undefined ? 'sub' : '', '--acc-race'),
+    tile(40, '🥧', 'Observed share', shareVal, shareVal === '—' ? null : 'of observed blocks', shareVal === '—' ? 'sub' : '', '--acc-network'),
+    tile(45, '⛓️', 'Current block', blockVal, blockOk ? 'current' : null, blockOk ? '' : 'bad', '--acc-chain'),
+  ].join('')
+}
+
+const REFRESH_MS_FOR_STALE = 90000
 
 function render(d) {
   if (d.schema > 1) {
-    $('grid').innerHTML = `<section><h2>Unsupported</h2><div class="sub">This page understands
+    $('grid').innerHTML = `<section class="card-full"><h2>Unsupported</h2><div class="sub">This page understands
       schema 1 and the data is schema ${esc(d.schema)}. It is newer than the page; nothing is drawn
       rather than drawing it wrong.</div></section>`
     return
   }
   $('label').textContent = d.label || 'producer'
-  const st = d.status === 'ok' ? 'ok' : d.status === 'degraded' ? 'warn' : 'bad'
-  $('state').textContent = d.status ?? 'unknown'
-  $('state').className = `pill ${st}`
+  setStatusPill(headerState(d, false))
   $('net').textContent = d.chain?.networkName ? `${d.chain.networkName} · chain ${String(d.chain.chainId ?? '').slice(0, 10)}…` : ''
+  const updatedEl = $('updated')
+  if (d.generatedAt) { updatedEl.textContent = `updated ${new Date(d.generatedAt).toLocaleTimeString()}`; updatedEl.hidden = false }
 
   // A page fed by a file that stopped updating must say so. Without this it
-  // shows yesterday's numbers with total confidence.
+  // shows yesterday's numbers with total confidence. Kept at its own 30-minute
+  // threshold -- calibrated to this page's slower, often CDN-fronted polling --
+  // separately from the header pill's shorter one.
   const age = (Date.now() - new Date(d.generatedAt).getTime()) / 1000
   $('stale').innerHTML = age > 1800
     ? `<div class="stale">This page has not been updated in ${dur(age)}. The node stopped publishing —
@@ -110,10 +240,10 @@ function render(d) {
     : ''
 
   const p = d.producer ?? {}, n = d.network ?? {}, c = n.concentration, bt = n.blockTime
-  const cards = []
+  const groups = { performance: [], network: [], production: [], analytics: [] }
 
-  cards.push(`<section style="--c: var(--c-producer)">
-    <h2>This producer</h2>
+  groups.performance.push(`<section class="card-full" style="--c: var(--acc-producer); --mo:60">
+    <h2><span class="ico" aria-hidden="true">⚙️</span>This producer</h2>
     <div class="big">${num(p.blocks?.total)}</div>
     <div class="sub">blocks won${p.producers ? ` · #${num(p.rank)} of ${num(p.producers)}` : ''}</div>
     ${dl([
@@ -132,8 +262,8 @@ function render(d) {
   </section>`)
 
   if (d.chain?.currentBlock !== undefined) {
-    cards.push(`<section style="--c: var(--c-chain)">
-      <h2>Chain</h2>
+    groups.network.push(`<section style="--c: var(--acc-chain); --mo:50">
+      <h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2>
       <div class="big">${num(d.chain.currentBlock)}</div>
       <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
       ${dl([
@@ -146,21 +276,22 @@ function render(d) {
 
   if (c) {
     const skew = c.evenShare > 0 ? (c.leaderShare / c.evenShare).toFixed(1) : null
-    cards.push(`<section style="--c: var(--c-network)">
-      <h2>XL1 Network</h2>
+    const rows = (n.standings ?? []).slice(0, 12)
+    groups.network.push(`<section style="--c: var(--acc-network); --mo:70">
+      <h2><span class="ico" aria-hidden="true">🌐</span>XL1 Network</h2>
       <div class="big">${num(c.producers)}</div>
       <div class="sub">producers seen across ${num(n.observed?.blocks)} observed blocks</div>
       ${dl([
         ['Nakamoto coefficient', `<span class="${c.nakamoto <= 2 ? 'bad' : c.nakamoto <= 3 ? 'warn' : 'ok'}">${num(c.nakamoto)}</span>
-          <span class="sub" title="The fewest producers whose combined observed output passes 50%. Higher is more decentralised.">of ${num(c.producers)}</span>`],
-        ['Top producer', `${c.leaderShare}%${skew ? ` <span class="sub">· ${skew}× an even split</span>` : ''}`],
-        ['Top 3 combined', `${c.top3Share}%`],
+          <span class="sub">of ${num(c.producers)}</span> ${info('The fewest producers whose combined observed output passes 50%. Higher is more decentralised.')}`],
+        ['Top producer', `${c.leaderShare}%${skew ? ` <span class="sub">· ${skew}× an even split</span> ${info('How far the leader’s share sits above what an equal split among all producers would be. 1.0× is perfectly even.')}` : ''}`],
+        ['Top 3 combined', `${c.top3Share}% ${info('Share held by the three largest producers together — a second view of concentration that one leader’s share alone can hide.')}`],
         ['Even split would be', `<span class="sub">${c.evenShare}% each</span>`],
-        c.nakamoto67 !== undefined && ['To reach 67%', `${num(c.nakamoto67)} producers`],
+        c.nakamoto67 !== undefined && ['To reach 67%', `${num(c.nakamoto67)} producers ${info('The fewest producers whose combined share passes two-thirds — the threshold needed to finalize under XL1’s consensus rule, not just outvote at 50%.')}`],
       ])}
-      <div class="bar">${(n.standings ?? []).slice(0, 12).map((r) =>
-        `<i class="${r.isSelf ? 'self' : ''}" style="width:${Math.max(0.5, r.sharePercent ?? 0)}%" title="${esc(r.label ?? r.address.slice(0,8))} — ${r.sharePercent}%"></i>`).join('')}</div>
-      <div class="sub" style="margin-top:4px">each block is one producer's share</div>
+      <div class="bar">${rows.map((r, i) =>
+        `<i class="${r.isSelf ? 'self' : ''}${i < (c.nakamoto ?? 0) ? ' nk' : ''}" style="width:${Math.max(0.5, r.sharePercent ?? 0)}%" title="${esc(r.label ?? r.address.slice(0,8))} — ${r.sharePercent}%"></i>`).join('')}</div>
+      <div class="sub" style="margin-top:4px">each block is one producer's share · outlined = counted toward the Nakamoto coefficient</div>
     </section>`)
   }
 
@@ -170,20 +301,27 @@ function render(d) {
     while (hi > lo && bt.buckets[hi] === 0) hi--
     const cols = []
     for (let i = lo; i <= hi; i++) cols.push([bt.edges[i], bt.buckets[i], bt.edges[i + 1]])
-    cards.push(`<section style="--c: var(--c-blocktime)">
-      <h2>Block time</h2>
+    const axisLo = cols[0]?.[0] ?? 0
+    const axisHi = cols[cols.length - 1]?.[2] ?? (axisLo + 1)
+    const tickPct = (sec) => Math.max(0, Math.min(100, ((sec - axisLo) / Math.max(1, axisHi - axisLo)) * 100))
+    const ticks = [bt.p95Seconds !== undefined && ['P95', bt.p95Seconds], bt.p99Seconds !== undefined && ['P99', bt.p99Seconds]].filter(Boolean)
+    groups.analytics.push(`<section class="card-full" style="--c: var(--acc-analytics); --mo:100">
+      <h2><span class="ico" aria-hidden="true">⏱️</span>Block time</h2>
       <div class="big">${bt.medianSeconds}s</div>
       <div class="sub">median over ${num(bt.samples)} observed intervals</div>
-      <div class="hist">${cols.map(([e, cnt, nx]) => `
-        <div class="hist-col" title="${e}–${nx ?? '∞'}s · ${num(cnt)} blocks">
-          <div class="hist-bar" style="height:${cnt === 0 ? 0 : Math.max(2, (cnt / max) * 100)}%"></div>
-          <div class="hist-x">${e}</div>
-        </div>`).join('')}</div>
+      <div class="hist-wrap">
+        <div class="hist">${cols.map(([e, cnt, nx]) => `
+          <div class="hist-col" title="${e}–${nx ?? '∞'}s · ${num(cnt)} blocks">
+            <div class="hist-bar" style="height:${cnt === 0 ? 0 : Math.max(2, (cnt / max) * 100)}%"></div>
+            <div class="hist-x">${e}</div>
+          </div>`).join('')}</div>
+        ${ticks.map(([label, sec]) => `<div class="hist-tick" style="left:${tickPct(sec).toFixed(1)}%"><span>${label}</span></div>`).join('')}
+      </div>
       <div class="sub" style="text-align:center">seconds between consecutive blocks</div>
       ${dl([
         ['Mean', `${bt.meanSeconds}s`],
         ['P95', `<span title="95% of intervals were at or below this. A bucket floor, not a decimal.">≥ ${bt.p95Seconds}s</span>`],
-        ['P99', `≥ ${bt.p99Seconds}s`],
+        ['P99', `≥ ${bt.p99Seconds}s ${info('99% of observed intervals were at or below this — the worst-case tail floor.')}`],
         ['Fastest / slowest', `${bt.minSeconds}s / ${bt.maxSeconds}s`],
       ])}
     </section>`)
@@ -193,8 +331,8 @@ function render(d) {
   const pr = d.price ?? {}
 
   if (pr.marketNote) {
-    cards.push(`<section style="--c: var(--c-worth)">
-      <h2>What it is worth</h2>
+    groups.performance.push(`<section style="--c: var(--acc-rewards); --mo:64">
+      <h2><span class="ico" aria-hidden="true">⚖️</span>What it is worth</h2>
       <div class="big sub" style="font-size:19px">nothing, yet</div>
       <div class="sub">${esc(pr.marketNote)}</div>
       ${pr.notional !== undefined ? dl([
@@ -206,20 +344,37 @@ function render(d) {
     </section>`)
   }
 
+  // Operations first, and ahead of the two cards that each explain a piece of
+  // its score -- the same priority order as the private dashboard.
+  if (ops?.score !== undefined) {
+    groups.production.push(`<section style="--c: var(--acc-ops); --mo:80">
+      <h2><span class="ico" aria-hidden="true">🎯</span>Operations</h2>
+      <div class="big">${num(ops.score)}<span class="sub" style="font-size:16px"> / 100</span></div>
+      <div class="sub">mean of the measured components</div>
+      ${dl((ops.components ?? []).map((c) => [c.label, `${num(c.value)} <span class="sub">${esc(c.why ?? '')}</span>`]))}
+      ${ops.bottleneck?.text ? `<div class="sub" style="margin-top:8px">${esc(ops.bottleneck.text)}</div>` : ''}
+    </section>`)
+  }
+
   if (race && race.built !== undefined) {
     const lost = race.lost ?? {}
     const totalLost = Object.values(lost).reduce((a, b) => a + b, 0)
-    const reason = (k, label) => (lost[k] ?? 0) > 0 &&
-      [label, `${num(lost[k])} <span class="sub">${totalLost ? Math.round((lost[k] / totalLost) * 100) : 0}% of losses</span>`]
-    cards.push(`<section style="--c: var(--c-race)">
-      <h2>Candidate race</h2>
+    const reasonRows = [
+      lost.behindFinalizedHead > 0 && ['Head advanced first', lost.behindFinalizedHead],
+      lost.txAlreadyFinalized > 0 && ['Tx already finalized', lost.txAlreadyFinalized],
+      lost.blockNumberMismatch > 0 && ['Block number mismatch', lost.blockNumberMismatch],
+    ].filter(Boolean)
+    const stack = totalLost > 0
+      ? `<div class="reason-stack">${reasonRows.map(([, v]) => `<i style="width:${Math.max(1, (v / totalLost) * 100)}%"></i>`).join('')}</div>`
+      : ''
+    groups.production.push(`<section style="--c: var(--acc-race); --mo:82">
+      <h2><span class="ico" aria-hidden="true">⚔️</span>Candidate race</h2>
       <div class="big">${num(race.built)}</div>
       <div class="sub">candidates built in the last ${Math.round((race.windowSeconds ?? 3600) / 60)} minutes</div>
+      ${stack}
       ${dl([
         ['Rejected locally', num(totalLost)],
-        reason('behindFinalizedHead', 'Head advanced first'),
-        reason('txAlreadyFinalized', 'Tx already finalized'),
-        reason('blockNumberMismatch', 'Block number mismatch'),
+        ...reasonRows.map(([label, v]) => [label, `${num(v)} <span class="sub">${totalLost ? Math.round((v / totalLost) * 100) : 0}% of losses</span>`]),
         race.retries ? ['Rebuilt and resubmitted', num(race.retries)] : null,
       ])}
       ${lost.behindFinalizedHead > 0 && totalLost > 0
@@ -228,20 +383,10 @@ function render(d) {
     </section>`)
   }
 
-  if (ops?.score !== undefined) {
-    cards.push(`<section style="--c: var(--c-ops)">
-      <h2>Operations</h2>
-      <div class="big">${num(ops.score)}<span class="sub" style="font-size:16px"> / 100</span></div>
-      <div class="sub">mean of the measured components</div>
-      ${dl((ops.components ?? []).map((c) => [c.label, `${num(c.value)} <span class="sub">${esc(c.why ?? '')}</span>`]))}
-      ${ops.bottleneck?.text ? `<div class="sub" style="margin-top:8px">${esc(ops.bottleneck.text)}</div>` : ''}
-    </section>`)
-  }
-
   if (lat?.cycleP50Ms !== undefined) {
     const st = lat.stages ?? {}
-    cards.push(`<section style="--c: var(--c-latency)">
-      <h2>Latency</h2>
+    groups.production.push(`<section style="--c: var(--acc-latency); --mo:84">
+      <h2><span class="ico" aria-hidden="true">📡</span>Latency</h2>
       <div class="big">${num(lat.cycleP50Ms)}<span class="sub" style="font-size:16px"> ms</span></div>
       <div class="sub">typical production cycle · p95 ${num(lat.cycleP95Ms)} ms · ${num(lat.samples)} samples</div>
       ${dl([
@@ -257,11 +402,11 @@ function render(d) {
   if (cont?.producingPercent !== undefined) {
     const hrs = cont.hours ?? []
     const max = Math.max(1, ...hrs.map((h) => h.wins ?? 0))
-    cards.push(`<section style="--c: var(--c-continuity)">
-      <h2>Continuity</h2>
+    groups.analytics.push(`<section class="card-full" style="--c: var(--acc-analytics); --mo:108">
+      <h2><span class="ico" aria-hidden="true">🕓</span>Continuity</h2>
       <div class="big">${cont.producingPercent}<span class="sub" style="font-size:16px">%</span></div>
       <div class="sub">of the ${num(cont.observedHours)} hours observed had at least one block won</div>
-      <div class="hist" style="height:56px">${hrs.slice(-72).map((h) => `
+      <div class="hist acc-green" style="height:56px">${hrs.slice(-72).map((h) => `
         <div class="hist-col" title="${esc(new Date(h.t).toLocaleString())} — ${h.observed ? `${h.wins ?? 0} won of ${h.chainBlocks ?? 0}` : 'not observed'}">
           <div class="hist-bar" style="height:${h.observed ? Math.max(3, ((h.wins ?? 0) / max) * 100) : 0}%;${
             h.observed ? '' : 'background:var(--line)'}"></div>
@@ -279,8 +424,8 @@ function render(d) {
   if (mv) {
     const movers = (mv.rows ?? []).filter((r) => r.deltaPercent !== undefined && Math.abs(r.deltaPercent) >= 0.5)
     const nm = (r) => esc(r.label ?? (r.address ?? '').slice(0, 10) + '…')
-    cards.push(`<section style="--c: var(--c-movement)">
-      <h2>Producer movement</h2>
+    groups.analytics.push(`<section style="--c: var(--acc-analytics); --mo:102">
+      <h2><span class="ico" aria-hidden="true">🔀</span>Producer movement</h2>
       <div class="big">${num(mv.seenThisWeek)}</div>
       <div class="sub">producing in the last 7 days · ${num(mv.seenToday)} today</div>
       ${mv.comparable === false
@@ -288,7 +433,7 @@ function render(d) {
            compare anything, so it is withheld rather than guessed.</div>`
         : movers.length
           ? movers.slice(0, 6).map((r) => `<div class="drift-row">
-              <span class="${r.deltaPercent > 0 ? 'ok' : 'warn'}">${r.deltaPercent > 0 ? '▲' : '▼'} ${Math.abs(r.deltaPercent).toFixed(2)} pts</span>
+              <span class="${r.deltaPercent > 0 ? 'ok' : 'bad'}">${r.deltaPercent > 0 ? '▲' : '▼'} ${Math.abs(r.deltaPercent).toFixed(2)} pts</span>
               <span>${nm(r)}</span><span class="sub">${r.previousSharePercent ?? '—'}% → ${r.sharePercent ?? '—'}%</span></div>`).join('')
           : '<div class="sub" style="margin-top:10px">no producer moved more than half a point this week</div>'}
       ${dl([
@@ -302,11 +447,11 @@ function render(d) {
   if (d.trend?.daily?.length) {
     const days = d.trend.daily.slice(-14)
     const maxB = Math.max(1, ...days.map((x) => x.blocks))
-    cards.push(`<section style="--c: var(--c-trend)">
-      <h2>Trends</h2>
+    groups.performance.push(`<section style="--c: var(--acc-analytics); --mo:66">
+      <h2><span class="ico" aria-hidden="true">📈</span>Trends</h2>
       <div class="big">${num(days.reduce((a, x) => a + x.blocks, 0))}</div>
       <div class="sub">blocks over ${num(days.length)} day(s)</div>
-      <div class="hist">${days.map((x) => `
+      <div class="hist acc-green">${days.map((x) => `
         <div class="hist-col" title="${esc(x.day)} — ${num(x.blocks)} blocks, ${num(Math.round(x.earned))} XL1">
           <div class="hist-bar" style="height:${x.blocks === 0 ? 0 : Math.max(3, (x.blocks / maxB) * 100)}%"></div>
           <div class="hist-x">${esc(x.day.slice(5))}</div>
@@ -316,14 +461,14 @@ function render(d) {
   }
 
   if (n.standings?.length) {
-    cards.push(`<section style="--c: var(--c-standings)" class="wide">
-      <h2>Producer standings</h2>
+    groups.network.push(`<section class="card-full" style="--c: var(--acc-network); --mo:110">
+      <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
       <table>
         <thead><tr><th>#</th><th>Producer</th><th>Blocks</th><th>Share</th></tr></thead>
         <tbody>${n.standings.map((r) => `<tr class="${r.isSelf ? 'self' : ''}">
           <td>${num(r.rank)}</td>
           <td>${r.url ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label ?? r.address.slice(0,10) + '…' + r.address.slice(-4))}</a>`
-                      : `<span class="mono">${esc(r.label ?? r.address)}</span>`}${r.isSelf ? ' <span class="sub">this node</span>' : ''}</td>
+                      : `<span class="mono">${esc(r.label ?? r.address)}</span>`}${r.isSelf ? ' <span class="you-badge">YOU</span>' : ''}</td>
           <td>${num(r.blocks)}</td><td>${r.sharePercent}%</td></tr>`).join('')}</tbody>
       </table>
       <div class="sub" style="margin-top:8px">Observed by this node over blocks ${num(n.observed?.fromBlock)}–${num(n.observed?.toBlock)},
@@ -332,7 +477,16 @@ function render(d) {
     </section>`)
   }
 
-  $('grid').innerHTML = cards.join('')
+  const groupSection = (icon, title, items) => items.length
+    ? `<section class="group"><h2 class="group-heading"><span class="ico" aria-hidden="true">${icon}</span>${esc(title)}</h2><div class="group-grid">${items.join('')}</div></section>`
+    : ''
+
+  $('grid').innerHTML = `<div class="kpi-row">${kpiRow(d)}</div>`
+    + groupSection('⚡', 'Producer performance', groups.performance)
+    + groupSection('📶', 'Network health', groups.network)
+    + groupSection('🔥', 'Production performance', groups.production)
+    + groupSection('📊', 'Analytics', groups.analytics)
+
   const b = d.build ?? {}
   $('foot').innerHTML = `Updated ${esc(new Date(d.generatedAt).toLocaleString())} · build ${esc(b.version ?? '?')} ${esc(b.commit ?? '')}
     ${b.source ? ` · <a href="${esc(b.source)}" target="_blank" rel="noopener">source ↗</a>` : ''}
@@ -366,9 +520,8 @@ async function tick() {
     // One failed poll is a hiccup and must not blank a page that is already
     // showing good data; several in a row is worth saying out loud.
     if (++failures < 3 && document.getElementById('grid').children.length) return
-    $('state').textContent = 'no data'
-    $('state').className = 'pill bad'
-    $('grid').innerHTML = `<section><h2>No data</h2><div class="sub">${esc(DATA_URL)} could not be read
+    setStatusPill('offline', 'NO DATA')
+    $('grid').innerHTML = `<section class="card-full"><h2>No data</h2><div class="sub">${esc(DATA_URL)} could not be read
       (${esc(e.message)}). The page is here; the node has not published to it yet.</div></section>`
   }
 }

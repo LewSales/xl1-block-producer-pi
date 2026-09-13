@@ -18,6 +18,36 @@
       --ok: #4ec97f; --warn: #e0a341; --bad: #ef6a60; --accent: #8f74ff;
     }
   }
+
+  /* Section accent system. One hue per DATA CATEGORY, not per card -- several
+     cards share a category on purpose (Block time and Continuity are both
+     "historical analytics", so both read violet). Used narrowly: a left
+     border, the heading, the headline metric, and that card's own bars/chart
+     -- never a filled card background, which is how the previous version of
+     this redesign went too monochromatic and the one before it went rainbow.
+     Set per card with style="--c: var(--acc-x)". */
+  :root {
+    --acc-producer: #1a7f47;  /* producer status / performance -- green */
+    --acc-rewards:  #a6720b;  /* rewards / earnings -- gold */
+    --acc-network:  #4f46e5;  /* network health -- indigo/purple */
+    --acc-chain:    #2f7ae5;  /* chain / finality -- blue */
+    --acc-race:     #0891b2;  /* candidate race -- cyan */
+    --acc-latency:  #c2540d;  /* latency / timing -- orange */
+    --acc-ops:      #0f766e;  /* operations / reliability -- teal */
+    --acc-analytics:#7c3aed;  /* historical analytics -- violet */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --acc-producer: #4ec97f;
+      --acc-rewards:  #e0a341;
+      --acc-network:  #818cf8;
+      --acc-chain:    #6aa8ff;
+      --acc-race:     #22d3ee;
+      --acc-latency:  #ff9d52;
+      --acc-ops:      #2dd4bf;
+      --acc-analytics:#c4b5fd;
+    }
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
@@ -28,35 +58,98 @@
     padding: 18px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
   }
   h1 { margin: 0; font-size: 17px; letter-spacing: -0.01em; }
+  .device { font-weight: 600; font-size: 13px; }
   .net { color: var(--muted); font-size: 13px; }
+  .addr { color: var(--muted); font-size: 12px; }
+  .updated { color: var(--muted); font-size: 12px; }
   .spacer { flex: 1; }
-  .pill {
-    padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
-    border: 1px solid transparent;
+
+  /* Status pill. Four states, not the server's raw three: STALE is derived
+     here from node.stale/generatedAt age, layered on top of ok/degraded/down,
+     because a header answering "is this live right now" needs to say so even
+     when every other signal still reads ok. */
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700;
+    letter-spacing: 0.03em; border: 1px solid transparent;
   }
-  .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
-  .pill.degraded { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
-  .pill.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 32%, transparent); }
-  /* Columns, not grid rows.
-     A row grid is as tall as its tallest card and wraps a leftover card onto a
-     row of its own — five items across four columns left one card beside three
-     columns of nothing. Balancing that by hand only holds until a card hides
-     for want of data and the count changes again.
-     Multi-column packs top to bottom and balances the column heights itself, so
-     there is no leftover row and no hole under a short card. break-inside keeps
-     a card whole; column-span lets the two full-width cards break out. */
-  main { padding: 20px; max-width: 1720px; margin: 0 auto;
-         columns: 320px; column-gap: 16px; }
-  /* break-inside on the CARD, not on the wrapper. A stack is two cards that
-     want to be together, not one indivisible slab — making the wrapper
-     unbreakable handed the balancer a 1000px block it could not move, so one
-     column ran to the floor while two others finished halfway up. Now a stack
-     is a plain block: the balancer keeps it together when it fits and splits it
-     when it must, and no card is ever cut in half. */
-  main > * { margin: 0 0 16px; }
-  section { break-inside: avoid; }
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 13px 14px; }
-  section h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+  .status-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+  .status-pill.online { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+  .status-pill.degraded, .status-pill.stale { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
+  .status-pill.offline { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 32%, transparent); }
+  @media (prefers-reduced-motion: no-preference) {
+    .status-pill.online .dot { animation: pulse-dot 2.2s ease-in-out infinite; }
+  }
+  @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  /* On a phone the header wrapped into "title + chip", then "chain id + build",
+     then the status pill — which buried our own version next to a chain hash it
+     has nothing to do with. Narrow screens put the build on its own line
+     directly under the title, where it reads as the version OF this thing. */
+  @media (max-width: 720px) {
+    header { align-items: flex-start; gap: 8px 10px; }
+    header h1 { order: 0; }
+    header .chip { order: 1; }
+    header .device { order: 2; }
+    header .brand { order: 3; flex-basis: 100%; margin-top: -2px; }
+    header .net { order: 4; }
+    header .addr { order: 5; }
+    header .updated { order: 6; flex-basis: 100%; }
+    header .spacer { display: none; }
+    header .status-pill { order: 7; }
+  }
+
+  /* Layout. #grid is a single flex column at every width: the KPI row and each
+     topic group are full-width blocks stacked top to bottom, and each group's
+     OWN grid does the real column work internally. This replaced a CSS
+     multi-column masonry that packed 16 differently-coloured cards by height
+     alone, with no deliberate mobile order and no way to make one card bigger
+     than another on purpose.
+     Below 768px, the row/group wrappers become display:contents so their
+     children promote to be direct flex items of #grid, and a --mo custom
+     property (set per KPI tile / card, alongside nothing else — there is no
+     second render path) drives `order` to reproduce one deliberate mobile
+     sequence instead of whatever DOM order happened to fall out of a column
+     balancer. */
+  main#grid { display: flex; flex-direction: column; gap: 20px; padding: 20px; max-width: 1720px; margin: 0 auto; }
+  .kpi-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  @media (max-width: 1023px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } }
+  /* dense: a card spanning 2 columns leaves a 1-column gap beside it at its own
+     row height, and without dense that gap stays empty until the grid runs out
+     of items -- a later small card jumps down to start a fresh row instead of
+     filling it. Dense back-fills it with whatever comes next that still fits,
+     which is what stops three small cards from sitting above a large empty
+     rectangle the fourth, bigger card left behind. */
+  .group-grid { display: grid; grid-template-columns: repeat(3, 1fr); grid-auto-flow: dense; gap: 16px; align-items: start; }
+  @media (max-width: 1279px) { .group-grid { grid-template-columns: repeat(2, 1fr); } }
+  .card-lg { grid-column: span 2; }
+  .card-full { grid-column: 1 / -1; }
+  @media (max-width: 767px) {
+    main#grid { display: flex; }
+    .kpi-row, .group, .group-grid { display: contents; }
+    .group-heading { display: none; }
+    [style*="--mo"] { order: var(--mo); }
+  }
+  /* A section is a heading and a divider, not another bordered box around its
+     cards -- that would be a fourth layer of box-in-box (page, section, card,
+     mini metric tile) for a grouping that only needs to read as structural. */
+  .group-heading {
+    margin: 0; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em;
+    color: var(--muted); font-weight: 700; display: flex; align-items: center; gap: 7px;
+  }
+
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 13px 14px; position: relative; overflow: hidden; }
+  section h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  /* The category accent, applied narrowly: a 3px left border and the heading
+     colour identify what a card is about before its title is read; the
+     headline metric picks it up too unless that number is already a status
+     colour (ok/warn/bad), which always wins over category identity. Bars,
+     sparklines and charts pick the same variable up further down -- one
+     switch per card, not per element. Most of the card stays neutral. */
+  section[style*="--c"] { border-left: 3px solid var(--c); }
+  section[style*="--c"] h2 { color: var(--c); }
+  section[style*="--c"] .big:not(.ok):not(.warn):not(.bad) { color: var(--c); }
   dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; align-items: baseline; font-size: 13px; }
   dt { color: var(--muted); white-space: nowrap; }
   dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -65,7 +158,11 @@
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
   .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
   .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
-  .bar > i { display: block; height: 100%; background: var(--accent); }
+  /* var(--c, var(--accent)): --c is set on the ancestor <section> and inherits
+     straight down, so a bar inside a category-accented card picks up that
+     colour with no extra selector; a card with no --c falls back to the plain
+     accent. Value-based colours (warn/bad below) always take priority. */
+  .bar > i { display: block; height: 100%; background: var(--c, var(--accent)); }
   .bar > i.warn { background: var(--warn); } .bar > i.bad { background: var(--bad); }
   ul.problems { margin: 10px 0 0; padding-left: 18px; color: var(--warn); }
   /* Standings. A wide table on a 480px phone must scroll inside its own box
@@ -76,21 +173,41 @@
   table.board th:nth-child(2) { text-align: left; }
   table.board td { padding: 4px 6px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   table.board td:nth-child(2) { text-align: left; }
-  table.board tr.self { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 650; }
+  /* This node's own row: green/primary, not the table's network-purple --
+     "which row is mine" is a different question from "what kind of data is
+     this table", and conflating the two made the self row disappear into the
+     rest of the purple. A left border carries it past a quick glance, the
+     same way the row tint alone did not. */
+  table.board tr.self { background: color-mix(in srgb, var(--acc-producer) 16%, transparent); font-weight: 650;
+    box-shadow: inset 3px 0 0 0 var(--acc-producer); }
   table.board tr + tr td { border-top: 1px solid var(--line); }
   table.board tr.gap td { border-top: 2px dashed var(--line); }
+  table.board tr.self .peer-bar > i { background: var(--acc-producer); }
+  table.board td.barcell { width: 40%; padding-left: 14px; }
   .peer-name { font-weight: 600; margin-right: 4px; }
+  /* Other producers' identity links: the network accent, so a name you can
+     click reads as "network" data at a glance, same as the card it sits in. */
+  table.board td a.mono { color: var(--acc-network); }
+  table.board tr.self td a.mono { color: inherit; }
   /* Four columns stretched across a 1280px card put the name and its numbers at
      opposite edges, which is a lot of eye travel to compare two rows. */
   table.board { max-width: 760px; }
+  .you-badge {
+    display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 1px 5px; border-radius: 999px; background: var(--accent); color: #fff;
+    margin-left: 4px; vertical-align: 1px;
+  }
   /* Candidate race. The pulse is one cell per chain block, oldest left, so the
      eye reads recency rightward the way the log does. Sized to stay legible at
      64 cells on a phone without a media query. */
   .pulse { display: flex; gap: 2px; align-items: flex-end; margin: 6px 0 2px; }
   .pulse > i { flex: 1 1 0; min-width: 2px; height: 14px; border-radius: 1px;
                background: color-mix(in srgb, var(--line) 80%, transparent); }
-  .pulse > i.win { background: var(--accent); height: 20px; }
+  .pulse > i.win { background: var(--c, var(--accent)); height: 20px; }
   /* Colour is not the only signal: a win is also taller. */
+  .reason-stack { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--line); margin: 8px 0 2px; }
+  .reason-stack > i { display: block; height: 100%; background: color-mix(in srgb, var(--warn) 65%, transparent); border-right: 1px solid var(--panel); }
+  .reason-stack > i:last-child { border-right: 0; }
   .reason { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; margin-top: 6px; }
   .reason-bar { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
   .reason-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--warn) 65%, transparent); }
@@ -102,7 +219,7 @@
   .conf { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
   .lat-row { display: grid; grid-template-columns: 5.5em 5em 1fr; gap: 4px 8px; align-items: center; margin-top: 5px; }
   .lat-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
-  .lat-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-chain) 70%, transparent); }
+  .lat-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c, var(--accent)) 70%, transparent); }
   .lat-bar.wire > i { background: color-mix(in srgb, var(--ok) 70%, transparent); }
   .lat-bar.tail > i { background: color-mix(in srgb, var(--warn) 70%, transparent); }
   /* Identity disclosure. <details> rather than a JS toggle: it is keyboard
@@ -114,26 +231,39 @@
   details.ident[open] > summary::before { content: '▾ '; }
   details.ident > summary:hover, details.ident > summary:focus-visible { color: var(--fg); }
   details.ident dl { margin-top: 6px; }
-  .spark rect { fill: color-mix(in srgb, var(--c) 70%, transparent); }
-  .spark.ok rect { fill: color-mix(in srgb, var(--ok) 70%, transparent); }
   .peer-bar { height: 7px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 60px; }
-  .peer-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-peers) 70%, transparent); }
+  .peer-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c, var(--accent)) 70%, transparent); }
   .alert-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: baseline;
     padding: 5px 0; border-top: 1px solid var(--line); }
   .alert-row:first-child { border-top: 0; }
   .alert-dot { font-size: 11px; line-height: 1; }
   .conc-bar { display: flex; gap: 2px; height: 12px; margin-top: 12px; border-radius: 3px; overflow: hidden; background: var(--line); }
-  .conc-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-network) 75%, transparent); }
+  .conc-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c, var(--accent)) 75%, transparent); }
+  /* The producers whose combined share crosses the Nakamoto coefficient get an
+     outline rather than a second colour — colour alone would fight the
+     self-highlight green already used on this same bar. */
+  .conc-bar > i.nk { outline: 2px solid var(--fg); outline-offset: -2px; }
   /* Fixed height so the card does not resize as the distribution shifts. */
+  .hist-wrap { position: relative; }
   .hist { display: flex; align-items: flex-end; gap: 2px; height: 96px; margin: 14px 0 6px; }
   .hist-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 0; }
-  .hist-bar { background: color-mix(in srgb, var(--c-network) 70%, transparent); border-radius: 2px 2px 0 0; }
+  .hist-bar { background: color-mix(in srgb, var(--c, var(--accent)) 70%, transparent); border-radius: 2px 2px 0 0; }
+  /* Two named overrides for the rare chart that represents a different
+     category than the card it lives in -- Continuity and the "blocks/day"
+     half of Trends are production data inside an analytics-violet card, and
+     "XL1/day" is earnings data in the same card. Everything else just
+     inherits --c from its own section, no override needed. */
+  .acc-green .hist-bar, .acc-green .trendbar-fill { background: color-mix(in srgb, var(--acc-producer) 70%, transparent); }
+  .acc-gold .hist-bar, .acc-gold .trendbar-fill { background: color-mix(in srgb, var(--acc-rewards) 70%, transparent); }
   .hist-x { font-size: 9px; color: var(--muted); text-align: center; padding-top: 3px;
     overflow: hidden; text-overflow: clip; white-space: nowrap; }
+  /* Percentile markers over the block-time histogram, positioned by the same
+     seconds axis the bars already use. Purely a CSS overlay — no new data,
+     no new request. */
+  .hist-tick { position: absolute; top: 0; bottom: 16px; width: 0; border-left: 1px dashed var(--muted); pointer-events: none; }
+  .hist-tick span { position: absolute; top: -13px; left: 3px; font-size: 9px; color: var(--muted); white-space: nowrap; }
   .drift-row { display: grid; grid-template-columns: 92px 1fr auto; gap: 8px; align-items: baseline;
     padding: 4px 0; border-top: 1px solid var(--line); font-size: 12px; }
-  table.board tr.self .peer-bar > i { background: var(--accent); }
-  table.board td.barcell { width: 40%; padding-left: 14px; }
   pre.log {
     margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
@@ -141,22 +271,43 @@
   }
   footer { padding: 0 20px 28px; color: var(--muted); font-size: 12px; }
   a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .err { color: var(--bad); font-size: 12.5px; }
 
   /* Stat tiles. A dense grid reads faster than a long definition list once
      there are more than about six figures to take in at a glance. */
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; margin-top: 10px; }
-  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  /* No border: a card already has one, and a mini stat box with its own
+     border inside it is the box-in-box effect this pass reduces. The tint
+     against the panel is enough to separate it without a fourth outline. */
+  .tile { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
   .tile .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
   .tile .v { font-size: 19px; font-weight: 640; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; margin-top: 4px; }
   .tile .n { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
+  /* KPI row. Deliberately bigger and plainer than a .tile: this is the answer
+     to "how is it doing", read in the first five seconds, so it outweighs
+     everything below it rather than matching it. */
+  /* --k (set per tile, e.g. style="--k: var(--acc-producer)") gives each KPI a
+     hairline top border tied to its meaning -- deliberately the lightest
+     touch in the whole accent system, since point 3 asks for a stat these
+     numbers outrank, not a coloured card. */
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-top: 2px solid var(--k, var(--line)); border-radius: 10px; padding: 14px 16px; }
+  .kpi .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; display: flex; align-items: center; gap: 5px; }
+  .kpi .k .ico { font-size: 12px; }
+  .kpi .v { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin-top: 6px; }
+  .kpi .v.sub { font-size: 16px; color: var(--muted); font-weight: 600; }
+  .kpi .v.bad { color: var(--bad); }
+  .kpi .n { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+
   /* Sparklines. preserveAspectRatio="none" stretches the box to the card, so
      the stroke needs non-scaling-stroke or it thins out as the card widens. */
   .spark { display: block; width: 100%; height: 40px; margin-top: 12px; overflow: visible; }
-  .spark path.line { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
-  .spark path.area { fill: color-mix(in srgb, var(--accent) 13%, transparent); stroke: none; }
+  .spark path.line { fill: none; stroke: var(--c, var(--accent)); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+  .spark path.area { fill: color-mix(in srgb, var(--c, var(--accent)) 13%, transparent); stroke: none; }
+  .spark rect { fill: color-mix(in srgb, var(--c, var(--accent)) 70%, transparent); }
   .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
+  .spark.ok rect { fill: color-mix(in srgb, var(--ok) 70%, transparent); }
   .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
   .trendbars { display: flex; align-items: flex-end; gap: 4px; margin-top: 10px; }
   .trendbar { flex: 1 1 0; min-width: 8px; display: flex; flex-direction: column; align-items: stretch; }
@@ -165,19 +316,6 @@
   .trendbar-n { font-size: 10px; color: var(--muted); text-align: center; margin-top: 3px;
                 font-variant-numeric: tabular-nums; }
   .brand { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-  /* On a phone the header wrapped into "title + chip", then "chain id + build",
-     then the status pill — which buried our own version next to a chain hash it
-     has nothing to do with. Narrow screens put the build on its own line
-     directly under the title, where it reads as the version OF this thing. */
-  @media (max-width: 720px) {
-    header { align-items: flex-start; gap: 8px 10px; }
-    header h1 { order: 0; }
-    header .chip { order: 1; }
-    header .brand { order: 2; flex-basis: 100%; margin-top: -2px; }
-    header .net { order: 3; }
-    header .spacer { display: none; }
-    header .pill { order: 4; }
-  }
   .brand a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--line); }
   .brand a:hover, .brand a:focus-visible { color: var(--fg); border-bottom-color: currentColor; }
   .credits { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line);
@@ -185,44 +323,17 @@
   .credits a { color: var(--accent); }
   .origin { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
   .brand svg { flex: none; }
-  .wide { column-span: all; }
-  /* One block holding two cards, stacked, kept whole by break-inside above.
-     The pairing survives the column layout: a stack is a single item, so its
-     two cards cannot be split across a column boundary. */
-  /* Deliberately a plain block rather than flex or grid: a flex container
-     cannot fragment across a column boundary in most engines, which is what
-     made the wrapper unbreakable in the first place. */
-  .stack > section { margin: 0 0 16px; }
-
-  /* Per-card accent. One hue per subject, carried by the heading, the rule
-     under it and that card's sparkline, so a glance finds the right panel
-     before the words are read. Set with style="--c: var(--c-chain)". */
-  :root {
-    --c-producer: #2f7ae5; --c-chain: #7a4ddb; --c-rewards: #1a7f47;
-    --c-software: #b4690e; --c-trend: #0d7c8f; --c-pi: #c0392b; --c-log: #5b6472;
-    --c-peers: #8a5a2b; --c-alert: #a3341f; --c-network: #2b6f6a; --c-fleet: #4a5a8f;
-    --c-worth: #1a7f47;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --c-producer: #6aa8ff; --c-chain: #a98bff; --c-rewards: #4ec97f;
-      --c-software: #e0a341; --c-trend: #48c3d6; --c-pi: #ff8a7a; --c-log: #9aa4b2;
-      --c-peers: #d7a06a; --c-alert: #ff9d84; --c-network: #5fc9c0; --c-fleet: #93a7e6;
-      --c-worth: #4ec97f;
-    }
-  }
-  section { position: relative; overflow: hidden; }
-  /* A hairline of the card's own colour along the top edge. */
-  section[style*="--c"]::before {
-    content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
-    background: linear-gradient(90deg, var(--c), transparent 70%);
-  }
-  section h2 { display: flex; align-items: center; gap: 7px; }
-  section[style*="--c"] h2 { color: var(--c); }
-  section[style*="--c"] .spark path.line { stroke: var(--c); }
-  section[style*="--c"] .spark path.area { fill: color-mix(in srgb, var(--c) 14%, transparent); }
-  section[style*="--c"] .bar > i:not(.warn):not(.bad) { background: var(--c); }
   .ico { font-size: 14px; line-height: 1; filter: saturate(1.1); }
+
+  /* Info tooltip. A bare title="" is not reliably keyboard-discoverable, so the
+     glyph is a focusable element and the explanation also appears on
+     :focus-visible, not only :hover — the same text either way, since this is
+     a native title attribute, not a rendered popover. */
+  .info { display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--line);
+    color: var(--muted); font-size: 10px; font-style: normal; line-height: 1;
+    background: none; padding: 0; cursor: help; font-family: inherit; }
+  .info:hover, .info:focus-visible { color: var(--fg); border-color: var(--muted); }
 
   /* Attribution. Deliberately plain — it is a disclaimer, not a badge. */
   .whose {
@@ -249,8 +360,11 @@
 <header>
   <h1>⛏️ XL1 Block Producer</h1>
   <span class="chip" title="An independent project. Not built, endorsed, or supported by XYO.">unofficial</span>
+  <span class="device mono" id="device" hidden></span>
   <span class="net" id="net">—</span>
+  <span class="addr mono" id="hdraddr" hidden></span>
   <span class="spacer"></span>
+  <span class="updated" id="updated" hidden></span>
   <!-- Build identity, next to the mark. Inline SVG rather than an image file:
        one less request, scales at any size, and it takes its colour from the
        theme instead of shipping two versions. currentColor for the ring so it
@@ -259,7 +373,7 @@
     <span id="brandmark"></span>
     <a class="mono" id="build" target="_blank" rel="noopener noreferrer">—</a>
   </span>
-  <span class="pill" id="overall">connecting…</span>
+  <span class="status-pill" id="overall"><span class="dot" aria-hidden="true"></span>connecting…</span>
 </header>
 <main id="grid"></main>
 <footer id="foot">—</footer>
@@ -279,6 +393,15 @@ const dur = (s) => {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60)
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`
 }
+// Forty hex characters twice over dominated cards for something an operator
+// verifies once and then never reads again — used wherever a full address
+// would otherwise crowd out the number the card is actually about.
+const shortAddr = (a) => `${String(a ?? '').slice(0, 6)}…${String(a ?? '').slice(-4)}`
+// A focusable info glyph rather than a bare title="" on running text: the
+// same explanation, but reachable with a keyboard and revealed on
+// :focus-visible as well as :hover.
+const info = (title) => `<button type="button" class="info" title="${esc(title)}" aria-label="${esc(title)}">i</button>`
+
 // Provenance marks. xl1-cli is XYO's own software; this dashboard is not, and
 // the page says so in the header already. Putting the two side by side in
 // Software & host makes the distinction concrete where the versions are read:
@@ -371,10 +494,79 @@ const bar = (pct, warnAt = 70, badAt = 90) => {
   return `<div class="bar"><i class="${cls}" style="width:${p}%"></i></div>`
 }
 
+// Four states, derived client-side from what the server already sends. STALE
+// sits at a shorter threshold (60s) than the server's own node.stale cutoff
+// (120s) so the header can flag lag before that stricter threshold even
+// trips; it is a presentation choice layered on top, not a second source of
+// truth. Precedence: a fetch failure or 'down' always wins, staleness beats a
+// merely 'degraded' status, and anything else is fine.
+const HEADER_STALE_MS = 60000
+function headerState(d, fetchFailed) {
+  if (fetchFailed) return 'offline'
+  if (d.status === 'down') return 'offline'
+  const genAge = d.generatedAt ? (Date.now() - new Date(d.generatedAt).getTime()) : Infinity
+  if (d.node?.stale || genAge > HEADER_STALE_MS) return 'stale'
+  if (d.status === 'degraded') return 'degraded'
+  return 'online'
+}
+function setStatusPill(state, label) {
+  const el = $('overall')
+  el.className = `status-pill ${state}`
+  el.innerHTML = `<span class="dot" aria-hidden="true"></span>${esc(label ?? state.toUpperCase())}`
+}
+
+// The five numbers that answer "how is it doing" before anything else on the
+// page is read. Every one is a re-read of a field the rest of the page
+// already renders elsewhere — nothing here is computed twice, and nothing
+// here costs a request the polling loop was not already making.
+function kpiRow(d) {
+  const dv = d.derived ?? {}
+  const pb = d.peers ?? {}
+  const bw = dv.blocksByWindow ?? {}
+  // acc: a hairline top border tying each KPI to the same category colours
+  // used below -- the lightest touch in the accent system, on purpose, since
+  // these five numbers are meant to outrank everything else on the page, not
+  // share a colour with it.
+  const tile = (mo, icon, k, v, n, cls = '', acc = '--line') => `<div class="kpi" style="--k: var(${acc}); --mo:${mo}">
+    <div class="k"><span class="ico" aria-hidden="true">${icon}</span>${esc(k)}</div><div class="v${cls ? ' ' + cls : ''}">${v}</div>${n ? `<div class="n">${esc(n)}</div>` : ''}
+  </div>`
+
+  const blocksWon = dv.producedObserved !== undefined ? dv.producedObserved
+    : (pb.self?.blocks !== undefined ? pb.self.blocks : undefined)
+  const rankVal = pb.selfRank !== undefined ? `#${num(pb.selfRank)}` : '—'
+  const rankSub = pb.selfRank !== undefined ? `of ${num(pb.producers)} producers` : 'not seen yet'
+  const last24 = bw.day24h
+  const last24Sub = bw.day24h === undefined ? 'collecting'
+    : bw.day24hComplete ? 'rolling 24h' : `${Math.round((bw.day24hSpanSeconds ?? 0) / 3600)}h so far`
+  const shareVal = dv.producedSharePercent !== undefined ? `${dv.producedSharePercent}%` : '—'
+  const blockOk = d.chain?.ok === true
+  const blockVal = blockOk ? num(d.chain.currentBlock) : (d.chain?.ok === false ? 'Unreachable' : '—')
+
+  return [
+    tile(10, '🏆', 'Blocks won', blocksWon !== undefined ? num(blocksWon) : '—', blocksWon === undefined ? 'none observed' : null, blocksWon === undefined ? 'sub' : '', '--acc-producer'),
+    tile(20, '🏅', 'Network rank', rankVal, rankSub, rankVal === '—' ? 'sub' : '', '--acc-network'),
+    tile(30, '🕐', 'Last 24h', last24 !== undefined ? num(last24) : '—', last24Sub, last24 === undefined ? 'sub' : '', '--acc-race'),
+    tile(40, '🥧', 'Observed share', shareVal, shareVal === '—' ? null : 'of scanned blocks', shareVal === '—' ? 'sub' : '', '--acc-network'),
+    tile(45, '⛓️', 'Current block', blockVal, blockOk ? 'current' : null, blockOk ? '' : 'bad', '--acc-chain'),
+  ].join('')
+}
+
 function render(d) {
-  $('overall').textContent = d.status === 'ok' ? 'healthy' : d.status
-  $('overall').className = `pill ${d.status}`
+  const failed = false
+  const state = headerState(d, failed)
+  setStatusPill(state)
   $('net').textContent = d.chain?.ok ? `${d.chain.networkName} · chain ${d.chain.chainId.slice(0, 10)}…` : 'chain unreachable'
+
+  const deviceEl = $('device')
+  const deviceLabel = d.system?.hostname || d.node?.host?.hostname
+  if (deviceLabel) { deviceEl.textContent = deviceLabel; deviceEl.hidden = false } else { deviceEl.hidden = true }
+
+  const addrEl = $('hdraddr')
+  const rewardAddr = d.chain?.balances?.reward?.address
+  if (rewardAddr) { addrEl.textContent = shortAddr(rewardAddr); addrEl.title = rewardAddr; addrEl.hidden = false } else { addrEl.hidden = true }
+
+  const updatedEl = $('updated')
+  if (d.generatedAt) { updatedEl.textContent = `updated ${new Date(d.generatedAt).toLocaleTimeString()}`; updatedEl.hidden = false } else { updatedEl.hidden = true }
 
   // Build identity in the header, beside the mark. Hidden until there is one to
   // show, so an older dashboard that reports no build does not render an empty
@@ -397,27 +589,34 @@ function render(d) {
     brand.hidden = true
   }
 
-  const cards = []
+  // Cards sort themselves into one of four topic groups as they are built,
+  // rather than being pushed into one flat list and re-sorted afterward by
+  // matching regexes against their own rendered <h2> text. Simpler, and there
+  // is nothing to keep in sync between where a card is written and where it
+  // appears — it appears wherever it was pushed.
+  const groups = { performance: [], network: [], production: [], analytics: [] }
+  let bannerHtml = ''
+  let logHtml = ''
   const dv = d.derived ?? {}
 
   // The one thing that explains a healthy node producing nothing. Loud, at the
-  // top, in its own banner — it is the answer to the question everything else
-  // on this page raises but cannot settle.
+  // top, in its own banner, outside every group — it is the answer to the
+  // question everything else on this page raises but cannot settle.
   if (d.node?.eligibility?.blocked && !d.node?.eligibilityIgnored) {
-    cards.push(`<section class="wide" style="border-color:color-mix(in srgb,var(--bad) 40%,transparent)">
+    bannerHtml = `<section class="card-full" style="--c: var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent)">
       <h2><span class="ico" aria-hidden="true">⛔</span>Producer cannot produce</h2>
       <div class="big bad">${esc(d.node.eligibility.reason)}</div>
       <div class="sub">the node said so itself, within the last ${esc(d.node.eligibility.window)}</div>
       <div class="banner">Every other signal here can read perfectly healthy while this is true.
         The container runs, the health probe passes, the chain is reachable — and no block this node
         builds will be accepted.</div>
-    </section>`)
+    </section>`
   }
 
   // Producer
   const c = d.node?.container
   const healthClass = d.health?.ok ? 'ok' : 'bad'
-  cards.push(`<section style="--c: var(--c-producer)">
+  groups.performance.push(`<section class="card-lg" style="--c: var(--acc-producer); --mo:60">
     <h2><span class="ico" aria-hidden="true">⚙️</span>Producer</h2>
     <div class="big ${healthClass}">${d.health?.ok ? 'Live' : 'Not responding'}</div>
     <div class="sub">/livez on ${esc(d.health?.endpoint ?? '')}</div>
@@ -429,7 +628,7 @@ function render(d) {
       dv.producedObserved !== undefined && ['Blocks produced',
         `<span class="${dv.producedObserved > 0 ? 'ok' : ''}">${num(dv.producedObserved)}</span>`
         + (dv.producedSince !== undefined ? ` <span class="sub">since #${num(dv.producedSince)}</span>` : '')],
-      dv.producedSharePercent !== undefined && ['Share of chain', `${dv.producedSharePercent}%`],
+      dv.producedSharePercent !== undefined && ['Share of chain', `${dv.producedSharePercent}% ${info('This node’s blocks as a percentage of all blocks this dashboard has scanned, not of the whole chain’s history.')}`],
       dv.lastBlock !== undefined && ['Last produced', dv.lastBlockUrl
         ? `<a href="${esc(dv.lastBlockUrl)}" target="_blank" rel="noopener noreferrer">#${num(dv.lastBlock)}</a>`
         : `#${num(dv.lastBlock)}`],
@@ -466,16 +665,16 @@ function render(d) {
     ${d.node?.stale ? `<div class="err" style="margin-top:8px">collector data ${d.node.ageSeconds}s old</div>` : ''}
   </section>`)
 
-  // Chain
+  // Chain — pulled to the front of Network Health (and given the earliest
+  // --mo in that group) because "is the chain itself reachable" is closer to
+  // the header's own question than to a deep-dive metric.
   if (d.chain?.ok) {
-    cards.push(`<section style="--c: var(--c-chain)">
+    groups.network.push(`<section style="--c: var(--acc-chain); --mo:50">
       <h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2>
       <div class="big">${num(d.chain.currentBlock)}</div>
       <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
       ${dl([
-        ['Finalization lag', `${num(d.chain.finalizationLag)} blocks`],
-
-
+        ['Finalization lag', `${num(d.chain.finalizationLag)} blocks ${info('Blocks produced but not yet irreversible. A rising number means finality is falling behind block production.')}`],
         ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener noreferrer">open</a>`],
       ])}
       <details class="ident"><summary>Chain identity</summary>
@@ -510,12 +709,12 @@ function render(d) {
         // times means the chain has stalled, which nothing else here would say.
         ['Head age', dv.headAgeSeconds !== undefined
           ? `<span class="${dv.headAgeSeconds > 180 ? 'warn' : ''}">${dv.headAgeSeconds}s</span>` : '—',
-          'since newest block'],
+          `since newest block ${info('Age of the newest block this dashboard has observed. Climbing past a couple of block times usually means the chain, not this node, has stalled.')}`],
         ['Watching', dv.observedSeconds ? dur(dv.observedSeconds) : '—', `${num(dv.samples)} samples`],
       ])}
     </section>`)
   } else {
-    cards.push(`<section style="--c: var(--c-chain)"><h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2><div class="big bad">Unreachable</div>
+    groups.network.push(`<section style="--c: var(--acc-chain); --mo:50"><h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2><div class="big bad">Unreachable</div>
       <div class="err" style="margin-top:8px">${esc(d.chain?.error ?? 'unknown')}</div></section>`)
   }
 
@@ -526,13 +725,8 @@ function render(d) {
   const addrCell = (x) => x?.url
     ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.address)}</a>`
     : `<span class="mono">${esc(x?.address)}</span>`
-  // Forty hex characters twice over dominated this card for something an
-  // operator verifies once and then never reads again. Demoted behind a
-  // disclosure — still one click away, still linked, still selectable, and
-  // still the full string rather than a truncation you cannot check.
-  const shortAddr = (a) => `${String(a ?? '').slice(0, 6)}…${String(a ?? '').slice(-4)}`
   if (b.reward || b.producer) {
-    cards.push(`<section style="--c: var(--c-rewards)">
+    groups.performance.push(`<section style="--c: var(--acc-rewards); --mo:62">
       <h2><span class="ico" aria-hidden="true">💰</span>Rewards</h2>
       ${b.reward?.xl1 ? `<div class="big">${esc(b.reward.xl1)} <span style="font-size:14px;color:var(--muted)">XL1</span></div>
         <div class="sub">reward address balance</div>` : ''}
@@ -540,7 +734,7 @@ function render(d) {
         b.reward?.sinceStart && ['Since dashboard start', `${esc(b.reward.sinceStart.xl1)} XL1`],
         b.reward?.error && ['Reward lookup', `<span class="bad">${esc(b.reward.error)}</span>`],
         b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
-        dv.rewardEqualsProducer && ['Signer', '<span class="ok">✓ same as reward address</span>'],
+        dv.rewardEqualsProducer && ['Signer', `<span class="ok">✓ same as reward address</span> ${info('Whether the address collecting the block reward is the same key that signs candidates. When they differ, two separate identities are involved.')}`],
       ])}
       <details class="ident"><summary>Addresses ${b.reward ? `· ${esc(shortAddr(b.reward.address))}` : ''}</summary>
         ${dl([
@@ -566,7 +760,7 @@ function render(d) {
         ['Today', num(bw.today), `since local midnight`],
         ['All time', bw.total !== undefined ? num(bw.total) : '—', 'since scanning began'],
       ]) : ''}
-      ${sparkDelta(d.history?.reward, 'ok', (total, active, intervals, max) =>
+      ${sparkDelta(d.history?.reward, '', (total, active, intervals, max) =>
         // The chain pays ~50 XL1 per block, so each bar is a win and the count
         // of non-empty intervals is how many times this node was paid.
         total > 0
@@ -598,7 +792,7 @@ function render(d) {
     const blockWorth = worthOf(50)
 
     if (pr.configured || pr.marketNote) {
-      cards.push(`<section style="--c: var(--c-worth)">
+      groups.performance.push(`<section style="--c: var(--acc-rewards); --mo:64">
         <h2><span class="ico" aria-hidden="true">⚖️</span>What it is worth</h2>
         ${pr.marketNote
           // The headline is about these coins, not about the token. XL1 trades;
@@ -649,7 +843,7 @@ function render(d) {
       : firing.length ? `${firing.length} firing`
       : 'All clear'
     const cls = !al.installed ? 'sub' : (al.ok === false || !al.running) ? 'bad' : firing.length ? 'warn' : 'ok'
-    cards.push(`<section style="--c: var(--c-alert)">
+    groups.network.push(`<section style="--c: var(--bad); --mo:72">
       <h2><span class="ico" aria-hidden="true">🔔</span>Alerts</h2>
       <div class="big ${cls}">${esc(big)}</div>
       <div class="sub">${al.installed
@@ -673,7 +867,7 @@ function render(d) {
         // indistinguishable from a quiet, healthy node.
         al.armed && ['Channels', al.armed.channels?.length
           ? `<span class="ok">${al.armed.channels.map(esc).join(', ')}</span>`
-          : '<span class="bad">none \u2014 nothing is delivered anywhere</span>'],
+          : '<span class="bad">none — nothing is delivered anywhere</span>'],
         // Its own row, and warned about rather than merely reported. Every other
         // channel can only report problems this machine is awake to observe;
         // this is the one that covers it ceasing to exist, where the signal is
@@ -685,7 +879,7 @@ function render(d) {
         al.error && ['Error', `<span class="bad">${esc(al.error)}</span>`],
       ])}
       ${al.armed && !al.armed.deadman ? `<div class="banner">Nothing here can tell you this machine has stopped existing.
-        A power cut, a dead disk, a host that never came back from a reboot \u2014 each sends exactly what a healthy node sends.
+        A power cut, a dead disk, a host that never came back from a reboot — each sends exactly what a healthy node sends.
         Point <span class="mono">XL1_ALERT_DEADMAN_URL</span> at a healthchecks.io or Uptime Kuma push monitor and the
         absence of a ping becomes the alarm.</div>` : ''}
       ${!al.installed ? `<div class="banner">The dashboard only reads what the alerter writes; it never sends anything itself.
@@ -704,28 +898,29 @@ function render(d) {
       // says whether production is spread or captured.
       const skew = co.evenShare > 0 ? co.leaderShare / co.evenShare : undefined
       const leaderRow = (d.peers?.top ?? []).find((r) => r.sharePercent === co.leaderShare)
-      cards.push(`<section style="--c: var(--c-network)">
+      const topRows = (d.peers?.top ?? []).slice(0, 10)
+      groups.network.push(`<section class="card-lg" style="--c: var(--acc-network); --mo:70">
         <h2><span class="ico" aria-hidden="true">🌐</span>XL1 Network</h2>
         <div class="big">${num(co.producers)}</div>
         <div class="sub">producers seen across ${num(ob.blocks)} observed blocks</div>
         ${dl([
           ['Nakamoto coefficient',
             `<span class="${co.nakamoto <= 2 ? 'bad' : co.nakamoto <= 3 ? 'warn' : 'ok'}">${num(co.nakamoto)}</span>`
-            + ` <span class="sub" title="The fewest producers whose combined observed output passes 50%. Higher is more decentralised; 1 means a single producer could dictate the chain.">of ${num(co.producers)} ⓘ</span>`],
+            + ` <span class="sub">of ${num(co.producers)}</span> ${info('The fewest producers whose combined observed output passes 50%. Higher is more decentralised; 1 means a single producer could dictate the chain.')}`],
           ['Top producer', `${co.leaderShare}%`
             + (leaderRow?.label ? ` <span class="sub">${esc(leaderRow.label)}</span>` : '')
-            + (skew ? ` <span class="sub">· ${skew.toFixed(1)}× an even split</span>` : '')],
-          ['Top 3 combined', `${co.top3Share}%`],
+            + (skew ? ` <span class="sub">· ${skew.toFixed(1)}× an even split</span> ${info('How far the leader’s share sits above what an equal split among all producers would be. 1.0× is perfectly even.')}` : '')],
+          ['Top 3 combined', `${co.top3Share}% ${info('Share held by the three largest producers together — a second view of concentration that one leader’s share alone can hide.')}`],
           ['Even split would be', `<span class="sub">${co.evenShare}% each</span>`],
-          co.nakamoto67 !== undefined && ['To reach 67%', `${num(co.nakamoto67)} producers`],
+          co.nakamoto67 !== undefined && ['To reach 67%', `${num(co.nakamoto67)} producers ${info('The fewest producers whose combined share passes two-thirds — the threshold needed to finalize under XL1’s consensus rule, not just outvote at 50%.')}`],
           bt.meanSeconds !== undefined && ['Block time',
             `${bt.meanSeconds}s mean <span class="sub">· ${bt.medianSeconds}s median</span>`],
           d.network?.selfShare !== undefined && ['This node', `${d.network.selfShare}%`],
         ])}
         ${co.producers > 0 ? `<div class="conc-bar" title="Observed share, largest producer first">${
-          (d.peers?.top ?? []).slice(0, 10).map((r) => `<i style="width:${Math.max(0.5, r.sharePercent ?? 0)}%${
+          topRows.map((r, i) => `<i class="${i < (co.nakamoto ?? 0) ? 'nk' : ''}" style="width:${Math.max(0.5, r.sharePercent ?? 0)}%${
             r.isSelf ? ';background:var(--ok)' : ''}" title="${esc(r.label ?? shortAddr(r.address))} — ${r.sharePercent}%"></i>`).join('')
-        }</div><div class="sub" style="margin-top:4px">each block is one producer's share · <span class="ok">green is this node</span></div>` : ''}
+        }</div><div class="sub" style="margin-top:4px"><span class="ok">green is this node</span> · outlined segments are counted toward the Nakamoto coefficient</div>` : ''}
         <div class="banner">Observed by this dashboard over blocks ${num(ob.fromBlock)}–${num(ob.toBlock)}, not a
           protocol-wide census. A producer that never appeared in that window is not counted.</div>
       </section>`)
@@ -744,27 +939,66 @@ function render(d) {
       const shown = []
       for (let i = lo; i <= hi; i++) shown.push([bt.edges[i], bt.buckets[i], bt.edges[i + 1]])
       const pct = (n) => ((n / bt.samples) * 100)
-      cards.push(`<section style="--c: var(--c-network)">
+      // Percentile ticks positioned on the same seconds axis as the bars —
+      // an overlay, not a second chart.
+      const axisLo = shown[0]?.[0] ?? 0
+      const axisHi = shown[shown.length - 1]?.[2] ?? (axisLo + 1)
+      const tickPct = (sec) => Math.max(0, Math.min(100, ((sec - axisLo) / Math.max(1, axisHi - axisLo)) * 100))
+      const ticks = [
+        bt.p95Seconds !== undefined && ['P95', bt.p95Seconds],
+        bt.p99Seconds !== undefined && ['P99', bt.p99Seconds],
+      ].filter(Boolean)
+      groups.analytics.push(`<section class="card-lg" style="--c: var(--acc-analytics); --mo:100">
         <h2><span class="ico" aria-hidden="true">⏱️</span>Block time</h2>
         <div class="big">${bt.medianSeconds}s</div>
         <div class="sub">median over ${num(bt.samples)} observed intervals</div>
-        <div class="hist">${shown.map(([edge, count, next]) => `
-          <div class="hist-col" title="${edge}–${next ?? '∞'}s · ${num(count)} blocks · ${pct(count).toFixed(1)}%">
-            <div class="hist-bar" style="height:${count === 0 ? 0 : Math.max(2, (count / max) * 100)}%"></div>
-            <div class="hist-x">${edge}</div>
-          </div>`).join('')}</div>
+        <div class="hist-wrap">
+          <div class="hist">${shown.map(([edge, count, next]) => `
+            <div class="hist-col" title="${edge}–${next ?? '∞'}s · ${num(count)} blocks · ${pct(count).toFixed(1)}%">
+              <div class="hist-bar" style="height:${count === 0 ? 0 : Math.max(2, (count / max) * 100)}%"></div>
+              <div class="hist-x">${edge}</div>
+            </div>`).join('')}</div>
+          ${ticks.map(([label, sec]) => `<div class="hist-tick" style="left:${tickPct(sec).toFixed(1)}%"><span>${label}</span></div>`).join('')}
+        </div>
         <div class="sub" style="text-align:center;margin-top:-2px">seconds between consecutive blocks</div>
         ${dl([
           ['Mean', `${bt.meanSeconds}s`],
           ['Median', `${bt.medianSeconds}s`],
           ['P95', `<span title="95% of observed intervals were at or below this. Read as a floor: it is the bucket edge, not a decimal.">≥ ${bt.p95Seconds}s ⓘ</span>`],
-          ['P99', `≥ ${bt.p99Seconds}s`],
+          ['P99', `≥ ${bt.p99Seconds}s ${info('99% of observed intervals were at or below this — the worst-case tail floor.')}`],
           ['Fastest / slowest', `${bt.minSeconds}s / ${bt.maxSeconds}s`],
           // Refusals are shown rather than swallowed: the shape is the point,
           // and a histogram quietly dropping a third of its input is a lie.
           (bt.rejected?.nonConsecutive > 0 || bt.rejected?.nonPositive > 0) && ['Not measured',
             `<span class="sub">${num(bt.rejected.nonConsecutive)} across scan gaps${
               bt.rejected.nonPositive > 0 ? `, ${num(bt.rejected.nonPositive)} out of order` : ''}</span>`],
+        ])}
+      </section>`)
+    }
+  }
+
+  // Continuity — ported from the public page, which has had it since launch.
+  // The operator view never did; it is the same field, just newly shown here.
+  {
+    const cont = d.continuity
+    if (cont?.producingPercent !== undefined) {
+      const hrs = cont.hours ?? []
+      const max = Math.max(1, ...hrs.map((h) => h.wins ?? 0))
+      groups.analytics.push(`<section class="card-lg" style="--c: var(--acc-analytics); --mo:108">
+        <h2><span class="ico" aria-hidden="true">🕓</span>Continuity</h2>
+        <div class="big">${cont.producingPercent}<span class="sub" style="font-size:16px">%</span></div>
+        <div class="sub">of the ${num(cont.observedHours)} hours observed had at least one block won</div>
+        <div class="hist acc-green" style="height:56px">${hrs.slice(-72).map((h) => `
+          <div class="hist-col" title="${esc(new Date(h.t).toLocaleString())} — ${h.observed ? `${h.wins ?? 0} won of ${h.chainBlocks ?? 0}` : 'not observed'}">
+            <div class="hist-bar" style="height:${h.observed ? Math.max(3, ((h.wins ?? 0) / max) * 100) : 0}%;${
+              h.observed ? '' : 'background:var(--line)'}"></div>
+          </div>`).join('')}</div>
+        <div class="sub" style="text-align:center">last 72 hours · a flat grey column is an hour nobody was watching</div>
+        ${dl([
+          ['Hours producing', num(cont.producingHours)],
+          ['Hours with none', `${num(cont.missedHours)} <span class="sub">while the chain moved</span>`],
+          cont.longestMissedHours > 0 && ['Longest gap', `${num(cont.longestMissedHours)} h`],
+          cont.unobservedHours > 0 && ['Not observed', `${num(cont.unobservedHours)} h <span class="sub">dashboard was down</span>`],
         ])}
       </section>`)
     }
@@ -781,11 +1015,11 @@ function render(d) {
       const down = movers.filter((r) => r.deltaPercent < 0).slice(-4).reverse()
       const name = (r) => esc(r.label ?? shortAddr(r.address))
       const row = (r) => `<div class="drift-row">
-        <span class="${r.deltaPercent > 0 ? 'ok' : 'warn'}">${r.deltaPercent > 0 ? '▲' : '▼'} ${Math.abs(r.deltaPercent).toFixed(2)} pts</span>
+        <span class="${r.deltaPercent > 0 ? 'ok' : 'bad'}">${r.deltaPercent > 0 ? '▲' : '▼'} ${Math.abs(r.deltaPercent).toFixed(2)} pts</span>
         <span>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${name(r)}</a>` : name(r)}</span>
         <span class="sub">${r.previousSharePercent ?? '—'}% → ${r.sharePercent ?? '—'}%</span>
       </div>`
-      cards.push(`<section style="--c: var(--c-network)">
+      groups.analytics.push(`<section style="--c: var(--acc-analytics); --mo:102">
         <h2><span class="ico" aria-hidden="true">🔀</span>Producer movement</h2>
         <div class="big">${num(ch?.seenThisWeek)}</div>
         <div class="sub">producing in the last 7 days · ${num(ch?.seenToday)} today</div>
@@ -793,7 +1027,7 @@ function render(d) {
           ? `<div class="banner">Share drift needs two full weeks of day buckets to compare.
               ${num(dr.daysWithData)} day(s) recorded so far — the comparison appears once there is something honest to compare.</div>`
           : `${up.length || down.length
-              ? `<div class="sub" style="margin-top:10px" title="This week's share of observed blocks minus last week's. Points, not percent-of-percent.">7-day share vs the week before ⓘ</div>
+              ? `<div class="sub" style="margin-top:10px">7-day share vs the week before ${info('This week’s share of observed blocks minus last week’s. Points, not percent-of-percent.')}</div>
                  ${up.map(row).join('')}${down.map(row).join('')}`
               : '<div class="sub" style="margin-top:10px">no producer moved more than half a point this week</div>'}`}
         ${dl([
@@ -821,7 +1055,7 @@ function render(d) {
       const dot = (n) => !n.ok ? 'bad'
         : n.status === 'down' ? 'bad' : n.status === 'degraded' ? 'warn' : 'ok'
       const row = (n) => `<tr${n.isSelf ? ' class="self"' : ''}>
-        <td><span class="alert-dot ${dot(n)}">\u25cf</span> ${esc(n.label)}${n.isSelf ? ' <span class="sub">this node</span>' : ''}</td>
+        <td><span class="alert-dot ${dot(n)}">●</span> ${esc(n.label)}${n.isSelf ? ' <span class="you-badge">YOU</span>' : ''}</td>
         <td>${n.ok
           ? `<span class="${n.status === 'ok' ? 'ok' : n.status === 'down' ? 'bad' : 'warn'}">${esc(n.status)}</span>`
           : `<span class="bad">unreachable</span>`}</td>
@@ -836,8 +1070,8 @@ function render(d) {
           ? esc(n.version ?? '—')
           : esc((n.error ?? 'no answer') + (n.lastSeenAt ? ' · last seen ' + new Date(n.lastSeenAt).toLocaleTimeString() : ''))}</td>
       </tr>`
-      cards.push(`<section class="wide" style="--c: var(--c-fleet)">
-        <h2><span class="ico" aria-hidden="true">\ud83d\udef0\ufe0f</span>Fleet</h2>
+      groups.analytics.push(`<section class="card-full" style="--c: var(--acc-analytics); --mo:104">
+        <h2><span class="ico" aria-hidden="true">🛰️</span>Fleet</h2>
         <div class="big ${fl.reachable === fl.total ? 'ok' : 'warn'}">${num(fl.reachable)}<span class="sub" style="font-size:16px"> of ${num(fl.total)}</span></div>
         <div class="sub">nodes answering${fl.combinedBlocks !== undefined
           ? ` · ${num(fl.combinedBlocks)} block(s) between ${num(fl.combinedFrom)} of them` : ''}</div>
@@ -855,8 +1089,287 @@ function render(d) {
     }
   }
 
+  // Operations — score, bottleneck, competition. All arithmetic over data that
+  // is already in this payload; the card issues no request of its own.
+  //
+  // First in this group, and full width: it is the one synthesized "how are we
+  // doing" number the other three cards each explain a piece of, so it reads
+  // before them, not beside a much shorter one. Sharing a row with Software &
+  // host at half this card's height left a slab of empty space under the
+  // shorter card every time -- full width removes the mismatch instead of
+  // trying to out-guess it.
+  const ops = dv.operations
+  if (ops && (ops.score !== undefined || ops.bottleneck)) {
+    // Confidence is shown wherever a number could be read as more solid than it
+    // is. A percentile over 19 samples and one over 13,000 look identical
+    // otherwise, and only one of them is worth acting on.
+    const conf = (n, warm = 30, high = 300) => {
+      if (!Number.isFinite(n)) return ''
+      const label = n >= high ? `high confidence · ${num(n)}` : n >= warm ? `limited · ${num(n)}` : `warming up · ${num(n)}`
+      return `<span class="conf" title="calculated from ${num(n)} samples">${label}</span>`
+    }
+    const cls = (v) => (v >= 75 ? '' : v >= 50 ? 'mid' : 'low')
+
+    const comp = ops.competition
+    groups.production.push(`<section class="card-full" style="--c: var(--acc-ops); --mo:80">
+      <h2><span class="ico" aria-hidden="true">🎯</span>Operations</h2>
+      ${ops.score !== undefined
+        ? `<div class="big">${num(ops.score)} <span style="font-size:14px;color:var(--muted)">/ 100</span></div>
+           <div class="sub" title="The mean of whichever components could be measured. A component with no data is left out rather than scored zero.">mean of ${num(ops.components.length)} measured component(s)</div>
+           ${ops.components.map((c) => `<div class="score-row" title="${esc(c.why)}">
+              <span class="sub">${esc(c.label)}</span><span class="mono">${num(c.value)}</span>
+              <span class="score-bar ${cls(c.value)}"><i style="width:${Math.max(2, c.value)}%"></i></span>
+            </div>`).join('')}`
+        : '<div class="sub">Not enough measured components for a score yet.</div>'}
+
+      ${ops.bottleneck ? `<div class="sub" style="margin-top:10px">Bottleneck</div>
+        <div class="${ops.bottleneck.key === 'none' ? 'ok' : ops.bottleneck.key === 'unknown' ? 'sub' : 'warn'}">
+          ${ops.bottleneck.key === 'none' ? '✓ ' : ops.bottleneck.key === 'unknown' ? '' : '! '}${esc(ops.bottleneck.text)}
+        </div>` : ''}
+
+      ${comp ? `<div class="sub" style="margin-top:10px">Field of ${num(comp.producers)}</div>
+        ${dl([
+          ['Our share', Number.isFinite(comp.ourShare) ? `${comp.ourShare}%` : '—'],
+          ['Leader', `${comp.leaderShare}%`],
+          ['Top 3 combined', `${comp.topThreeShare}%`],
+          ['vs median', Number.isFinite(comp.vsMedian)
+            ? `<span class="${comp.vsMedian >= 0 ? 'ok' : 'warn'}">${comp.vsMedian >= 0 ? '↑' : '↓'} ${Math.abs(comp.vsMedian)} pts</span> ${info('This node’s share compared to the field’s median producer, in percentage points.')}` : '—'],
+          ['vs leader', Number.isFinite(comp.vsLeader) ? `${comp.vsLeader} pts ${info('This node’s share compared to the current leader, in percentage points.')}` : '—'],
+        ])}` : ''}
+
+      ${(ops.sinceWin !== undefined || ops.longestGap !== undefined) ? tiles([
+        ['Since last win', ops.sinceWin !== undefined ? `${num(ops.sinceWin)}` : '—', 'blocks'],
+        ['Longest gap', ops.longestGap !== undefined ? `${num(ops.longestGap)}` : '—', `in last ${num(ops.ringBlocks)}`],
+      ]) : ''}
+
+      ${ops.stages ? `<div class="sub" style="margin-top:10px">Where a cycle spends its time ${conf(dv.latency?.samples)}</div>
+        ${(() => {
+          const rows = Object.entries(ops.stages).filter(([, v]) => Number.isFinite(v))
+          const top = Math.max(...rows.map(([, v]) => v), 1)
+          const names = { headFetch: 'head fetch', blockProduction: 'build', mempoolTx: 'mempool tx', mempoolBlocks: 'mempool blocks', submit: 'submit' }
+          return rows.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="lat-row">
+            <span class="sub">${esc(names[k] ?? k)}</span><span class="mono">${num(v)} ms</span>
+            <span class="lat-bar"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
+          </div>`).join('')
+        })()}
+        <div class="sub" style="margin-top:5px"
+          title="These nest: a cycle contains the head fetch and the build, and the build contains the mempool calls. They are durations, not a waterfall, and do not sum to the cycle.">
+          p50 per stage · nested, not a waterfall</div>` : ''}
+    </section>`)
+  }
+
+  // Trends — days, not minutes. The in-memory sparklines above reset with the
+  // container; this survives, which is the only way to answer "did it earn
+  // anything last week".
+  const tr = d.trend
+  if (tr && (tr.daily?.length || tr.error)) {
+    const days = tr.daily ?? []
+    const recent = days.slice(-14)
+    const maxB = Math.max(1, ...recent.map((x) => x.blocks))
+    const maxE = Math.max(1, ...recent.map((x) => x.earned))
+    const totalB = days.reduce((a, x) => a + x.blocks, 0)
+    const totalE = days.reduce((a, x) => a + x.earned, 0)
+    // Thicker bars with the number under each one. A bar chart with no scale is
+    // a shape; the value is what makes it a measurement. Only the last few days
+    // are labelled when the window is long, so the labels never collide.
+    const bars = (vals, max, fmt = (n) => num(n), cls = '') => {
+      const label = vals.length <= 10
+      return `<div class="trendbars ${cls}">${vals.map((v) => `
+        <div class="trendbar" title="${esc(v.day)}: ${fmt(v.n)}">
+          <div class="trendbar-fill" style="height:${Math.max(3, (v.n / max) * 100)}%"></div>
+          ${label ? `<div class="trendbar-n">${fmt(v.n)}</div>` : ''}
+        </div>`).join('')}</div>`
+    }
+
+    // Nothing recorded yet is not zero blocks and a peak of one. Say what is
+    // actually true — that it has not been running long enough — rather than
+    // charting placeholders that read as a node which earned nothing.
+    const empty = days.length === 0
+    groups.performance.push(`<section style="--c: var(--acc-analytics); --mo:66">
+      <h2><span class="ico" aria-hidden="true">📈</span>Trends</h2>
+      ${tr.error ? `<div class="err">${esc(tr.error)}</div>` : ''}
+      ${empty ? `
+        <div class="big sub" style="font-size:16px">collecting…</div>
+        <div class="sub">One sample every 5 minutes. The first full day appears tomorrow;
+          history survives restarts once the store is writable.</div>
+      ` : `
+        <div class="big">${num(totalB)}</div>
+        <div class="sub">blocks over ${num(days.length)} day(s) · ${num(tr.points)} samples</div>
+        ${bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB, undefined, 'acc-green')}
+        <div class="sparkfoot"><span>blocks/day</span><span>best ${num(maxB)} · avg ${num(Math.round(totalB / days.length))}</span></div>
+        ${bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE, (n) => num(Math.round(n)), 'acc-gold')}
+        <div class="sparkfoot"><span>XL1/day</span><span>best ${num(Math.round(maxE))} · avg ${num(Math.round(totalE / days.length))}</span></div>
+        ${tiles([
+          ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
+          ['Best day', num(maxB), 'blocks'],
+          ['Avg/day', num(Number((totalB / days.length).toFixed(1))), 'blocks'],
+          ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],
+        ])}
+      `}
+    </section>`)
+  }
+
+  // System
+  const s = d.system
+  if (s?.ok) {
+    const t = s.throttle
+    // Headroom, not throttle state. The soft limit is raised to 70 °C at
+    // provision time and the hard limit is 85 °C, so 65 °C was amber for a
+    // machine that was working exactly as configured.
+    const tempCls = s.cpuTempC >= 80 ? 'bad' : s.cpuTempC >= 75 ? 'warn' : 'ok'
+    // The headline is whatever this machine can actually measure. A Pi throttles
+    // on heat, so temperature is the number that matters and it has a sensor for
+    // it. Windows exposes no CPU temperature without vendor drivers and has no
+    // load average at all, so printing "—°C" and "load undefined" was the card
+    // describing a Pi it was not running on.
+    const hasTemp = Number.isFinite(s.cpuTempC)
+    const hasLoad = Array.isArray(s.loadAverage) && s.loadAverage.length > 0
+    const headline = hasTemp
+      ? `<div class="big ${tempCls}">${s.cpuTempC}°C</div><div class="sub">CPU temperature</div>`
+      : Number.isFinite(s.cpuPercent)
+        ? `<div class="big">${s.cpuPercent}<span style="font-size:14px;color:var(--muted)">% CPU</span></div>
+           <div class="sub">across ${num(s.cpuCount)} cores</div>`
+        : `<div class="big">${s.memory.usedPercent}<span style="font-size:14px;color:var(--muted)">% RAM</span></div>
+           <div class="sub">memory in use</div>`
+    groups.analytics.push(`<section style="--c: var(--acc-analytics); --mo:106">
+      <h2><span class="ico" aria-hidden="true">${s.platform === 'windows' ? '🖥️' : '🍓'}</span>${s.platform === 'windows' ? 'Host' : 'Raspberry Pi'}</h2>
+      ${s.hostUnavailable ? `<div class="big sub" style="font-size:16px">not reported</div>
+        <div class="sub">${esc(s.hostUnavailableReason ?? 'host metrics unavailable')} — this dashboard runs in a
+        container whose own memory and disk describe the Docker VM, not this machine, so nothing is shown rather
+        than something that would look like a measurement.</div>` : ''}
+      ${headline}
+      <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)}${hasLoad ? ` · load ${s.loadAverage.join(' ')}` : ''}</div>
+      ${hasTemp ? spark(d.history?.tempC) : ''}
+      ${tiles([
+        ['RAM', `${s.memory.usedPercent}%`, `${bytes(s.memory.totalBytes - s.memory.availableBytes)} of ${bytes(s.memory.totalBytes)}`],
+        s.swap?.totalBytes > 0 && ['Swap', `${s.swap.usedPercent}%`, `${bytes(s.swap.usedBytes)} of ${bytes(s.swap.totalBytes)}`],
+        s.disk && ['Disk', `${s.disk.usedPercent}%`, `${bytes(s.disk.freeBytes)} free`],
+        s.cpuPercent !== undefined
+          ? ['CPU', `${s.cpuPercent}%`, `${s.cpuCount} cores`]
+          : ['Load', `${s.loadAverage?.[0] ?? '—'}`, `${s.cpuCount} cores`],
+        t && ['Power', t.undervoltageNow ? '<span class="bad">LOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">dipped</span>' : '<span class="ok">stable</span>',
+              t.undervoltageNow ? 'undervolting now' : t.undervoltageSinceBoot ? 'since boot' : '5V holding'],
+        // Both limits, not just the hard one. Reading bits 2/18 alone showed
+        // "none" in green on a Pi whose soft limit had been clocking it from
+        // 1.4 GHz to 1.2 GHz — the gentler limit is the one a 3 B+ actually
+        // hits, so the tile was silent about the only throttling that happens.
+        t && ['Throttle',
+              t.throttledNow ? '<span class="bad">HARD</span>'
+              : t.softTempLimitNow ? '<span class="bad">HEAT</span>'
+              : (t.throttledSinceBoot || t.softTempLimitSinceBoot) ? '<span class="warn">earlier</span>'
+              : '<span class="ok">none</span>',
+              t.throttledNow ? '85°C limit reached'
+              : t.softTempLimitNow ? 'clocked down to 1.2 GHz'
+              : t.throttledSinceBoot ? '85°C limit, since boot'
+              : t.softTempLimitSinceBoot ? 'heat, since boot'
+              : 'full clock'],
+      ])}
+      ${bar(s.memory.usedPercent)}
+    </section>`)
+  }
+
+  // Candidate race — why blocks are being lost, from telemetry already collected.
+  //
+  // The counters are mixed-source on purpose and the card says so. Losses and
+  // retries are the producer's own log, the only place that records WHY a
+  // candidate died. Wins are the chain scan, because "Published block" in the
+  // log means submitted, not accepted — treating it as success is the bug that
+  // once had this dashboard reporting zero blocks for a node producing several
+  // every ten minutes.
+  const race = dv.race
+  if (race && (race.built !== undefined || race.chainBlocks)) {
+    const mins = (sec) => (sec >= 3600 ? `${(sec / 3600).toFixed(1)}h` : `${Math.round(sec / 60)}m`)
+    // The pulse reads oldest-left. A win is taller AND accented, so the strip
+    // survives greyscale and colour-blindness.
+    const pulse = (race.pulse ?? []).length > 0
+      ? `<div class="pulse" role="img" aria-label="${num(race.won)} of the last ${num(race.chainBlocks)} chain blocks were produced by this node">
+           ${race.pulse.map((w) => `<i class="${w ? 'win' : ''}"></i>`).join('')}
+         </div>
+         <div class="sub">last ${num(race.chainBlocks)} chain blocks${race.chainWindowSeconds ? ` · ${mins(race.chainWindowSeconds)}` : ''} · <span class="ok">${num(race.won)} won</span></div>`
+      : ''
+
+    // A stacked bar above the itemised list — the shape of losses at a glance,
+    // before reading which reason is which.
+    const stack = (race.reasons ?? []).length > 0
+      ? `<div class="reason-stack">${race.reasons.map((r) => `<i style="width:${Math.max(1, r.percent)}%" title="${esc(r.label)} — ${r.percent}%"></i>`).join('')}</div>`
+      : ''
+
+    // Share of losses, not of builds: the question is "when we lose, why".
+    const reasons = (race.reasons ?? []).length > 0
+      ? `<div class="sub" style="margin-top:10px">Why candidates lost${race.observedSeconds ? ` · last ${mins(race.observedSeconds)}` : ''}</div>`
+        + stack
+        + race.reasons.map((r) => `<div class="reason">
+             <span>${esc(r.label)}</span><span class="mono">${num(r.count)} · ${r.percent}%</span>
+             <span class="reason-bar"><i style="width:${Math.max(2, r.percent)}%"></i></span>
+           </div>`).join('')
+      : '<div class="sub" style="margin-top:10px">No candidates rejected in the window.</div>'
+
+    groups.production.push(`<section style="--c: var(--acc-race); --mo:82">
+      <h2><span class="ico" aria-hidden="true">⚔️</span>Candidate race</h2>
+      <div class="big">${race.won !== undefined ? num(race.won) : '—'} <span style="font-size:14px;color:var(--muted)">won</span></div>
+      <div class="sub" title="Wins are counted from the chain scan. A log line saying &quot;Published block&quot; means submitted, not accepted.">of ${num(race.chainBlocks)} recent blocks · chain-counted</div>
+      ${pulse}
+      ${tiles([
+        ['Built', race.built !== undefined ? num(race.built) : '—', race.observedSeconds ? mins(race.observedSeconds) : 'log window'],
+        ['Lost', race.lostTotal !== undefined ? num(race.lostTotal) : '—', 'rejected locally'],
+        ['Retries', race.retries !== undefined ? num(race.retries) : '—', 'rebuilt and resubmitted'],
+        // The rate the whole card is about, and the one number here that is
+        // comparable between machines: wins over the chain blocks we watched.
+        ['Win rate', (race.won !== undefined && race.chainBlocks)
+          ? `${((race.won / race.chainBlocks) * 100).toFixed(1)}%` : '—', `of recent blocks ${info('Chain-confirmed wins over the chain blocks this dashboard watched — not builds attempted, which double-counts retries.')}`],
+      ])}
+      ${reasons}
+    </section>`)
+  }
+
+  // Latency — the question "is it laggy?" answered without guessing.
+  //
+  // Every number here was already computed by the producer: ProducerActor times
+  // headFetch on every check and the collector reads the snapshot off the health
+  // port. No ping of our own, deliberately. A dashboard that probed the gateway
+  // itself would add requests to the shared endpoint this node competes on, to
+  // re-derive a figure the node had already measured on the path that matters.
+  //
+  // The split is the point. The floor is what the wire costs; the gap above it
+  // is this machine parsing and validating what came back. One of those is
+  // XYO's problem and the other is yours, and a single round-trip number cannot
+  // tell you which you have.
+  const lat = dv.latency
+  if (lat) {
+    const localPart = lat.localMs !== undefined && lat.wireFloorMs !== undefined
+      ? `${num(lat.localMs)} ms of it local`
+      : 'local share unknown'
+    groups.production.push(`<section style="--c: var(--acc-latency); --mo:84">
+      <h2><span class="ico" aria-hidden="true">📡</span>Latency</h2>
+      <div class="big">${num(lat.typicalMs)} <span style="font-size:14px;color:var(--muted)">ms typical</span></div>
+      <div class="sub">head fetch, ${localPart}</div>
+      ${(() => {
+        // Bars share one scale so the comparison is honest — the eye is being
+        // asked to judge proportion, and per-row scaling would make the wire
+        // floor look the same size as a 2.4s cycle.
+        const rows = [
+          ['wire', 'Wire', lat.wireFloorMs, 'the network itself: the fastest head fetch seen'],
+          ['', 'p50', lat.typicalMs, 'half of head fetches were faster than this'],
+          ['tail', 'p95', lat.p95Ms, 'the slow 5% — what a bad moment costs'],
+          ['tail', 'Cycle', lat.cycleP95Ms, 'a whole production cycle at p95, budget is 1000ms'],
+        ].filter(([, , v]) => Number.isFinite(v))
+        const top = Math.max(...rows.map(([, , v]) => v), 1)
+        return rows.map(([cls, label, v, tip]) => `<div class="lat-row" title="${esc(tip)}">
+          <span class="sub">${esc(label)}</span>
+          <span class="mono">${num(v)} ms</span>
+          <span class="lat-bar ${cls}"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
+        </div>`).join('')
+      })()}
+      ${lat.localMs !== undefined ? `<div class="sub" style="margin-top:7px"
+        title="The wire floor is the fastest head fetch seen — the network. Everything above it is this machine parsing and validating the answer.">
+        <strong>+${num(lat.localMs)} ms</strong> local · ${num(lat.samples)} samples</div>` : ''}
+    </section>`)
+  }
+
   // Software and host — the two layers that rot quietly while every other
-  // signal on this page stays green.
+  // signal on this page stays green. Last in this group, not first: it is
+  // housekeeping an operator checks occasionally, behind the three cards that
+  // say how the node is actually doing right now.
   const rel = d.release ?? {}
   const osi = d.node?.os
   if (rel.installed || rel.latest || osi) {
@@ -876,7 +1389,7 @@ function render(d) {
       : aptAge > 48 ? `<span class="warn">${Math.round(aptAge / 24)}d</span>`
       : `<span class="ok">${aptAge < 1 ? '<1' : Math.round(aptAge)}h</span>`
 
-    cards.push(`<section style="--c: var(--c-software)">
+    groups.production.push(`<section style="--c: var(--acc-ops); --mo:86">
       <h2><span class="ico" aria-hidden="true">📦</span>Software &amp; host</h2>
       <div class="big">${esc(rel.installed ?? '—')}</div>
       <div class="sub">xl1&#8209;cli in the running container</div>
@@ -916,269 +1429,6 @@ function render(d) {
     </section>`)
   }
 
-  // Trends — days, not minutes. The in-memory sparklines above reset with the
-  // container; this survives, which is the only way to answer "did it earn
-  // anything last week".
-  const tr = d.trend
-  if (tr && (tr.daily?.length || tr.error)) {
-    const days = tr.daily ?? []
-    const recent = days.slice(-14)
-    const maxB = Math.max(1, ...recent.map((x) => x.blocks))
-    const maxE = Math.max(1, ...recent.map((x) => x.earned))
-    const totalB = days.reduce((a, x) => a + x.blocks, 0)
-    const totalE = days.reduce((a, x) => a + x.earned, 0)
-    // Thicker bars with the number under each one. A bar chart with no scale is
-    // a shape; the value is what makes it a measurement. Only the last few days
-    // are labelled when the window is long, so the labels never collide.
-    const bars = (vals, max, fmt = (n) => num(n)) => {
-      const label = vals.length <= 10
-      return `<div class="trendbars">${vals.map((v) => `
-        <div class="trendbar" title="${esc(v.day)}: ${fmt(v.n)}">
-          <div class="trendbar-fill" style="height:${Math.max(3, (v.n / max) * 100)}%"></div>
-          ${label ? `<div class="trendbar-n">${fmt(v.n)}</div>` : ''}
-        </div>`).join('')}</div>`
-    }
-
-    // Nothing recorded yet is not zero blocks and a peak of one. Say what is
-    // actually true — that it has not been running long enough — rather than
-    // charting placeholders that read as a node which earned nothing.
-    const empty = days.length === 0
-    cards.push(`<section style="--c: var(--c-trend)">
-      <h2><span class="ico" aria-hidden="true">📈</span>Trends</h2>
-      ${tr.error ? `<div class="err">${esc(tr.error)}</div>` : ''}
-      ${empty ? `
-        <div class="big sub" style="font-size:16px">collecting…</div>
-        <div class="sub">One sample every 5 minutes. The first full day appears tomorrow;
-          history survives restarts once the store is writable.</div>
-      ` : `
-        <div class="big">${num(totalB)}</div>
-        <div class="sub">blocks over ${num(days.length)} day(s) · ${num(tr.points)} samples</div>
-        ${bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB)}
-        <div class="sparkfoot"><span>blocks/day</span><span>best ${num(maxB)} · avg ${num(Math.round(totalB / days.length))}</span></div>
-        ${bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE, (n) => num(Math.round(n)))}
-        <div class="sparkfoot"><span>XL1/day</span><span>best ${num(Math.round(maxE))} · avg ${num(Math.round(totalE / days.length))}</span></div>
-        ${tiles([
-          ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
-          ['Best day', num(maxB), 'blocks'],
-          ['Avg/day', num(Number((totalB / days.length).toFixed(1))), 'blocks'],
-          ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],
-        ])}
-      `}
-    </section>`)
-  }
-
-  // System
-  const s = d.system
-  if (s?.ok) {
-    const t = s.throttle
-    // Headroom, not throttle state. The soft limit is raised to 70 °C at
-    // provision time and the hard limit is 85 °C, so 65 °C was amber for a
-    // machine that was working exactly as configured.
-    const tempCls = s.cpuTempC >= 80 ? 'bad' : s.cpuTempC >= 75 ? 'warn' : 'ok'
-    // The headline is whatever this machine can actually measure. A Pi throttles
-    // on heat, so temperature is the number that matters and it has a sensor for
-    // it. Windows exposes no CPU temperature without vendor drivers and has no
-    // load average at all, so printing "—°C" and "load undefined" was the card
-    // describing a Pi it was not running on.
-    const hasTemp = Number.isFinite(s.cpuTempC)
-    const hasLoad = Array.isArray(s.loadAverage) && s.loadAverage.length > 0
-    const headline = hasTemp
-      ? `<div class="big ${tempCls}">${s.cpuTempC}°C</div><div class="sub">CPU temperature</div>`
-      : Number.isFinite(s.cpuPercent)
-        ? `<div class="big">${s.cpuPercent}<span style="font-size:14px;color:var(--muted)">% CPU</span></div>
-           <div class="sub">across ${num(s.cpuCount)} cores</div>`
-        : `<div class="big">${s.memory.usedPercent}<span style="font-size:14px;color:var(--muted)">% RAM</span></div>
-           <div class="sub">memory in use</div>`
-    cards.push(`<section style="--c: var(--c-pi)">
-      <h2><span class="ico" aria-hidden="true">${s.platform === 'windows' ? '🖥️' : '🍓'}</span>${s.platform === 'windows' ? 'Host' : 'Raspberry Pi'}</h2>
-      ${s.hostUnavailable ? `<div class="big sub" style="font-size:16px">not reported</div>
-        <div class="sub">${esc(s.hostUnavailableReason ?? 'host metrics unavailable')} — this dashboard runs in a
-        container whose own memory and disk describe the Docker VM, not this machine, so nothing is shown rather
-        than something that would look like a measurement.</div>` : ''}
-      ${headline}
-      <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)}${hasLoad ? ` · load ${s.loadAverage.join(' ')}` : ''}</div>
-      ${hasTemp ? spark(d.history?.tempC) : ''}
-      ${tiles([
-        ['RAM', `${s.memory.usedPercent}%`, `${bytes(s.memory.totalBytes - s.memory.availableBytes)} of ${bytes(s.memory.totalBytes)}`],
-        s.swap?.totalBytes > 0 && ['Swap', `${s.swap.usedPercent}%`, `${bytes(s.swap.usedBytes)} of ${bytes(s.swap.totalBytes)}`],
-        s.disk && ['Disk', `${s.disk.usedPercent}%`, `${bytes(s.disk.freeBytes)} free`],
-        s.cpuPercent !== undefined
-          ? ['CPU', `${s.cpuPercent}%`, `${s.cpuCount} cores`]
-          : ['Load', `${s.loadAverage?.[0] ?? '—'}`, `${s.cpuCount} cores`],
-        t && ['Power', t.undervoltageNow ? '<span class="bad">LOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">dipped</span>' : '<span class="ok">stable</span>',
-              t.undervoltageNow ? 'undervolting now' : t.undervoltageSinceBoot ? 'since boot' : '5V holding'],
-        // Both limits, not just the hard one. Reading bits 2/18 alone showed
-        // "none" in green on a Pi whose soft limit had been clocking it from
-        // 1.4 GHz to 1.2 GHz — the gentler limit is the one a 3 B+ actually
-        // hits, so the tile was silent about the only throttling that happens.
-        t && ['Throttle',
-              t.throttledNow ? '<span class="bad">HARD</span>'
-              : t.softTempLimitNow ? '<span class="bad">HEAT</span>'
-              : (t.throttledSinceBoot || t.softTempLimitSinceBoot) ? '<span class="warn">earlier</span>'
-              : '<span class="ok">none</span>',
-              t.throttledNow ? '85°C limit reached'
-              : t.softTempLimitNow ? 'clocked down to 1.2 GHz'
-              : t.throttledSinceBoot ? '85°C limit, since boot'
-              : t.softTempLimitSinceBoot ? 'heat, since boot'
-              : 'full clock'],
-      ])}
-      ${bar(s.memory.usedPercent)}
-    </section>`)
-  }
-
-  // Operations — score, bottleneck, competition. All arithmetic over data that
-  // is already in this payload; the card issues no request of its own.
-  const ops = dv.operations
-  if (ops && (ops.score !== undefined || ops.bottleneck)) {
-    // Confidence is shown wherever a number could be read as more solid than it
-    // is. A percentile over 19 samples and one over 13,000 look identical
-    // otherwise, and only one of them is worth acting on.
-    const conf = (n, warm = 30, high = 300) => {
-      if (!Number.isFinite(n)) return ''
-      const label = n >= high ? `high confidence · ${num(n)}` : n >= warm ? `limited · ${num(n)}` : `warming up · ${num(n)}`
-      return `<span class="conf" title="calculated from ${num(n)} samples">${label}</span>`
-    }
-    const cls = (v) => (v >= 75 ? '' : v >= 50 ? 'mid' : 'low')
-
-    const comp = ops.competition
-    cards.push(`<section style="--c: var(--c-producer)">
-      <h2><span class="ico" aria-hidden="true">🎯</span>Operations</h2>
-      ${ops.score !== undefined
-        ? `<div class="big">${num(ops.score)} <span style="font-size:14px;color:var(--muted)">/ 100</span></div>
-           <div class="sub" title="The mean of whichever components could be measured. A component with no data is left out rather than scored zero.">mean of ${num(ops.components.length)} measured component(s)</div>
-           ${ops.components.map((c) => `<div class="score-row" title="${esc(c.why)}">
-              <span class="sub">${esc(c.label)}</span><span class="mono">${num(c.value)}</span>
-              <span class="score-bar ${cls(c.value)}"><i style="width:${Math.max(2, c.value)}%"></i></span>
-            </div>`).join('')}`
-        : '<div class="sub">Not enough measured components for a score yet.</div>'}
-
-      ${ops.bottleneck ? `<div class="sub" style="margin-top:10px">Bottleneck</div>
-        <div class="${ops.bottleneck.key === 'none' ? 'ok' : ops.bottleneck.key === 'unknown' ? 'sub' : 'warn'}">
-          ${ops.bottleneck.key === 'none' ? '✓ ' : ops.bottleneck.key === 'unknown' ? '' : '! '}${esc(ops.bottleneck.text)}
-        </div>` : ''}
-
-      ${comp ? `<div class="sub" style="margin-top:10px">Field of ${num(comp.producers)}</div>
-        ${dl([
-          ['Our share', Number.isFinite(comp.ourShare) ? `${comp.ourShare}%` : '—'],
-          ['Leader', `${comp.leaderShare}%`],
-          ['Top 3 combined', `${comp.topThreeShare}%`],
-          ['vs median', Number.isFinite(comp.vsMedian)
-            ? `<span class="${comp.vsMedian >= 0 ? 'ok' : 'warn'}">${comp.vsMedian >= 0 ? '↑' : '↓'} ${Math.abs(comp.vsMedian)} pts</span>` : '—'],
-          ['vs leader', Number.isFinite(comp.vsLeader) ? `${comp.vsLeader} pts` : '—'],
-        ])}` : ''}
-
-      ${(ops.sinceWin !== undefined || ops.longestGap !== undefined) ? tiles([
-        ['Since last win', ops.sinceWin !== undefined ? `${num(ops.sinceWin)}` : '—', 'blocks'],
-        ['Longest gap', ops.longestGap !== undefined ? `${num(ops.longestGap)}` : '—', `in last ${num(ops.ringBlocks)}`],
-      ]) : ''}
-
-      ${ops.stages ? `<div class="sub" style="margin-top:10px">Where a cycle spends its time ${conf(dv.latency?.samples)}</div>
-        ${(() => {
-          const rows = Object.entries(ops.stages).filter(([, v]) => Number.isFinite(v))
-          const top = Math.max(...rows.map(([, v]) => v), 1)
-          const names = { headFetch: 'head fetch', blockProduction: 'build', mempoolTx: 'mempool tx', mempoolBlocks: 'mempool blocks', submit: 'submit' }
-          return rows.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="lat-row">
-            <span class="sub">${esc(names[k] ?? k)}</span><span class="mono">${num(v)} ms</span>
-            <span class="lat-bar"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
-          </div>`).join('')
-        })()}
-        <div class="sub" style="margin-top:5px"
-          title="These nest: a cycle contains the head fetch and the build, and the build contains the mempool calls. They are durations, not a waterfall, and do not sum to the cycle.">
-          p50 per stage · nested, not a waterfall</div>` : ''}
-    </section>`)
-  }
-
-  // Candidate race — why blocks are being lost, from telemetry already collected.
-  //
-  // The counters are mixed-source on purpose and the card says so. Losses and
-  // retries are the producer's own log, the only place that records WHY a
-  // candidate died. Wins are the chain scan, because "Published block" in the
-  // log means submitted, not accepted — treating it as success is the bug that
-  // once had this dashboard reporting zero blocks for a node producing several
-  // every ten minutes.
-  const race = dv.race
-  if (race && (race.built !== undefined || race.chainBlocks)) {
-    const mins = (sec) => (sec >= 3600 ? `${(sec / 3600).toFixed(1)}h` : `${Math.round(sec / 60)}m`)
-    // The pulse reads oldest-left. A win is taller AND accented, so the strip
-    // survives greyscale and colour-blindness.
-    const pulse = (race.pulse ?? []).length > 0
-      ? `<div class="pulse" role="img" aria-label="${num(race.won)} of the last ${num(race.chainBlocks)} chain blocks were produced by this node">
-           ${race.pulse.map((w) => `<i class="${w ? 'win' : ''}"></i>`).join('')}
-         </div>
-         <div class="sub">last ${num(race.chainBlocks)} chain blocks${race.chainWindowSeconds ? ` · ${mins(race.chainWindowSeconds)}` : ''} · <span class="ok">${num(race.won)} won</span></div>`
-      : ''
-
-    // Share of losses, not of builds: the question is "when we lose, why".
-    const reasons = (race.reasons ?? []).length > 0
-      ? `<div class="sub" style="margin-top:10px">Why candidates lost${race.observedSeconds ? ` · last ${mins(race.observedSeconds)}` : ''}</div>`
-        + race.reasons.map((r) => `<div class="reason">
-             <span>${esc(r.label)}</span><span class="mono">${num(r.count)} · ${r.percent}%</span>
-             <span class="reason-bar"><i style="width:${Math.max(2, r.percent)}%"></i></span>
-           </div>`).join('')
-      : '<div class="sub" style="margin-top:10px">No candidates rejected in the window.</div>'
-
-    cards.push(`<section style="--c: var(--c-producer)">
-      <h2><span class="ico" aria-hidden="true">⚔️</span>Candidate race</h2>
-      <div class="big">${race.won !== undefined ? num(race.won) : '—'} <span style="font-size:14px;color:var(--muted)">won</span></div>
-      <div class="sub" title="Wins are counted from the chain scan. A log line saying &quot;Published block&quot; means submitted, not accepted.">of ${num(race.chainBlocks)} recent blocks · chain-counted</div>
-      ${pulse}
-      ${tiles([
-        ['Built', race.built !== undefined ? num(race.built) : '—', race.observedSeconds ? mins(race.observedSeconds) : 'log window'],
-        ['Lost', race.lostTotal !== undefined ? num(race.lostTotal) : '—', 'rejected locally'],
-        ['Retries', race.retries !== undefined ? num(race.retries) : '—', 'rebuilt and resubmitted'],
-        // The rate the whole card is about, and the one number here that is
-        // comparable between machines: wins over the chain blocks we watched.
-        ['Win rate', (race.won !== undefined && race.chainBlocks)
-          ? `${((race.won / race.chainBlocks) * 100).toFixed(1)}%` : '—', 'of recent blocks'],
-      ])}
-      ${reasons}
-    </section>`)
-  }
-
-  // Latency — the question "is it laggy?" answered without guessing.
-  //
-  // Every number here was already computed by the producer: ProducerActor times
-  // headFetch on every check and the collector reads the snapshot off the health
-  // port. No ping of our own, deliberately. A dashboard that probed the gateway
-  // itself would add requests to the shared endpoint this node competes on, to
-  // re-derive a figure the node had already measured on the path that matters.
-  //
-  // The split is the point. The floor is what the wire costs; the gap above it
-  // is this machine parsing and validating what came back. One of those is
-  // XYO's problem and the other is yours, and a single round-trip number cannot
-  // tell you which you have.
-  const lat = dv.latency
-  if (lat) {
-    const localPart = lat.localMs !== undefined && lat.wireFloorMs !== undefined
-      ? `${num(lat.localMs)} ms of it local`
-      : 'local share unknown'
-    cards.push(`<section style="--c: var(--c-chain)">
-      <h2><span class="ico" aria-hidden="true">📡</span>Latency</h2>
-      <div class="big">${num(lat.typicalMs)} <span style="font-size:14px;color:var(--muted)">ms typical</span></div>
-      <div class="sub">head fetch, ${localPart}</div>
-      ${(() => {
-        // Bars share one scale so the comparison is honest — the eye is being
-        // asked to judge proportion, and per-row scaling would make the wire
-        // floor look the same size as a 2.4s cycle.
-        const rows = [
-          ['wire', 'Wire', lat.wireFloorMs, 'the network itself: the fastest head fetch seen'],
-          ['', 'p50', lat.typicalMs, 'half of head fetches were faster than this'],
-          ['tail', 'p95', lat.p95Ms, 'the slow 5% — what a bad moment costs'],
-          ['tail', 'Cycle', lat.cycleP95Ms, 'a whole production cycle at p95, budget is 1000ms'],
-        ].filter(([, , v]) => Number.isFinite(v))
-        const top = Math.max(...rows.map(([, , v]) => v), 1)
-        return rows.map(([cls, label, v, tip]) => `<div class="lat-row" title="${esc(tip)}">
-          <span class="sub">${esc(label)}</span>
-          <span class="mono">${num(v)} ms</span>
-          <span class="lat-bar ${cls}"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
-        </div>`).join('')
-      })()}
-      ${lat.localMs !== undefined ? `<div class="sub" style="margin-top:7px"
-        title="The wire floor is the fastest head fetch seen — the network. Everything above it is this machine parsing and validating the answer.">
-        <strong>+${num(lat.localMs)} ms</strong> local · ${num(lat.samples)} samples</div>` : ''}
-    </section>`)
-  }
-
   // Producer standings — who else is signing blocks, and where we sit.
   //
   // Counted from the same scan that produces "Blocks produced" above, so the
@@ -1195,7 +1445,8 @@ function render(d) {
       const hex = r.url
         ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.address)}">${esc(short(r.address))}</a>`
         : `<span class="mono" title="${esc(r.address)}">${esc(short(r.address))}</span>`
-      return name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex
+      const you = r.isSelf ? ' <span class="you-badge">YOU</span>' : ''
+      return (name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex) + you
     }
 
     const rows = [...(pb.top ?? [])]
@@ -1259,7 +1510,7 @@ function render(d) {
          ${standing(wToday, 'today')}
          ${standing(wWeek, '7 days')}`
 
-    cards.push(`<section class="wide" style="--c: var(--c-peers)">
+    groups.network.push(`<section class="card-full" style="--c: var(--acc-network); --mo:110">
       <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
       ${mine
         ? `<div class="big">#${num(mine.rank)} <span style="font-size:14px;color:var(--muted)">of ${num(pb.producers)}</span></div>
@@ -1299,145 +1550,28 @@ function render(d) {
     </section>`)
   }
 
-  // Log tail, newest first. The interesting line is always the most recent one,
-  // and a panel that opens scrolled to the oldest line makes the reader scroll
-  // past forty lines of history to reach it.
+  // Log tail, newest first, outside every group and always last — a scroll box
+  // this size reads as an afterthought anywhere but the bottom of the page.
   if (d.node?.recentLog?.length) {
-    cards.push(`<section class="wide" style="--c: var(--c-log)">
+    logHtml = `<section class="card-full">
       <h2><span class="ico" aria-hidden="true">📜</span>Producer log — newest first (${d.node.recentLog.length} lines)</h2>
       <pre class="log">${esc([...d.node.recentLog].reverse().join('\n'))}</pre>
       <div class="logfoot">Most recent at the top. Collected ${d.node.ageSeconds ?? '?'}s ago.</div>
-    </section>`)
+    </section>`
   }
 
-  // Card order is a product decision, not an artefact of the order the code
-  // happens to build them in. Sorted here so a new card can be written wherever
-  // it fits in the file and still land where an operator expects it.
-  //
-  // Ranked by what is asked first: is it alive and what is it running, is it
-  // winning, how is it performing, then the chain, then money, then the host,
-  // then history and raw output. Software & host sits directly under Producer
-  // because they answer one question between them — what is running, and is it
-  // the right version.
-  const CARD_ORDER = [
-    'Producer cannot produce',   // the banner, when it exists, always first
-    'Producer movement',         // before 'Producer', same startsWith reason as the log
-    'Producer log',              // matched before 'Producer' — startsWith would
-                                 // otherwise claim it for the producer card
-    'Producer standings',
-    'Producer',
-    'Software & host',
-    'Candidate race',
-    'Operations',
-    'Chain',
-    'Latency',
-    'Rewards',
-    'What it is worth',
-    'Alerts',
-    'Fleet',
-    'XL1 Network',
-    'Block time',
-    'Raspberry Pi',
-    'Host',
-    'Trends',
-  ]
-  // Where each of those actually goes. Kept separate from the match list so the
-  // matching order (longest-prefix-first) cannot be confused with the display
-  // order, which is the bug that would put the log second.
-  //
-  // Pairs sit next to each other because they answer one question between them:
-  // Producer with Software & host (what is running, is it the right version),
-  // Candidate race with Latency (are we winning, and is speed why not), Rewards
-  // with Trends (what came in, and is it rising).
-  //
-  // The last two are the full-width ones. Standings is a seven-row table and the
-  // log is a scroll box; both stretch edge to edge, so anything after them would
-  // read as an afterthought below a wall. Standings second to last, log last.
-  const CARD_RANK = {
-    'Producer cannot produce': 0,
-    Producer: 1,
-    'Raspberry Pi': 2,
-    Host: 2,
-    // After the machine, before the race. Whether the node is healthy and
-    // whether anything would tell you if it stopped are one question asked
-    // twice -- but this cannot go between Producer and its host card without
-    // breaking that pair.
-    Alerts: 2.5,
-    'Candidate race': 3,
-    Latency: 4,
-    Operations: 5,
-    Chain: 6,
-    Trends: 7,
-    Rewards: 8,
-    // The chain block, after every card about this node and immediately above
-    // the standings table it explains: concentration first because it is the
-    // headline, then the distribution behind the block time it quotes, then who
-    // is moving. Ranked past Software & host so the Rewards pair stays intact.
-    'XL1 Network': 9.5,
-    'Block time': 9.6,
-    'Producer movement': 9.7,
-    // Full width, with the other wide cards. Above standings because it is the
-    // question standings answers for one node, asked about all of them.
-    Fleet: 9.8,
-    'Software & host': 9,
-    // As close to Rewards as it can get without splitting it from Software &
-    // host. Pairing is decided by adjacency alone, so a card ranked between
-    // those two would not join that stack -- it would dissolve it, and both
-    // would fall out. This sits immediately after the stack, still directly
-    // below the balance it prices, and still ahead of the chain-wide block.
-    'What it is worth': 9.4,
-    'Producer standings': 10,
-    'Producer log': 11,
-  }
-  const rankOf = (html) => {
-    const m = html.match(/<h2[^>]*>(?:\s*<span[^>]*>[^<]*<\/span>)?\s*([^<]+)/)
-    const title = m ? m[1].replaceAll('&amp;', '&').trim() : ''
-    const key = CARD_ORDER.find((t) => title.startsWith(t))
-    // An unrecognised card keeps its position rather than being flung to one
-    // end: a card added later should look misplaced, not disappear.
-    return key === undefined ? 50 : CARD_RANK[key]
-  }
-  // Stable sort, so cards sharing a rank keep the order they were built in.
-  const ordered = cards
-    .map((html, i) => [rankOf(html), i, html])
-    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
-    .map(([, , html]) => html)
+  const groupSection = (icon, title, items) => items.length
+    ? `<section class="group"><h2 class="group-heading"><span class="ico" aria-hidden="true">${icon}</span>${esc(title)}</h2><div class="group-grid">${items.join('')}</div></section>`
+    : ''
 
-  // Ordering alone only makes a pair adjacent, and on a wide grid adjacent means
-  // side by side. To actually put Latency UNDER Candidate race at every width,
-  // the two are wrapped in one grid item and stacked inside it. Deterministic,
-  // and each card keeps its own header rather than being merged into one.
-  // Each pair becomes ONE grid item with the two cards stacked inside, so the
-  // second sits under the first at every width and the accent colours still
-  // separate them. Pairing also evens the item heights out, which is what was
-  // making the grid ragged: eleven cards of wildly different length left holes
-  // wherever a short one sat beside a tall one.
-  const PAIRS = [
-    ['Producer', 'Raspberry Pi'],      // the process, and the machine under it
-    ['Producer', 'Host'],              // same, when the host is not a Pi
-    ['Candidate race', 'Latency'],     // are we winning, and is speed why not
-    ['Chain', 'Trends'],               // the chain now, and the chain over days
-    ['Rewards', 'Software & host'],    // the earnings, and the build earning them
-  ]
-  const titleOf = (html) => {
-    const m = html.match(/<h2[^>]*>(?:\s*<span[^>]*>[^<]*<\/span>)?\s*([^<]+)/)
-    return m ? m[1].replaceAll('&amp;', '&').trim() : ''
-  }
-  const out = []
-  for (let i = 0; i < ordered.length; i++) {
-    const a = titleOf(ordered[i])
-    const b = i + 1 < ordered.length ? titleOf(ordered[i + 1]) : ''
-    // Only pair when BOTH are present. A card hidden for want of data must not
-    // leave its partner wrapped in a stack of one, which would column it oddly.
-    const pair = PAIRS.find(([x, y]) => a.startsWith(x) && b.startsWith(y))
-    if (pair) {
-      out.push(`<div class="stack">${ordered[i]}${ordered[i + 1]}</div>`)
-      i++
-    } else {
-      out.push(ordered[i])
-    }
-  }
-  $('grid').innerHTML = out.join('')
+  $('grid').innerHTML = bannerHtml
+    + `<div class="kpi-row">${kpiRow(d)}</div>`
+    + groupSection('⚡', 'Producer performance', groups.performance)
+    + groupSection('📶', 'Network health', groups.network)
+    + groupSection('🔥', 'Production performance', groups.production)
+    + groupSection('📊', 'Analytics', groups.analytics)
+    + logHtml
+
   $('foot').innerHTML = (d.problems?.length
     ? `<ul class="problems">${d.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`
     : '')
@@ -1465,8 +1599,7 @@ async function tick() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     render(await res.json())
   } catch (e) {
-    $('overall').textContent = 'dashboard unreachable'
-    $('overall').className = 'pill down'
+    setStatusPill('offline', 'DASHBOARD UNREACHABLE')
     $('foot').textContent = String(e)
   }
 }

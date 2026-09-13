@@ -115,13 +115,22 @@ fi
 
 # Read only the log slice since the previous run, so the cost stays flat as the
 # container's log grows, and keep a running total across runs.
+#
+# --timestamps here, once, rather than in a second `docker logs` call later
+# purely to stamp the recent-log panel -- that used to cost a second exec on a
+# Pi 3 every single cycle, forever.
 SINCE="$(cat "${CURSOR}" 2>/dev/null || echo "")"
 if [[ -n "${SINCE}" ]]; then
-  NEW_LOG="$(docker logs --since "${SINCE}" "${CONTAINER}" 2>&1 | tail -n 2000)"
+  RAW_NEW_LOG="$(docker logs --timestamps --since "${SINCE}" "${CONTAINER}" 2>&1 | tail -n 2000)"
 else
-  NEW_LOG="$(docker logs --tail 2000 "${CONTAINER}" 2>&1)"
+  RAW_NEW_LOG="$(docker logs --timestamps --tail 2000 "${CONTAINER}" 2>&1)"
 fi
 echo "${COLLECTED_AT}" > "${CURSOR}"
+
+# Everything below only ever matched on the message, not the stamp just added
+# above -- strip it back off once here rather than teaching every pattern a
+# second shape.
+NEW_LOG="$(printf '%s\n' "${RAW_NEW_LOG}" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z //')"
 
 TOTAL="$(cat "${COUNTER}" 2>/dev/null || echo 0)"
 [[ "${TOTAL}" =~ ^[0-9]+$ ]] || TOTAL=0
@@ -219,8 +228,24 @@ fi
 [[ "${BUILDS}" =~ ^[0-9]+$ ]] || BUILDS=0
 printf '%s\t%s\n' "${STARTED}" "${BUILDS}" > "${RUN_STATE}"
 
-# Tail for display comes from the full log so the panel is never empty on a quiet cycle.
-#
+# Tail for display comes from a small rolling buffer kept on disk, topped up
+# from RAW_NEW_LOG above -- which already carries every line that has arrived
+# since the last cycle, timestamps included -- rather than a second `docker
+# logs --tail` fetch every cycle. Never empty on a quiet cycle for the same
+# reason it never was before: the buffer keeps the last LOG_LINES regardless of
+# how few are new this time.
+RECENT_BUFFER="${STATE_DIR}/.recent-log"
+COMBINED="$( { [[ -s "${RECENT_BUFFER}" ]] && cat "${RECENT_BUFFER}"; printf '%s\n' "${RAW_NEW_LOG}"; } | grep -v '^$' )"
+COMBINED_COUNT="$(printf '%s\n' "${COMBINED}" | grep -c '^')"
+if (( COMBINED_COUNT < LOG_LINES )); then
+  # Only reachable right after this buffer is first introduced, right after a
+  # state wipe, or after a quiet spell longer than the buffer's own history --
+  # a cold start earns one extra fetch rather than shipping a half-full panel.
+  COMBINED="$(docker logs --timestamps --tail "${LOG_LINES}" "${CONTAINER}" 2>&1 | grep -v '^$')"
+fi
+RECENT_LINES="$(printf '%s\n' "${COMBINED}" | tail -n "${LOG_LINES}")"
+printf '%s\n' "${RECENT_LINES}" > "${RECENT_BUFFER}"
+
 # With timestamps, because every question the panel gets asked is about *when*:
 # did it stop an hour ago or a minute ago, is it still attempting a block a
 # minute, did that error come before the last publish or after it. Without them
@@ -234,7 +259,7 @@ TZ_OFFSET="$(date +%z)"                       # e.g. -0600
 TZ_SECS=$(( 10#${TZ_OFFSET:1:2} * 3600 + 10#${TZ_OFFSET:3:2} * 60 ))
 [[ "${TZ_OFFSET:0:1}" == "-" ]] && TZ_SECS=$(( -TZ_SECS ))
 
-TAIL_LOG="$(docker logs --timestamps --tail "${LOG_LINES}" "${CONTAINER}" 2>&1 |
+TAIL_LOG="$(printf '%s\n' "${RECENT_LINES}" |
   awk -v off="${TZ_SECS}" '
       # Rewrite only lines carrying the fixed-width docker stamp; anything else
       # (a wrapped line, an error from docker itself) passes through intact.

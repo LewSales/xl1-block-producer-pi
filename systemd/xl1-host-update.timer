@@ -1,0 +1,14 @@
+[Unit]
+Description=Check host package updates and apply per threshold/age policy
+
+[Timer]
+# Checked every 6h so a threshold breach is caught within hours, not days; the
+# script itself decides whether 6h-old news is actually worth acting on yet.
+OnBootSec=30min
+OnUnitActiveSec=6h
+# Spread the check so it does not always land on the hour.
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

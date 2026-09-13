@@ -414,6 +414,9 @@ info "installed /usr/local/bin/xl1-collect.sh"
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-alert.sh" /usr/local/bin/xl1-alert.sh
 info "installed /usr/local/bin/xl1-alert.sh"
 
+install -m 755 "${BUNDLE_DIR}/scripts/xl1-host-update.sh" /usr/local/bin/xl1-host-update.sh
+info "installed /usr/local/bin/xl1-host-update.sh"
+
 # Role preset override, bind-mounted over the image's copy by xl1-producer
 # .service. Installed unconditionally: the unit refuses to start without it, on
 # purpose, because docker would otherwise invent a directory at that path.
@@ -519,7 +522,8 @@ install -m 644 "${BUNDLE_DIR}"/systemd/xl1-*.service "${BUNDLE_DIR}"/systemd/xl1
 systemctl daemon-reload
 systemctl enable xl1-collect.timer >/dev/null
 systemctl enable xl1-dashboard.service >/dev/null
-info "enabled xl1-collect.timer and xl1-dashboard.service"
+systemctl enable xl1-host-update.timer >/dev/null
+info "enabled xl1-collect.timer, xl1-dashboard.service and xl1-host-update.timer"
 
 # Persistent journal.
 #

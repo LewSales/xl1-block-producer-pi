@@ -14,7 +14,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '26'
 
       # Every script here runs as root on a machine holding a wallet mnemonic.
       - name: Install shellcheck

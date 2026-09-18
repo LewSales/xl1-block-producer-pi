@@ -25,7 +25,7 @@ XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.2}"
 #   TARGET_ARCH=amd64 ./build-images.sh
 TARGET_ARCH="${TARGET_ARCH:-arm64}"
 PLATFORM="linux/${TARGET_ARCH}"
-NODE_VERSION="${NODE_VERSION:-24.14.1}"
+NODE_VERSION="${NODE_VERSION:-26.9.0}"
 UPSTREAM="${UPSTREAM:-https://github.com/XYOracleNetwork/xl1-docker-images.git}"
 UPSTREAM_REF="${UPSTREAM_REF:-main}"
 

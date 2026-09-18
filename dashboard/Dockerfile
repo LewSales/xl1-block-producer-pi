@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # XL1 producer dashboard — cross-built for the Pi's arm64 CPU on a faster host.
-ARG NODE_VERSION=24.14.1
+ARG NODE_VERSION=26.9.0
 
 FROM node:${NODE_VERSION}-bookworm-slim AS deps
 WORKDIR /app

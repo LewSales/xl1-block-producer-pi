@@ -240,6 +240,32 @@ if [[ -n "${ARM_FREQ}${OVER_VOLTAGE}" ]]; then
   fi
 fi
 
+# --------------------------------------------------- 2d. unneeded services
+
+# Bluetooth and mDNS discovery are never used by a headless producer, and
+# neither one is needed to reach this box: Tailscale (section 4) supplies its
+# own DNS name, so avahi's ".local" resolution is redundant here. Left
+# running they are a few MB of memory and, on avahi's part, real accumulated
+# CPU (announcements/probing) for a feature nothing on this Pi depends on.
+log "Disabling unused Bluetooth/mDNS"
+for svc in bluetooth.service avahi-daemon.service avahi-daemon.socket; do
+  if systemctl list-unit-files "${svc}" >/dev/null 2>&1; then
+    systemctl disable --now "${svc}" >/dev/null 2>&1 || true
+  fi
+done
+info "bluetooth, avahi-daemon disabled"
+
+# Wi-Fi only if it is not how this Pi actually reaches the network: disabling
+# wpa_supplicant on a Pi whose only path in is Wi-Fi would strand it. NetworkManager
+# re-spawns wpa_supplicant over D-Bus on demand regardless, so `disable` here is
+# mostly documentation of intent -- the CPU cost was already negligible.
+if [[ "$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}')" == eth* ]]; then
+  systemctl disable wpa_supplicant.service >/dev/null 2>&1 || true
+  info "wpa_supplicant disabled (default route is wired)"
+else
+  info "default route is not wired -- leaving wpa_supplicant alone"
+fi
+
 # ------------------------------------------------------- 3. packages & Docker
 
 log "System packages"

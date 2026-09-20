@@ -355,7 +355,11 @@ TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=no
 Environment=TERM=linux
-Environment=XL1_SCREEN_INTERVAL=30
+# This is a status glance, not a live view -- 5s was spending ~24% of a core
+# redrawing a panel nobody watches continuously, on the one box where spare
+# CPU is what block production is short of. 120s still shows "online" within
+# two minutes of a real problem.
+Environment=XL1_SCREEN_INTERVAL=120
 
 Nice=10
 MemoryMax=64M

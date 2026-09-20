@@ -508,9 +508,11 @@ const DATA_URL = 'status.json'
 const REFRESH_MS = 30000
 let failures = 0
 
-async function tick() {
-  // A hidden tab is a tab nobody is reading.
-  if (document.hidden) return
+async function tick(force) {
+  // A hidden tab is a tab nobody is reading -- except the very first load,
+  // which can land hidden for a moment before becoming the foreground tab and
+  // would otherwise never get a first render to skip past.
+  if (document.hidden && !force) return
   try {
     const res = await fetch(DATA_URL + (DATA_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) throw new Error('HTTP ' + res.status)
@@ -525,7 +527,7 @@ async function tick() {
       (${esc(e.message)}). The page is here; the node has not published to it yet.</div></section>`
   }
 }
-tick()
+tick(true)
 setInterval(tick, REFRESH_MS)
 document.addEventListener('visibilitychange', () => { if (!document.hidden) tick() })
 </script>

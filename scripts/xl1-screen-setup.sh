@@ -355,6 +355,7 @@ TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=no
 Environment=TERM=linux
+Environment=XL1_SCREEN_INTERVAL=30
 
 Nice=10
 MemoryMax=64M

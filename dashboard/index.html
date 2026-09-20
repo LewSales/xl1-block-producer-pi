@@ -1588,12 +1588,20 @@ function render(d) {
        </div>`
 }
 
-async function tick() {
+async function tick(force) {
   // A hidden tab is a tab nobody is reading. Left open on a second monitor it
   // would otherwise pull the whole payload every five seconds forever, and on
   // the Pi that is the dashboard's largest single cost. The fetch is skipped
   // rather than the timer cancelled, so nothing has to be restarted.
-  if (document.hidden) return
+  //
+  // A tab can load already hidden -- a link opened from another app, a moment
+  // before it becomes the foreground tab -- and that is not "nobody is
+  // reading", it just has not been looked at yet. Skipping that first tick the
+  // same way left the page on "connecting..." forever: without a real
+  // hidden-to-visible transition afterward, nothing ever tried again. `force`
+  // lets the initial call through regardless of visibility; the recurring
+  // interval below keeps the original skip-when-hidden behavior.
+  if (document.hidden && !force) return
   try {
     const res = await fetch(`/api/status${location.search}`, { cache: 'no-store' })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -1603,7 +1611,7 @@ async function tick() {
     $('foot').textContent = String(e)
   }
 }
-tick()
+tick(true)
 setInterval(tick, 5000)
 // Coming back to the tab should not mean waiting out the rest of an interval to
 // see a page that is up to five seconds stale.

@@ -299,63 +299,34 @@ async function persistTrend() {
   }
 }
 
-/** Collapse rows into per-day buckets: blocks produced, XL1 earned, and XL1
- *  redeemed out each day.
- *
- *  `reward` is the wallet's raw on-chain balance, which a redemption (moving
- *  XL1 out to fund something else) drops just as visibly as a block reward
- *  raises it. A first-vs-last-of-day diff cannot tell those apart: one
- *  redemption anywhere in the day nets the whole day to ~0 "earned", making a
- *  day of completely normal production look like the node stopped winning.
- *  Walking consecutive readings instead — sign of each step, not the day's
- *  endpoints — separates the two: every rise is production, every drop is a
- *  redemption, and both survive independently of whatever else happened that
- *  day. */
+/** Collapse rows into per-day buckets: blocks produced and XL1 earned each day.
+ *  Differences between consecutive readings, not the readings themselves —
+ *  both underlying figures are cumulative totals. */
 function trendDaily() {
   if (trend.length < 2) return []
   const byDay = new Map()
-  const cur = (day) => {
-    let c = byDay.get(day)
-    if (!c) { c = { day, earned: 0, redeemed: 0 }; byDay.set(day, c) }
-    return c
-  }
-  const blockDays = new Map()
   for (const r of trend) {
     const day = new Date(r.t).toISOString().slice(0, 10)
-    let b = blockDays.get(day)
-    if (!b) { b = { day }; blockDays.set(day, b) }
-    if (r.cblocks !== undefined) { b.firstC ??= r.cblocks; b.lastC = r.cblocks }
-    if (r.blocks !== undefined) { b.firstBlocks ??= r.blocks; b.lastBlocks = r.blocks }
+    let cur = byDay.get(day)
+    if (!cur) { cur = { day }; byDay.set(day, cur) }
+    // Each series tracked separately so a key that only appears partway through
+    // the day is diffed against its own first reading, never against the other
+    // key's. The two counters mean different things and must not be mixed.
+    if (r.cblocks !== undefined) { cur.firstC ??= r.cblocks; cur.lastC = r.cblocks }
+    if (r.blocks !== undefined) { cur.firstBlocks ??= r.blocks; cur.lastBlocks = r.blocks }
+    if (r.reward !== undefined) { cur.firstReward ??= r.reward; cur.lastReward = r.reward }
   }
-  // Reward deltas are walked across the whole trend, not per day, so the step
-  // spanning midnight is counted once (against the day of its later reading)
-  // instead of being dropped by both days' own first/last lookup.
-  let prevReward
-  for (const r of trend) {
-    if (r.reward === undefined) continue
-    if (prevReward !== undefined) {
-      const day = new Date(r.t).toISOString().slice(0, 10)
-      const delta = r.reward - prevReward
-      const bucket = cur(day)
-      if (delta >= 0) bucket.earned += delta
-      else bucket.redeemed += -delta
-    }
-    prevReward = r.reward
-  }
-  for (const day of blockDays.keys()) cur(day) // ensure a day with only block samples still appears
-  return [...byDay.values()].map((d) => {
-    const b = blockDays.get(d.day) ?? {}
-    return {
-      day: d.day,
-      // Prefer the chain-derived counter wherever the day has one; fall back
-      // to the collector's only for days recorded before it existed.
-      blocks: b.lastC !== undefined
-        ? Math.max(0, b.lastC - (b.firstC ?? b.lastC))
-        : (b.lastBlocks ?? 0) - (b.firstBlocks ?? 0),
-      earned: Number(d.earned.toFixed(4)),
-      redeemed: Number(d.redeemed.toFixed(4)),
-    }
-  }).sort((a, b) => a.day.localeCompare(b.day))
+  return [...byDay.values()].map((d) => ({
+    day: d.day,
+    // Prefer the chain-derived counter wherever the day has one; fall back to
+    // the collector's only for days recorded before it existed.
+    blocks: d.lastC !== undefined
+      ? Math.max(0, d.lastC - (d.firstC ?? d.lastC))
+      : (d.lastBlocks ?? 0) - (d.firstBlocks ?? 0),
+    // A restart resets nothing here (both are chain-side or cumulative), but a
+    // negative would mean the counter was reset — report 0 rather than nonsense.
+    earned: Math.max(0, Number(((d.lastReward ?? 0) - (d.firstReward ?? 0)).toFixed(4))),
+  })).sort((a, b) => a.day.localeCompare(b.day))
 }
 
 const history = { height: [], reward: [], blocks: [], tempC: [], memPct: [] }

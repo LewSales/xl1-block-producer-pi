@@ -577,6 +577,32 @@ test('trend days count blocks from the chain, not the log-derived zero', () => {
   assert.equal(out[0].earned, 2)
 })
 
+test('a redemption mid-day is reported separately, not netted into zero earned', () => {
+  // reward is the raw wallet balance: production raises it, a redemption
+  // (funding something else) drops it just as visibly. A first-vs-last diff
+  // reads the whole day as ~0 earned; production never stopped.
+  const day = Date.UTC(2026, 8, 20)
+  const out = daysFrom([
+    { t: day + 1000, reward: 252_683.24 },
+    { t: day + 2000, reward: 265_433.25 }, // kept winning normally
+    { t: day + 3000, reward: 200_050.25 }, // redeemed ~65,383 out
+    { t: day + 4000, reward: 200_250.25 }, // kept winning after, too
+  ])
+  assert.equal(out.length, 1)
+  assert.equal(Math.round(out[0].earned), 12_950, 'every rise still counts as earned')
+  assert.equal(Math.round(out[0].redeemed), 65_383, 'every drop is reported as redeemed, not lost')
+})
+
+test('a normal day with no redemption reports zero redeemed', () => {
+  const day = Date.UTC(2026, 8, 21)
+  const out = daysFrom([
+    { t: day + 1000, reward: 100 },
+    { t: day + 2000, reward: 150 },
+  ])
+  assert.equal(out[0].earned, 50)
+  assert.equal(out[0].redeemed, 0)
+})
+
 test('a day mixing old zero rows with new chain rows does not spike', () => {
   // Rows already on disk carry blocks:0. Diffing a real cumulative count
   // against those zeros would post the entire running total as one day.
@@ -1585,7 +1611,7 @@ test('nothing that identifies the machine survives the projection', () => {
   // sample every five minutes with CPU temperature and memory in it, and none of
   // that describes the chain.
   for (const row of pub.trend?.daily ?? []) {
-    assert.deepEqual(Object.keys(row).sort(), ['blocks', 'day', 'earned'],
+    assert.deepEqual(Object.keys(row).sort(), ['blocks', 'day', 'earned', 'redeemed'],
       'a trend row must be the day summary, never a raw sample')
   }
   for (const forbidden of ['tempC', 'memPct', 'cblocks']) {

@@ -255,6 +255,7 @@
      inherits --c from its own section, no override needed. */
   .acc-green .hist-bar, .acc-green .trendbar-fill { background: color-mix(in srgb, var(--acc-producer) 70%, transparent); }
   .acc-gold .hist-bar, .acc-gold .trendbar-fill { background: color-mix(in srgb, var(--acc-rewards) 70%, transparent); }
+  .acc-bad .hist-bar, .acc-bad .trendbar-fill { background: color-mix(in srgb, var(--bad) 70%, transparent); }
   .hist-x { font-size: 9px; color: var(--muted); text-align: center; padding-top: 3px;
     overflow: hidden; text-overflow: clip; white-space: nowrap; }
   /* Percentile markers over the block-time histogram, positioned by the same
@@ -1169,6 +1170,12 @@ function render(d) {
     const maxE = Math.max(1, ...recent.map((x) => x.earned))
     const totalB = days.reduce((a, x) => a + x.blocks, 0)
     const totalE = days.reduce((a, x) => a + x.earned, 0)
+    // Only present on days with a redemption (older trend files predate this
+    // field). Absent, not zero, on a day nothing was redeemed — 0 would be a
+    // measurement; older history has none to measure.
+    const totalR = days.reduce((a, x) => a + (x.redeemed ?? 0), 0)
+    const hasRedemptions = recent.some((x) => (x.redeemed ?? 0) > 0)
+    const maxR = Math.max(1, ...recent.map((x) => x.redeemed ?? 0))
     // Thicker bars with the number under each one. A bar chart with no scale is
     // a shape; the value is what makes it a measurement. Only the last few days
     // are labelled when the window is long, so the labels never collide.
@@ -1198,9 +1205,14 @@ function render(d) {
         ${bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB, undefined, 'acc-green')}
         <div class="sparkfoot"><span>blocks/day</span><span>best ${num(maxB)} · avg ${num(Math.round(totalB / days.length))}</span></div>
         ${bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE, (n) => num(Math.round(n)), 'acc-gold')}
-        <div class="sparkfoot"><span>XL1/day</span><span>best ${num(Math.round(maxE))} · avg ${num(Math.round(totalE / days.length))}</span></div>
+        <div class="sparkfoot"><span>XL1/day earned</span><span>best ${num(Math.round(maxE))} · avg ${num(Math.round(totalE / days.length))}</span></div>
+        ${hasRedemptions ? `
+        ${bars(recent.map((x) => ({ day: x.day, n: x.redeemed ?? 0 })), maxR, (n) => num(Math.round(n)), 'acc-bad')}
+        <div class="sparkfoot"><span>XL1/day redeemed</span><span>total ${num(Math.round(totalR))} over ${num(days.length)}d</span></div>
+        ` : ''}
         ${tiles([
-          ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
+          ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d, gross`],
+          ...(hasRedemptions ? [['Redeemed', num(Number(totalR.toFixed(2))), 'moved out, not lost production']] : []),
           ['Best day', num(maxB), 'blocks'],
           ['Avg/day', num(Number((totalB / days.length).toFixed(1))), 'blocks'],
           ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],

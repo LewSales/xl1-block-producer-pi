@@ -17,7 +17,7 @@ set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${HERE}/.build"
-XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.3.2}"
+XL1_CLI_VERSION="${XL1_CLI_VERSION:-5.4.1}"
 # The Pi is arm64; a workstation running the producer natively is amd64, and
 # building for it needs no emulation at all — which is why this is a variable
 # rather than a fork of the script.

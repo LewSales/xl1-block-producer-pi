@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# xl1-interval-trial — a controlled 4000-vs-5000 ms blockProductionCheckInterval test.
+# xl1-interval-trial — a controlled A/B test of blockProductionCheckInterval (default 3000 vs 4000 ms).
 #
 #   xl1-interval-trial status              live interval, schedule position, trial log
 #   xl1-interval-trial start [DAYS] [HRS]  write a balanced schedule and enable the timer
 #                                           (defaults: 8 days in 6-hour blocks)
-#   xl1-interval-trial set MS              one verified switch (4000 or 5000), no schedule
+#   xl1-interval-trial set MS              one verified switch to one of the two arms, no schedule
 #   xl1-interval-trial tick                what the timer runs: apply the scheduled arm and
 #                                           guard producer health
 #   xl1-interval-trial rollback            restore the presets as they were before the trial,
@@ -37,7 +37,11 @@ TIMER="${XL1_TRIAL_TIMER:-xl1-interval-trial.timer}"
 CONFIG_IN_CONTAINER="${XL1_CONFIG_OUT:-/tmp/xl1-preset.xyo.config.json}"
 HEALTH_DEADLINE="${XL1_TRIAL_HEALTH_DEADLINE:-240}"
 PRESETS=(producer.json producer-rest.json)
-ARMS=(4000 5000)
+# The two arms, A then B. 4000 vs 5000 was settled from chain data (4000 won), so the open
+# question is 3000 vs 4000. Override with XL1_TRIAL_ARMS="A B"; 3000 is the floor this tool
+# will write, so a typo cannot hammer XYO's endpoint.
+read -r -a ARMS <<< "${XL1_TRIAL_ARMS:-3000 4000}"
+(( ${#ARMS[@]} == 2 && ARMS[0] >= 3000 && ARMS[1] >= 3000 )) || { echo "error: XL1_TRIAL_ARMS must be two values >= 3000" >&2; exit 1; }
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }

@@ -44,16 +44,16 @@ R="${WORK}/etc/presets/roles"
 setup
 BEFORE_REST="$(sans_interval "${R}/producer-rest.json")"; BEFORE_RPC="$(sans_interval "${R}/producer.json")"
 ORIG_SUM="$(cat "${R}"/producer.json "${R}"/producer-rest.json | cksum)"
-trial set 5000; rc=$?
-check "set 5000 succeeds"                        "${rc}" "0"
-check "producer-rest now 5000"                   "$(interval "${R}/producer-rest.json")" "5000"
-check "producer now 5000"                        "$(interval "${R}/producer.json")" "5000"
+trial set 3000; rc=$?
+check "set 3000 succeeds"                        "${rc}" "0"
+check "producer-rest now 3000"                   "$(interval "${R}/producer-rest.json")" "3000"
+check "producer now 3000"                        "$(interval "${R}/producer.json")" "3000"
 check "producer-rest bindings untouched"         "$(sans_interval "${R}/producer-rest.json")" "${BEFORE_REST}"
 check "producer bindings untouched"              "$(sans_interval "${R}/producer.json")" "${BEFORE_RPC}"
 check "exactly one restart"                      "$(grep -c '^restart' "${WORK}/systemctl.log")" "1"
-check "switch verified in the log"               "$(grep -c 'live 5000 verified' "${WORK}/state/interval-trial/log.tsv")" "1"
+check "switch verified in the log"               "$(grep -c 'live 3000 verified' "${WORK}/state/interval-trial/log.tsv")" "1"
 
-trial set 3000; rc=$?
+trial set 5000; rc=$?
 check "an off-menu interval is refused"          "${rc}" "1"
 check "refusal restarts nothing"                 "$(grep -c '^restart' "${WORK}/systemctl.log")" "1"
 
@@ -63,7 +63,7 @@ check "rollback restores the exact bytes"        "$(cat "${R}"/producer.json "${
 # A mount that never picks up the change must not leave the node on an unverified config.
 setup
 touch "${WORK}/stale"
-trial set 5000; rc=$?
+trial set 3000; rc=$?
 check "unverified switch reports failure"        "${rc}" "1"
 check "unverified switch restores originals"     "$(cat "${R}"/producer.json "${R}"/producer-rest.json | cksum)" "${ORIG_SUM}"
 check "unverified switch stops the trial timer"  "$(grep -c '^disable --now' "${WORK}/systemctl.log")" "1"
@@ -73,7 +73,7 @@ setup
 python3 - "${R}/producer-rest.json" <<'PY'
 import json,sys; p=sys.argv[1]; d=json.load(open(p)); del d["actors"][0]["blockProductionCheckInterval"]; json.dump(d,open(p,"w"))
 PY
-trial set 5000; rc=$?
+trial set 3000; rc=$?
 check "a preset without the key is refused"      "${rc}" "1"
 check "and nothing was restarted"                "$(grep -c '^restart' "${WORK}/systemctl.log")" "0"
 
@@ -82,15 +82,15 @@ setup
 trial start 2 6
 S="${WORK}/state/interval-trial/schedule"
 check "two days of 6-hour blocks plus END"       "$(wc -l < "${S}" | tr -d ' ')" "9"
-check "arm sequence ABBA BAAB"                   "$(head -n 8 "${S}" | cut -f2 | tr '\n' ' ')" "4000 5000 5000 4000 5000 4000 4000 5000 "
+check "arm sequence ABBA BAAB"                   "$(head -n 8 "${S}" | cut -f2 | tr '\n' ' ')" "3000 4000 4000 3000 4000 3000 3000 4000 "
 check "arms balanced"                            "$(head -n 8 "${S}" | cut -f2 | sort | uniq -c | awk '{print $1}' | tr '\n' ' ')" "4 4 "
 
 # tick: applies the scheduled arm once the block has begun.
 setup
 mkdir -p "${WORK}/state/interval-trial"
-printf '%s\t5000\n%s\tEND\n' "2000-01-01T00:00:00Z" "2999-01-01T00:00:00Z" > "${WORK}/state/interval-trial/schedule"
+printf '%s\t3000\n%s\tEND\n' "2000-01-01T00:00:00Z" "2999-01-01T00:00:00Z" > "${WORK}/state/interval-trial/schedule"
 trial tick
-check "tick applies the scheduled arm"           "$(interval "${R}/producer-rest.json")" "5000"
+check "tick applies the scheduled arm"           "$(interval "${R}/producer-rest.json")" "3000"
 trial tick
 check "a second tick on the same arm is a no-op" "$(grep -c '^restart' "${WORK}/systemctl.log")" "1"
 
@@ -100,11 +100,14 @@ trial tick; trial tick
 rm -f "${WORK}/unhealthy"
 check "unhealthy twice rolls back"               "$(interval "${R}/producer-rest.json")" "4000"
 
+# The floor holds even when someone overrides the arms.
+check "arms below 3000 are refused"              "$(PATH="${WORK}/bin:${PATH}" XL1_TRIAL_ARMS="1000 4000" bash "${TRIAL}" status >/dev/null 2>&1; echo $?)" "1"
+
 # tick past the end restores the originals.
 setup
 mkdir -p "${WORK}/state/interval-trial"
-trial set 5000
-printf '%s\t5000\n%s\tEND\n' "2000-01-01T00:00:00Z" "2000-01-02T00:00:00Z" > "${WORK}/state/interval-trial/schedule"
+trial set 3000
+printf '%s\t3000\n%s\tEND\n' "2000-01-01T00:00:00Z" "2000-01-02T00:00:00Z" > "${WORK}/state/interval-trial/schedule"
 trial tick
 check "finished schedule restores originals"     "$(cat "${R}"/producer.json "${R}"/producer-rest.json | cksum)" "${ORIG_SUM}"
 

@@ -444,6 +444,11 @@ info "installed /usr/local/bin/xl1-alert.sh"
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-perf-snapshot" /usr/local/bin/xl1-perf-snapshot
 info "installed /usr/local/bin/xl1-perf-snapshot"
 
+# A/B tool for the block-production interval. Its timer is installed with the other units
+# but never enabled here: a trial starts only when an operator runs `xl1-interval-trial start`.
+install -m 755 "${BUNDLE_DIR}/scripts/xl1-interval-trial" /usr/local/bin/xl1-interval-trial
+info "installed /usr/local/bin/xl1-interval-trial"
+
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-host-update.sh" /usr/local/bin/xl1-host-update.sh
 info "installed /usr/local/bin/xl1-host-update.sh"
 

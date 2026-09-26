@@ -56,6 +56,7 @@ live_interval() {
   docker exec "${CONTAINER}" cat "${CONFIG_IN_CONTAINER}" 2>/dev/null \
     | python3 -c 'import json,sys
 d=json.load(sys.stdin)
+d=d.get("xl1",d)  # the entrypoint writes the CLI config under a top-level "xl1" key
 v={a.get("blockProductionCheckInterval") for a in d.get("actors",[]) if a.get("name")=="producer"}
 print(v.pop() if len(v)==1 else "")' 2>/dev/null
 }

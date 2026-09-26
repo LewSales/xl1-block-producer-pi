@@ -13,13 +13,14 @@ setup() {
   rm -rf "${WORK}/etc" "${WORK}/state" "${WORK}/bin"; mkdir -p "${WORK}/etc/presets/roles" "${WORK}/state" "${WORK}/bin"
   cp "${HERE}/../presets/roles/producer.json" "${HERE}/../presets/roles/producer-rest.json" "${WORK}/etc/presets/roles/"
   : > "${WORK}/systemctl.log"
-  # docker: the "container" loaded whatever producer-rest.json said at the last restart
+  # docker: the "container" loaded whatever producer-rest.json said at the last restart, and
+  # reports it nested under "xl1" exactly as the entrypoint's generated config does
   # (or a frozen copy when STALE is set, to simulate a mount that did not update).
   cat > "${WORK}/bin/docker" <<INNER
 #!/usr/bin/env bash
 case "\$1" in
   inspect) [[ -f "${WORK}/unhealthy" ]] && echo "true unhealthy" || echo "true healthy" ;;
-  exec) cat "${WORK}/loaded.json" ;;
+  exec) printf '{"xl1":'; cat "${WORK}/loaded.json"; printf '}' ;;  # shaped like /tmp/xl1-preset.xyo.config.json
 esac
 INNER
   cat > "${WORK}/bin/systemctl" <<INNER

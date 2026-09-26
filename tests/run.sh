@@ -21,7 +21,7 @@ SHELL_SCRIPTS=(
   "${ROOT}/provision.sh" "${ROOT}/preflight.sh" "${ROOT}/build-images.sh"
   "${ROOT}/scripts/xl1-collect.sh" "${ROOT}/scripts/xl1-alert.sh"
   "${ROOT}/scripts/xl1ctl" "${ROOT}/scripts/xl1-screen-setup.sh" "${ROOT}/scripts/xl1-screen"
-  "${ROOT}/scripts/xl1-cpu-governor" "${ROOT}/scripts/xl1-perf-snapshot"
+  "${ROOT}/scripts/xl1-cpu-governor" "${ROOT}/scripts/xl1-perf-snapshot" "${ROOT}/scripts/xl1-interval-trial"
 )
 
 step "Shell syntax"
@@ -94,6 +94,9 @@ rm -rf "${PANELDIR}"
 
 step "Collector behaviour"
 if bash "${HERE}/collect.test.sh"; then ok "collector tests passed"; else bad "collector tests failed"; fi
+
+step "Interval trial"
+if bash "${HERE}/interval-trial.test.sh"; then ok "interval trial tests passed"; else bad "interval trial tests failed"; fi
 
 step "Alerter behaviour"
 if bash "${HERE}/alert.test.sh"; then ok "alerter tests passed"; else bad "alerter tests failed"; fi

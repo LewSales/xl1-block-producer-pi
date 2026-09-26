@@ -1,0 +1,11 @@
+# Installed and enabled only for a trial (xl1-interval-trial start); provision.sh does not enable it.
+[Unit]
+Description=XL1 interval trial tick every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=15s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

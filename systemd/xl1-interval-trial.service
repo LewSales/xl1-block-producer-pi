@@ -1,0 +1,9 @@
+[Unit]
+Description=XL1 interval trial: apply the scheduled blockProductionCheckInterval and guard health
+Documentation=file:///usr/local/bin/xl1-interval-trial
+After=xl1-producer.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xl1-interval-trial tick
+Nice=10

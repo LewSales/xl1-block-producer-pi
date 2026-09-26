@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# xl1-interval-trial — a controlled A/B test of blockProductionCheckInterval (default 3000 vs 4000 ms).
+#
+#   xl1-interval-trial status              live interval, schedule position, trial log
+#   xl1-interval-trial start [DAYS] [HRS]  write a balanced schedule and enable the timer
+#                                           (defaults: 8 days in 6-hour blocks)
+#   xl1-interval-trial set MS              one verified switch to one of the two arms, no schedule
+#   xl1-interval-trial tick                what the timer runs: apply the scheduled arm and
+#                                           guard producer health
+#   xl1-interval-trial rollback            restore the presets as they were before the trial,
+#                                           restart once, stop the timer
+#
+# Only the interval changes. Each switch rewrites the one key in both role presets. It refuses
+# to write if anything else in the file would differ, so provider bindings, account path and
+# heartbeat keep their exact content. Rollback puts the original files back byte for byte. The switch restarts the one systemd-managed
+# producer, whose ExecStartPre removes any stale container first, so there is never a second
+# producer signing with the same key. After the restart it reads the config the CLI actually
+# loaded inside the container. If that config does not show the new value, or the node is not
+# healthy within the deadline, the switch undoes itself and the trial stops.
+#
+# Blocks alternate A B B A on even days and B A A B on odd days. Over any pair of days each
+# arm then holds every clock slot equally, so time-of-day traffic cancels instead of landing
+# on one arm.
+set -uo pipefail
+
+CONF_DIR="${XL1_CONF_DIR:-/etc/xl1}"
+STATE_DIR="${XL1_STATE_DIR:-/var/lib/xl1}"
+ROLES_DIR="${CONF_DIR}/presets/roles"
+TRIAL_DIR="${STATE_DIR}/interval-trial"
+ORIGINAL_DIR="${TRIAL_DIR}/original"
+SCHEDULE="${TRIAL_DIR}/schedule"
+LOG="${TRIAL_DIR}/log.tsv"
+UNHEALTHY="${TRIAL_DIR}/.unhealthy-ticks"
+CONTAINER="${XL1_CONTAINER:-xl1-producer}"
+SERVICE="${XL1_SERVICE:-xl1-producer}"
+TIMER="${XL1_TRIAL_TIMER:-xl1-interval-trial.timer}"
+CONFIG_IN_CONTAINER="${XL1_CONFIG_OUT:-/tmp/xl1-preset.xyo.config.json}"
+HEALTH_DEADLINE="${XL1_TRIAL_HEALTH_DEADLINE:-240}"
+PRESETS=(producer.json producer-rest.json)
+# The two arms, A then B. 4000 vs 5000 was settled from chain data (4000 won), so the open
+# question is 3000 vs 4000. Override with XL1_TRIAL_ARMS="A B"; 3000 is the floor this tool
+# will write, so a typo cannot hammer XYO's endpoint.
+read -r -a ARMS <<< "${XL1_TRIAL_ARMS:-3000 4000}"
+(( ${#ARMS[@]} == 2 && ARMS[0] >= 3000 && ARMS[1] >= 3000 )) || { echo "error: XL1_TRIAL_ARMS must be two values >= 3000" >&2; exit 1; }
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log() { mkdir -p "${TRIAL_DIR}"; printf '%s\t%s\n' "$(now)" "$*" >> "${LOG}"; printf '%s\n' "$*"; }
+need_root() { [[ ${EUID} -eq 0 || -n "${XL1_TRIAL_NO_ROOT_CHECK:-}" ]] || die "needs root — try: sudo $0 $*"; }
+
+valid_arm() { local a; for a in "${ARMS[@]}"; do [[ "$1" == "$a" ]] && return 0; done; return 1; }
+
+# The interval the running CLI loaded, read from the config the entrypoint generated. The
+# preset on disk only says what the next start will use.
+live_interval() {
+  docker exec "${CONTAINER}" cat "${CONFIG_IN_CONTAINER}" 2>/dev/null \
+    | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+d=d.get("xl1",d)  # the entrypoint writes the CLI config under a top-level "xl1" key
+v={a.get("blockProductionCheckInterval") for a in d.get("actors",[]) if a.get("name")=="producer"}
+print(v.pop() if len(v)==1 else "")' 2>/dev/null
+}
+
+container_healthy() {
+  [[ "$(docker inspect -f '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${CONTAINER}" 2>/dev/null)" == "true healthy" ]]
+}
+
+# Rewrite blockProductionCheckInterval in one preset. Refuse unless the result equals the
+# input with only that key changed.
+rewrite_preset() { # $1 file, $2 ms
+  python3 - "$1" "$2" <<'PY'
+import copy, json, os, sys, tempfile
+path, ms = sys.argv[1], int(sys.argv[2])
+with open(path) as f:
+    original = json.load(f)
+updated = copy.deepcopy(original)
+actors = [a for a in updated.get("actors", []) if a.get("name") == "producer"]
+if len(actors) != 1 or "blockProductionCheckInterval" not in actors[0]:
+    sys.exit(f"{path}: expected exactly one producer actor with blockProductionCheckInterval")
+actors[0]["blockProductionCheckInterval"] = ms
+def without_interval(d):
+    d = copy.deepcopy(d)
+    for a in d.get("actors", []):
+        a.pop("blockProductionCheckInterval", None)
+    return d
+if without_interval(updated) != without_interval(original):
+    sys.exit(f"{path}: refusing — more than the interval would change")
+mode = os.stat(path).st_mode & 0o777
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".trial-")
+with os.fdopen(fd, "w") as f:
+    json.dump(updated, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, mode)
+os.replace(tmp, path)
+PY
+}
+
+save_original() {
+  [[ -d "${ORIGINAL_DIR}" ]] && return 0
+  mkdir -p "${ORIGINAL_DIR}"
+  local p; for p in "${PRESETS[@]}"; do cp -p "${ROLES_DIR}/${p}" "${ORIGINAL_DIR}/${p}"; done
+  log "saved original presets to ${ORIGINAL_DIR}"
+}
+
+restore_original() {
+  local p; for p in "${PRESETS[@]}"; do cp -p "${ORIGINAL_DIR}/${p}" "${ROLES_DIR}/${p}"; done
+}
+
+wait_live() { # $1 expected ms
+  local deadline=$(( $(date +%s) + HEALTH_DEADLINE ))
+  while (( $(date +%s) < deadline )); do
+    if container_healthy && [[ "$(live_interval)" == "$1" ]]; then return 0; fi
+    sleep "${XL1_TRIAL_POLL:-5}"
+  done
+  return 1
+}
+
+cmd_set() { # $1 ms
+  need_root set "$@"
+  local ms="${1:-}" p
+  valid_arm "${ms}" || die "interval must be one of: ${ARMS[*]}"
+  save_original
+  for p in "${PRESETS[@]}"; do rewrite_preset "${ROLES_DIR}/${p}" "${ms}" || die "preset rewrite refused; nothing restarted"; done
+  log "switch ${ms} — restarting ${SERVICE}"
+  systemctl restart "${SERVICE}"
+  if wait_live "${ms}"; then
+    log "live ${ms} verified in ${CONTAINER} (healthy)"
+    rm -f "${UNHEALTHY}"
+    return 0
+  fi
+  log "FAILED to verify ${ms} within ${HEALTH_DEADLINE}s — restoring original presets and stopping the trial"
+  restore_original
+  systemctl restart "${SERVICE}"
+  systemctl disable --now "${TIMER}" >/dev/null 2>&1 || true
+  return 1
+}
+
+# ABBA on even days, BAAB on odd, so every clock slot is split evenly between the arms.
+cmd_start() {
+  need_root start "$@"
+  local days="${1:-8}" hours="${2:-6}"
+  [[ "${days}" =~ ^[0-9]+$ && "${hours}" =~ ^(1|2|3|4|6|8|12)$ ]] || die "usage: start [DAYS] [HOURS dividing 24]"
+  local per_day=$(( 24 / hours )) start_epoch d s arm idx
+  # First block starts at the next block boundary (UTC), so blocks line up with clock slots.
+  start_epoch=$(( ( $(date -u +%s) / (hours * 3600) + 1 ) * hours * 3600 ))
+  mkdir -p "${TRIAL_DIR}"
+  : > "${SCHEDULE}.new"
+  for (( d = 0; d < days; d++ )); do
+    for (( s = 0; s < per_day; s++ )); do
+      # pattern index within the day: 0 1 1 0 repeating (ABBA), flipped on odd days (BAAB)
+      idx=$(( ( (s % 4 == 0 || s % 4 == 3) ? 0 : 1 ) ^ (d % 2) ))
+      arm="${ARMS[${idx}]}"
+      printf '%s\t%s\n' "$(date -u -d "@$(( start_epoch + (d * per_day + s) * hours * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)" "${arm}" >> "${SCHEDULE}.new"
+    done
+  done
+  printf '%s\tEND\n' "$(date -u -d "@$(( start_epoch + days * 24 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)" >> "${SCHEDULE}.new"
+  mv "${SCHEDULE}.new" "${SCHEDULE}"
+  save_original
+  log "trial scheduled: ${days} days, ${hours}-hour blocks, first block $(head -n1 "${SCHEDULE}" | cut -f1)"
+  systemctl enable --now "${TIMER}" >/dev/null 2>&1 || log "note: could not enable ${TIMER}; run tick by hand"
+}
+
+scheduled_arm() { # prints the arm for now, END when finished, nothing before the first block
+  [[ -f "${SCHEDULE}" ]] || return 0
+  local t="$(now)" line arm=""
+  while IFS=$'\t' read -r at a; do
+    [[ "${at}" > "${t}" ]] && break
+    arm="${a}"
+  done < "${SCHEDULE}"
+  printf '%s' "${arm}"
+}
+
+cmd_tick() {
+  need_root tick "$@"
+  local want live n
+  want="$(scheduled_arm)"
+  if [[ "${want}" == "END" ]]; then
+    log "schedule finished — restoring original presets"
+    cmd_rollback
+    return 0
+  fi
+  live="$(live_interval)"
+  # Health guard: two consecutive unhealthy ticks (~10 min) end the trial on the original config.
+  if ! container_healthy; then
+    n=$(( $(cat "${UNHEALTHY}" 2>/dev/null || echo 0) + 1 )); echo "${n}" > "${UNHEALTHY}"
+    log "producer not healthy (tick ${n})"
+    if (( n >= 2 )); then log "unhealthy twice running — rolling back"; cmd_rollback; fi
+    return 0
+  fi
+  rm -f "${UNHEALTHY}"
+  [[ -z "${want}" || "${want}" == "${live}" ]] && return 0
+  cmd_set "${want}"
+}
+
+cmd_rollback() {
+  need_root rollback "$@"
+  systemctl disable --now "${TIMER}" >/dev/null 2>&1 || true
+  [[ -d "${ORIGINAL_DIR}" ]] || { log "no saved original presets; nothing to restore"; return 0; }
+  restore_original
+  log "original presets restored — restarting ${SERVICE}"
+  systemctl restart "${SERVICE}"
+  local want
+  want="$(python3 -c 'import json,sys;print([a for a in json.load(open(sys.argv[1]))["actors"] if a.get("name")=="producer"][0]["blockProductionCheckInterval"])' "${ORIGINAL_DIR}/producer-rest.json" 2>/dev/null)"
+  if wait_live "${want}"; then log "rollback verified: live ${want}"; else log "rollback: producer not yet verified at ${want} — check xl1ctl doctor"; return 1; fi
+}
+
+cmd_status() {
+  printf 'live interval (loaded by the CLI): %s\n' "$(live_interval || true)"
+  printf 'container healthy:                 %s\n' "$(container_healthy && echo yes || echo no)"
+  if [[ -f "${SCHEDULE}" ]]; then
+    printf 'scheduled arm now:                 %s\n' "$(scheduled_arm)"
+    printf 'schedule:                          %s .. %s\n' "$(head -n1 "${SCHEDULE}" | cut -f1)" "$(tail -n1 "${SCHEDULE}" | cut -f1)"
+  else
+    printf 'schedule:                          none\n'
+  fi
+  [[ -f "${LOG}" ]] && { printf '\nlast log lines:\n'; tail -n 8 "${LOG}"; }
+  return 0
+}
+
+case "${1:-status}" in
+  status)   cmd_status ;;
+  start)    shift; cmd_start "$@" ;;
+  set)      shift; cmd_set "$@" ;;
+  tick)     shift; cmd_tick "$@" ;;
+  rollback) shift; cmd_rollback "$@" ;;
+  -h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command: $1" ;;
+esac

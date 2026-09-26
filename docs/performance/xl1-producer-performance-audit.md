@@ -537,3 +537,79 @@ at least 72 h. About 6700 heights at roughly 12% gives a binomial 95% interval
 of about ±0.8 percentage points per window. A before/after difference therefore
 has to exceed about 1.1 points to be distinguishable from noise, and more than
 that if the competitor mix shifts between the two windows.
+
+## 4000 vs 5000 ms on the Pi (2026-09-26)
+
+**Question:** did the Pi do better at 5000 than at 4000? Commit `556d104` says 3900/4000 "hurt block
+production on the RPi 3B+".
+
+**Live today:** `blockProductionCheckInterval` is **4000**. That value appears in both mounted
+presets and in `/tmp/xl1-preset.xyo.config.json`, the config the CLI actually loaded. The role is
+`producer-rest`.
+
+**What each run really used.** Container logs from the older runs are gone, so the interval was
+read from the chain. The producer timer is a fixed `setInterval`, so the gap between two of a
+producer's block epochs a few minutes apart is a multiple of the interval plus build jitter.
+
+- On the verified-4000 run the gap concentration is R = 0.97–0.98 at 4000, about 0.2 at 5000, and
+  under 0.1 at 3900.
+- Applied to every run since 2026-09-03:
+  - **every run up to 2026-09-20 12:25 MDT was 5000**, including S1 (2026-09-17 19:14 → 09-19
+    23:20), the run the "hurt" note describes (R 0.94 at 5000, 0.02 at 4000);
+  - **4000 starts at 2026-09-20 13:02** (R 0.97–0.99 on every run since).
+- The Windows node ran 5000 in both windows below (R about 0.8) and moved to 4000 only later.
+
+**The comparable pair: same CLI (5.3.2), same role, Windows constant, 8 producers, same
+transaction mix.** Eligible heights are those where the Pi was up and the parent was not the Pi's
+own block; the diversity bonus hands those heights to any other producer. The first 5 minutes after
+each start are excluded.
+
+| | 5000 (2026-09-17 19:14 → 09-20 12:25 MDT) | 4000 (2026-09-20 13:02 → 09-22 18:45 MDT) |
+|---|---|---|
+| Hours observed | 63.6 | 53.5 |
+| Chain heights / eligible | 7580 / 6881 | 5510 / 4786 |
+| **Pi wins / eligible** | **698 / 6881 = 10.1%** | **724 / 4786 = 15.1%** |
+| Heartbeat heights | 293 / 1823 = 16.1% | 222 / 1243 = 17.9% |
+| Transaction heights | 405 / 5058 = **8.0%** | 502 / 3543 = **14.2%** |
+| Transaction blocks in the mix | 73.2% | 73.9% |
+| Active producers | 8 | 8 |
+| Windows node share / interval | 8.7% / 5000 | 8.9% / 5000 |
+| Candidates built (per height) | 8505 (1.12) | 6526 (1.18) |
+| Loss "head advanced first" | 334 (5.1 / h) | 49 (0.9 / h) |
+| Loss "tx already finalized" | 75 | 85 |
+| Build retries | 78 | 87 |
+| Failed checks (timer errors) | 2 | 0 |
+| Skipped runs / overruns | 78 / 60 (116 of the 138 in one hour, 2026-09-20 08:00) | 20 / 14 |
+| Dropped-candidate recoveries | 1603 (24.7 / h) | 1029 (19.4 / h) |
+| Time payload p50 / p95 (RPC proxy) | 471 / 652 ms | 491 / 656 ms |
+| Restarts inside the window | 2 (S2 1.3 h excluded) | 1 |
+
+The difference is +5.0 percentage points for 4000 (95% CI ±1.2, z ≈ 7.9). It is concentrated in
+transaction heights (8.0% → 14.2%), where the mempool is sampled against a transaction's roughly
+6 s life. It is visible in "head advanced first" losses falling from 5.1 to 0.9 an hour. Network
+latency did not change.
+
+**Caveat.** This is a before/after comparison, not a controlled one. One rival (`81b835c1`) fell from
+20.5% to 14.7% of heights across the same switch. Some of the Pi's gain may be that rival's loss
+rather than the interval.
+
+**Why 5000 looked better.** The Pi's best days were early September at 5000 (16–20% of eligible
+heights). Those days had:
+
+- 41–81% heartbeat blocks, against 19–30% since 2026-09-17;
+- 7 producers on several days;
+- the Windows node off on 2026-09-10, 09-11 and 09-16.
+
+That network is not comparable with the one since.
+
+**Verdict:** the evidence **contradicts** "5000 is better on the Pi". The Pi stays at 4000; no preset
+change. `scripts/xl1-interval-trial` can run a controlled ABBA/BAAB trial that would remove the
+remaining confound. It has not been started, because it costs real share if the effect above is
+real.
+
+Reproduce with:
+
+```bash
+node docs/performance/interval/rangescan.mjs <from> head scan.json
+node docs/performance/interval/analyze-interval.mjs scan.json docs/performance/interval/segments.json
+```

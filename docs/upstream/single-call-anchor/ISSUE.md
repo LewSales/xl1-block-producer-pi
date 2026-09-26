@@ -1,7 +1,7 @@
 # `SimpleTimeSyncViewer` resolves the EVM anchor in two sequential round trips; one does it
 
-**File at:** https://github.com/XYOracleNetwork/xl1-docker-images/issues. That is the same tracker as
-#4 (`filterByFunded`). **Not filed yet.**
+**Filed 2026-09-26 as https://github.com/XYOracleNetwork/xl1-docker-images/issues/11.** That is the
+same tracker as #4 (`filterByFunded`).
 
 ---
 

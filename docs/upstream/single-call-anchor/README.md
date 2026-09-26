@@ -1,6 +1,6 @@
 # Single-call EVM anchor: patch, tests, benchmark
 
-- `ISSUE.md`: the issue text to file at XYOracleNetwork/xl1-docker-images. Not filed yet.
+- `ISSUE.md`: the issue text, filed as XYOracleNetwork/xl1-docker-images#11.
 - `SimpleTimeSyncViewer.patch`: the change, as a diff against upstream
   `src/modules/protocol-sdk/simple/timeSync2/SimpleTimeSyncViewer.ts`. That source is recovered from
   the `@xyo-network/xl1-sdk` 5.7.0 published sourcemap.

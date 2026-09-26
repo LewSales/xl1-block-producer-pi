@@ -481,10 +481,14 @@ CYC_P95="$(statz_num productionCycle p95Ms)"
 # a single number.
 #
 # These stages do NOT sum to productionCycle, and the dashboard says so rather
-# than quietly normalising. generateTimePayload and the reward diviner's
-# divine() both sit on the producing path and appear in no ProducerTimingNames
-# entry, so the remainder is real work that the producer does not time. Pretending
-# the parts add up would invent precision the instrumentation does not have.
+# than quietly normalising. Pretending the parts add up would invent precision
+# the instrumentation does not have.
+#
+# From xl1-cli 5.5.0 the block runner times generateTimePayload
+# (timePayloadGeneration) and the reward diviner (blockRewardTransfers) too. The
+# time payload is the largest measured step on the producing path — two
+# sequential Sepolia calls for the EVM anchor — so it is surfaced here. Older
+# CLIs simply omit both keys and the stage drops out.
 # Whether the node is actually keeping up, which is what decides if a slow
 # cycle matters. Both live in the same STATZ payload. "counts" has no nested
 # object, so the same extractor reaches them.
@@ -494,6 +498,9 @@ BP_P50="$(statz_num blockProduction p50Ms)"
 MPT_P50="$(statz_num mempoolPendingTransactionsFetch p50Ms)"
 MPB_P50="$(statz_num mempoolPendingBlocksFetch p50Ms)"
 SUB_P50="$(statz_num mempoolSubmitBlock p50Ms)"
+TP_P50="$(statz_num timePayloadGeneration p50Ms)"
+TP_P95="$(statz_num timePayloadGeneration p95Ms)"
+RW_P50="$(statz_num blockRewardTransfers p50Ms)"
 
 {
   printf '{'
@@ -512,13 +519,14 @@ SUB_P50="$(statz_num mempoolSubmitBlock p50Ms)"
     printf ',"stages":{'
     STAGE_FIRST=1
     for pair in "headFetch:${HF_P50}" "blockProduction:${BP_P50}" \
-                "mempoolTx:${MPT_P50}" "mempoolBlocks:${MPB_P50}" "submit:${SUB_P50}"; do
+                "mempoolTx:${MPT_P50}" "mempoolBlocks:${MPB_P50}" "submit:${SUB_P50}"                 "timePayload:${TP_P50}" "rewardTransfers:${RW_P50}"; do
       v="${pair#*:}"; k="${pair%%:*}"
       [[ "${v}" =~ ^[0-9.]+$ ]] || continue
       [[ ${STAGE_FIRST} -eq 1 ]] && STAGE_FIRST=0 || printf ','
       printf '"%s":%s' "${k}" "${v}"
     done
     printf '}'
+    [[ "${TP_P95}" =~ ^[0-9.]+$ ]] && printf ',"timePayloadP95Ms":%s' "${TP_P95}"
     [[ "${SKIPPED}" =~ ^[0-9]+$ ]] && printf ',"skippedChecks":%s' "${SKIPPED}"
     [[ "${REJECTED}" =~ ^[0-9]+$ ]] && printf ',"rejectedPublishes":%s' "${REJECTED}"
     printf '},'

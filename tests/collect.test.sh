@@ -92,6 +92,32 @@ rm -f "${WORK}/state/.run-builds" "${WORK}/state/.collect-cursor"
 run
 check "a launch that never built reads zero" "$(field "['buildsThisRun']")" "0"
 
+# 5.5.0 times the time payload and the reward diviner. The time payload is the
+# largest measured producing-path step, so it must reach the snapshot; an older
+# /statz without those keys must simply omit them, not emit an empty value.
+mkdocker hhh 5.5.0 "[xl1-producer] all good"
+cat > "${WORK}/bin/curl" <<INNER
+#!/usr/bin/env bash
+[[ "\$*" == */statz* ]] && cat "${HERE}/fixtures/statz-5.5.0.json" && exit 0
+exit 22
+INNER
+chmod +x "${WORK}/bin/curl"
+run
+check "time payload stage surfaced"   "$(field "['latency']['stages']['timePayload']")" "578"
+check "time payload p95 surfaced"     "$(field "['latency']['timePayloadP95Ms']")" "815"
+check "reward transfers stage"        "$(field "['latency']['stages']['rewardTransfers']")" "0"
+check "existing stages unchanged"     "$(field "['latency']['stages']['mempoolTx']")" "194"
+sed -e 's/"timePayloadGeneration":{[^}]*},\{0,1\}//' -e 's/"blockRewardTransfers":{[^}]*},//' -e 's/,}/}/'   "${HERE}/fixtures/statz-5.5.0.json" > "${WORK}/statz-old.json"
+cat > "${WORK}/bin/curl" <<INNER
+#!/usr/bin/env bash
+[[ "\$*" == */statz* ]] && cat "${WORK}/statz-old.json" && exit 0
+exit 22
+INNER
+run
+check "pre-5.5.0 statz omits the stage" "$(field "['latency']['stages'].get('timePayload')")" "null"
+check "pre-5.5.0 statz omits the p95"   "$(field "['latency'].get('timePayloadP95Ms')")" "null"
+rm -f "${WORK}/bin/curl"
+
 # The container disappearing mid-cycle must produce a valid document, not commas.
 cat > "${WORK}/bin/docker" <<'INNER'
 #!/usr/bin/env bash

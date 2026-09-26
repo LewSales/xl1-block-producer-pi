@@ -1146,7 +1146,7 @@ function render(d) {
         ${(() => {
           const rows = Object.entries(ops.stages).filter(([, v]) => Number.isFinite(v))
           const top = Math.max(...rows.map(([, v]) => v), 1)
-          const names = { headFetch: 'head fetch', blockProduction: 'build', mempoolTx: 'mempool tx', mempoolBlocks: 'mempool blocks', submit: 'submit' }
+          const names = { headFetch: 'head fetch', blockProduction: 'build', mempoolTx: 'mempool tx', mempoolBlocks: 'mempool blocks', submit: 'submit', timePayload: 'time payload', rewardTransfers: 'reward transfers' }
           return rows.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="lat-row">
             <span class="sub">${esc(names[k] ?? k)}</span><span class="mono">${num(v)} ms</span>
             <span class="lat-bar"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>

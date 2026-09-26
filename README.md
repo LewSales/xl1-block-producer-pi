@@ -529,7 +529,8 @@ own right.
 
 To upgrade the CLI, rebuild the images on a workstation and reload. The version
 `build-images.sh` pins by default is the one this bundle was built against
-(currently **5.3.1**); pass `XL1_CLI_VERSION` only to build something else:
+(currently **5.4.1**; the Pi itself runs the 5.5.0 prebuilt release that
+`latest.json` points at); pass `XL1_CLI_VERSION` only to build something else:
 
 ```bash
 ./build-images.sh                          # on an amd64 machine, not the Pi

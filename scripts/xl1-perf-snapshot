@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Read-only performance snapshot: the numbers a before/after comparison needs,
+# over one consistent window.
+#
+#   xl1-perf-snapshot [--hours N] [--json] [--probe-evm URL]
+#
+# Accepted share comes from the chain (trend.jsonl cblocks against heights), not
+# from "Published block" log lines — published means submitted, not accepted.
+# Competitor shares come from the dashboard's peers.json chain scan. Producer
+# timings and counters come from the one loopback /statz the collector already
+# reads. Nothing here writes a file or touches the producer's work path.
+#
+# --probe-evm times an EVM JSON-RPC endpoint the way the time payload uses it
+# (eth_blockNumber then eth_getBlockByNumber, sequentially), for judging a
+# candidate XL1_EVM_RPC_URL before anyone restarts a producer onto it.
+set -euo pipefail
+
+HOURS=24
+JSON=0
+PROBE_EVM=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --hours) HOURS="${2:?--hours needs a value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    --probe-evm) PROBE_EVM="${2:?--probe-evm needs a URL}"; shift 2 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+[[ "${HOURS}" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "--hours must be a number" >&2; exit 2; }
+
+STATE_DIR="${XL1_STATE_DIR:-/var/lib/xl1}"
+TREND="${DASH_TREND_FILE:-${STATE_DIR}/dashboard/trend.jsonl}"
+PEERS="${DASH_PEERS_FILE:-${STATE_DIR}/dashboard/peers.json}"
+STATUS="${STATE_DIR}/producer-status.json"
+HEALTH_PORT="${XL1_HEALTH_CHECK_PORT:-9099}"
+# The reward address is public and dashboard.env is world-readable; the
+# producer env holds the mnemonic and is deliberately not read.
+DASH_ENV="${XL1_DASHBOARD_ENV:-/etc/xl1/dashboard.env}"
+SELF="${XL1_SELF_ADDRESS:-$(sed -n 's/^XL1_REWARD_ADDRESS=//p' "${DASH_ENV}" 2>/dev/null | tr -d '"'"'"' ' | head -n1)}"
+
+STATZ="$(curl -fsS --max-time 2 "http://127.0.0.1:${HEALTH_PORT}/statz" 2>/dev/null || true)"
+
+STATZ="${STATZ}" HOURS="${HOURS}" JSON="${JSON}" TREND="${TREND}" PEERS="${PEERS}" \
+STATUS="${STATUS}" SELF="${SELF}" PROBE_EVM="${PROBE_EVM}" python3 - <<'PY'
+import json, os, time, urllib.request
+
+hours = float(os.environ["HOURS"])
+out = {"generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "windowHours": hours}
+self_addr = os.environ["SELF"].lower().removeprefix("0x")
+
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+# Accepted share: cblocks is the chain-counted production total, so its delta
+# over the height delta is the share of heights this producer actually won.
+rows = []
+try:
+    with open(os.environ["TREND"]) as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if all(k in r for k in ("t", "height", "cblocks")):
+                rows.append(r)
+except OSError:
+    pass
+if rows:
+    last = rows[-1]
+    cut = last["t"] - hours * 3600e3
+    first = next(r for r in rows if r["t"] >= cut)
+    heights = last["height"] - first["height"]
+    won = last["cblocks"] - first["cblocks"]
+    out["accepted"] = {
+        "spanHours": round((last["t"] - first["t"]) / 3.6e6, 2),
+        "heights": heights,
+        "won": won,
+        "sharePct": round(100 * won / heights, 2) if heights > 0 else None,
+    }
+
+# Competition from the dashboard's chain scan, over the whole days the window
+# covers (peers.json keeps per-day counts, not timestamps).
+peers = load_json(os.environ["PEERS"])
+if peers and isinstance(peers.get("days"), dict):
+    days = sorted(peers["days"].items())[-max(1, int(-(-hours // 24))):]
+    counts, scanned = {}, 0
+    for _, d in days:
+        scanned += d.get("scanned", 0)
+        for a, n in d.get("counts", {}).items():
+            counts[a] = counts.get(a, 0) + n
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+    out["competition"] = {
+        "days": [k for k, _ in days],
+        "scanned": scanned,
+        "producers": len(ranked),
+        "evenSplitPct": round(100 / len(ranked), 2) if ranked else None,
+        "shares": [{"address": a, "won": n, "sharePct": round(100 * n / scanned, 2) if scanned else None,
+                    "self": a == self_addr} for a, n in ranked],
+    }
+    gaps = peers.get("gaps") or {}
+    edges, buckets = gaps.get("edges") or [], gaps.get("buckets") or []
+    if 60 in edges and len(buckets) > edges.index(60) and gaps.get("count"):
+        # The bucket starting at 60 s holds the heartbeat blocks: no transaction
+        # arrived, so the chain waited out the 60 s heartbeat interval.
+        out["competition"]["heartbeatSharePct"] = round(100 * buckets[edges.index(60)] / gaps["count"], 1)
+
+# Producer counters and timings since the actor started.
+try:
+    statz = json.loads(os.environ["STATZ"]) if os.environ["STATZ"] else None
+except ValueError:
+    statz = None
+if statz:
+    c, t = statz.get("counts", {}), statz.get("timings", {})
+    out["statz"] = {
+        "actorUptimeHours": round(statz.get("actorUptimeMs", 0) / 3.6e6, 2),
+        "counts": {k: c.get(k) for k in ("blockProductionChecks", "failedChecks", "concurrentChecksSkipped",
+                                         "blockProductionAttempts", "idleAttempts", "blocksPublished",
+                                         "rejectedPublishes", "candidateRecoveries")},
+        "timings": {k: {"p50Ms": v.get("p50Ms"), "p95Ms": v.get("p95Ms"), "maxMs": v.get("maxMs"), "count": v.get("count")}
+                    for k, v in sorted(t.items())},
+    }
+
+status = load_json(os.environ["STATUS"])
+if status:
+    out["race"] = status.get("race")
+    out["cliVersion"] = status.get("cliVersion")
+
+probe = os.environ["PROBE_EVM"]
+if probe:
+    def call(method, params):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+        req = urllib.request.Request(probe, body, {"content-type": "application/json"})
+        t0 = time.perf_counter()
+        with urllib.request.urlopen(req, timeout=4) as r:
+            res = json.load(r)
+        return (time.perf_counter() - t0) * 1000, res.get("result")
+    samples, heights, errors = [], [], 0
+    for _ in range(10):
+        try:
+            a, n = call("eth_blockNumber", [])
+            b, _blk = call("eth_getBlockByNumber", [n, False])
+            samples.append(a + b)
+            heights.append(int(n, 16))
+        except Exception:
+            errors += 1
+        time.sleep(0.5)
+    samples.sort()
+    pick = lambda p: round(samples[min(len(samples) - 1, int(len(samples) * p))]) if samples else None
+    out["evmProbe"] = {"url": probe, "anchorP50Ms": pick(0.5), "anchorP90Ms": pick(0.9),
+                       "lastHeight": heights[-1] if heights else None, "errors": errors}
+
+if os.environ["JSON"] == "1":
+    print(json.dumps(out, indent=2))
+    raise SystemExit
+
+print(f"XL1 perf snapshot  {out['generatedAt']}  window {hours:g} h  cli {out.get('cliVersion') or '?'}")
+a = out.get("accepted")
+if a:
+    print(f"  accepted   {a['won']} of {a['heights']} heights = {a['sharePct']}%  (span {a['spanHours']} h, chain-counted)")
+comp = out.get("competition")
+if comp:
+    print(f"  field      {comp['producers']} producers, even split {comp['evenSplitPct']}%, days {comp['days'][0]}..{comp['days'][-1]}"
+          + (f", heartbeat blocks {comp['heartbeatSharePct']}%" if "heartbeatSharePct" in comp else ""))
+    for s in comp["shares"]:
+        print(f"    {'*' if s['self'] else ' '} {s['address'][:10]}…  {s['won']:>6}  {s['sharePct']}%")
+s = out.get("statz")
+if s:
+    c = s["counts"]
+    print(f"  statz      {s['actorUptimeHours']} h: checks {c['blockProductionChecks']}, failed {c['failedChecks']}, "
+          f"skipped {c['concurrentChecksSkipped']}, published {c['blocksPublished']}, rejected {c['rejectedPublishes']}, "
+          f"recoveries {c['candidateRecoveries']}")
+    for k, v in s["timings"].items():
+        print(f"    {k:<32} p50 {v['p50Ms']:>5}  p95 {v['p95Ms']:>5}  max {v['maxMs']:>6}  n {v['count']}")
+r = out.get("race")
+if r:
+    lost = sum((r.get("lost") or {}).values())
+    print(f"  race 1h    built {r.get('built')}, retries {r.get('retries')}, logged losses {lost} {r.get('lost')}")
+e = out.get("evmProbe")
+if e:
+    print(f"  evm probe  {e['url']}: anchor p50 {e['anchorP50Ms']} ms, p90 {e['anchorP90Ms']} ms, "
+          f"height {e['lastHeight']}, errors {e['errors']}/10")
+PY

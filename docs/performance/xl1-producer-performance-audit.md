@@ -3,6 +3,12 @@
 Against `@xyo-network/xl1-cli` **5.3.1**, as shipped in the image running on
 `xl1pi` (Raspberry Pi 3 Model B Plus, 4 cores, 955 MB).
 
+> **Historical.** Every measurement from "Head detection analysis" through
+> "Fourteen-hour outcome window" was taken on 5.3.1 at a 5000 ms interval. Both
+> producers now run **5.5.0 at 4000 ms**, where `filterByFunded` is already
+> batched. Start at [CLI 5.5.0 re-baseline](#cli-550-re-baseline-2026-09-26),
+> at the end of this file.
+
 Read the bundle, not the docs: the CLI ships as a single
 `dist/cli-min.mjs` (10 MB) with `cli-min.mjs.map` (18 MB) beside it. Comments
 survive minification, so the shipped source is readable in place.
@@ -422,3 +428,112 @@ That last point is not yet proof. Both earlier collapses set in somewhere around
 19-24 h of container uptime, and this window is 14 h — it has not reached the
 age at which the failure showed itself before. The check that would settle it is
 another reading tonight at 20-24 h uptime, before any restart.
+
+## CLI 5.5.0 re-baseline (2026-09-26)
+
+Both producers: `@xyo-network/xl1-cli` **5.5.0**, role `producer-rest`,
+`blockProductionCheckInterval` **4000**. That is the value read from the
+preset *mounted inside each running container*, not the repo copy.
+`scripts/xl1-perf-snapshot` reproduces every number below.
+
+### Baseline, same window on both machines
+
+| | Pi (`ca08…`) | Windows (`2152…`) |
+|---|---|---|
+| /statz window | 38.5 h | 39.1 h |
+| checks / failed / skipped | 34604 / 402 / 0 | 35034 / 619 / 0 |
+| candidates published / rejected | 4255 / 0 | 4178 / 0 |
+| candidate recoveries | 333 | 395 |
+| **accepted, last 24 h** (Δcblocks ÷ Δheight) | **12.76%** (315 / 2468) | **10.58%** (261 / 2466) |
+| accepted, last 72 h | 12.45% | 11.13% |
+| headFetch p50 / p95 | 70 / 132 ms | 135 / 241 ms |
+| pendingTransactions p50 | 129 ms | 194 ms |
+| **timePayloadGeneration p50 / p95** | **475 / 594 ms** | **578 / 815 ms** |
+| mempoolSubmitBlock p50 | 162 ms | 180 ms |
+| productionCycle p50 / p95 | 211 / 1018 ms | 328 / 1082 ms |
+
+"Published" means submitted. At roughly 110 candidates an hour against roughly
+11 wins, about 90% of candidates lose.
+
+**The field** (from the peers.json chain scan): 8 producers, so an even split is
+12.5%. On 2026-09-25 the leader took 18.7% (440 of 2349), the Pi 13.3% and
+Windows 11.2%. The Pi is at or slightly above its even split and Windows is
+slightly below. Three producers win more consistently than either.
+
+**Heartbeats are about 46% of blocks.** In the block-gap histogram, 22020 of
+48320 gaps fall in the 60–65 s bucket: no transaction arrived and the chain
+waited out the 60 s `heartbeatInterval`.
+
+### How a race is decided (read from the 5.5.0 sourcemap)
+
+- The finalizer ticks every 500 ms. `findBestUncle` scores a candidate chain by
+  its length, plus a 1000-point bonus when its producer is not the head's
+  producer. A stable sort breaks ties, so listing order wins.
+- `timeValidPrefix` first drops any candidate whose EVM anchor is behind its
+  parent's (`anchor-monotonic`) or whose epoch is not after the parent's.
+- A valid candidate therefore wins by being in the pool first. The collector's
+  race reasons count only the mempool's "No candidate block can be appended"
+  rejections, about 4 of roughly 95 losses an hour. The rest are valid
+  candidates that simply arrived later, and nothing on the producer logs them.
+
+### Critical path, 5.5.0 (`SimpleBlockRunner.proposeNextValidBlock`, every step awaited in turn)
+
+1. `headFetch` (REST): 70–135 ms.
+2. `mempoolPendingTransactionsFetch` (RPC): 130–195 ms. The cycle returns here
+   if there are no transactions and no heartbeat is due.
+3. `getBlockRewardTransfers` (about 1 ms) and fee transfers (local).
+4. **`generateTimePayload`: 475–578 ms p50.** It logs `[Slow]` on every build
+   (593 of 593 in 6 h). Inside `SimpleTimeSyncViewer.currentTimePayload`,
+   three calls run in turn:
+   - `blockViewer.currentBlock()`, which re-fetches the head the runner already
+     holds;
+   - `eth_blockNumber`;
+   - `eth_getBlockByNumber(n)` against publicnode Sepolia.
+
+   Measured from inside both containers, the two eth calls take 324–344 ms p50
+   and 430–570 ms p90. A single `eth_getBlockByNumber('latest')` takes about
+   160 ms.
+5. `filterByFunded`: **already batched.** `readSenderBalances` makes one
+   `accountBalances(senders, { head })` call. The upstream proposal in
+   `docs/upstream/filterByFunded-sequential-balance-lookups.md` is resolved.
+6. The step-reward `accountBalances`, then `resolveSupersedes`, build,
+   `validateBlock` (memory), sign, and `mempoolSubmitBlock` (160–180 ms).
+
+`timePayloadGeneration` and `blockRewardTransfers` are now timed by the CLI
+itself, which closes the earlier "two untimed stages" gap. The collector carries
+`timePayload` into `latency.stages`.
+
+### Ruled out, with evidence
+
+- **`providerBindings.TimeSyncViewer.options.ethereumAnchorCacheTtlMs`.** This is
+  a real, supported knob (default 0) and would save about 330 ms per candidate.
+  It is **unsafe**: a cached anchor can be older than the parent block's anchor.
+  `timeValidPrefix` then drops the candidate, and the slashing module records
+  "the anchor went backwards" as a verified finding.
+- **Another public Sepolia endpoint.** None was both faster and current.
+  tatum failed 8–9 of 10 calls and lagged 2–3 blocks; drpc, 1rpc,
+  rpc.sepolia.org and blast errored; tenderly matched publicnode.
+- **Docker Desktop networking.** Host and container latency on the Windows box
+  are within noise of each other.
+- **Clock skew.** The Pi's NTP offset is −4.7 ms and the Windows host is within
+  30 ms. Neither affects when a heartbeat becomes due.
+- **Contention.** Zero skipped checks and zero rejected publishes. In 6 h the
+  only log warnings were `[Slow]` time payload. The Pi has 464 MB available.
+
+### Verdict
+
+With the poll floor at 4000 ms and validation on, **no configuration inside
+these repos safely shortens the critical path.** The remaining time is in
+upstream code:
+
+- the time payload's serial calls;
+- serial awaits that could overlap;
+- detecting a heartbeat that falls due between ticks.
+
+`docs/upstream/time-payload-critical-path.md` sets out each one with the
+evidence and tests. Until one ships there is no measured basis for claiming a
+speed improvement. The measure of one is accepted share over equal windows of
+at least 72 h. About 6700 heights at roughly 12% gives a binomial 95% interval
+of about ±0.8 percentage points per window. A before/after difference therefore
+has to exceed about 1.1 points to be distinguishable from noise, and more than
+that if the competitor mix shifts between the two windows.

@@ -440,6 +440,10 @@ info "installed /usr/local/bin/xl1-collect.sh"
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-alert.sh" /usr/local/bin/xl1-alert.sh
 info "installed /usr/local/bin/xl1-alert.sh"
 
+# Read-only: prints accepted share, competitor shares and /statz timings over one window.
+install -m 755 "${BUNDLE_DIR}/scripts/xl1-perf-snapshot" /usr/local/bin/xl1-perf-snapshot
+info "installed /usr/local/bin/xl1-perf-snapshot"
+
 install -m 755 "${BUNDLE_DIR}/scripts/xl1-host-update.sh" /usr/local/bin/xl1-host-update.sh
 info "installed /usr/local/bin/xl1-host-update.sh"
 

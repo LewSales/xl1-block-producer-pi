@@ -1,5 +1,14 @@
 # `SimpleBlockRunner.filterByFunded` makes one sequential RPC per distinct sender
 
+> **Resolved upstream in xl1-cli 5.5.0. Do not file.** Verified 2026-09-26 against
+> the shipped sourcemap (`chain-sdk/dist/neutral/services.mjs`):
+> `filterByFunded` now calls `readSenderBalances(head, txs, transferByFrom)`.
+> That function collects the distinct senders and makes **one**
+> `accountBalances(senders, { head })` call. It also qualifies the read to the
+> parent head, as the post-submit validator does. The largest step left on the
+> producing path is the time payload; see `time-payload-critical-path.md`. This
+> file is kept as the record of the 5.3.1 behaviour.
+
 **Component:** `@xyo-network/xl1-cli` 5.3.1 (`dist/cli-min.mjs`), `SimpleBlockRunner`
 **Severity:** not user-visible on sequence today; scales badly with transaction volume
 **Found on:** a federated producer on sequence, Raspberry Pi 3 B+ (arm64), node v24.14.1

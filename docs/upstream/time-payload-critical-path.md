@@ -1,218 +1,158 @@
-# The producing path spends ~0.5 s building the time payload, one serial call after another
+# Producing-path latency: five proposals, reviewed against the 5.5.0 runtime
 
-**Components:** `@xyo-network/xl1-cli` 5.5.0. `SimpleTimeSyncViewer` is in
-`@xyo-network/xl1-sdk` 5.7.0 (`dist/node/protocol-sdk.mjs`).
-`SimpleBlockRunner` is in chain-sdk (`dist/neutral/services.mjs`).
-`ProducerActor` is in `packages/producer`.
-**Severity:** not a fault. It is latency on the one path where latency decides
-who gets paid.
-**Found on:** two federated producers on sequence, a Raspberry Pi 3 B+ (arm64)
-and a Windows Docker Desktop host (amd64). Both run role `producer-rest` with
-`blockProductionCheckInterval` 4000.
-**Status:** prepared, **not filed**.
+The code traced here is what ships in `@xyo-network/xl1-cli` 5.5.0 (`dist/cli-min.mjs.map`) and
+`@xyo-network/xl1-sdk` 5.7.0. The sdk's published sourcemap embeds the original TypeScript, so
+`SimpleTimeSyncViewer.ts` below is upstream source, not a reconstruction.
 
-## Why latency matters here
+**None of the five can be done in this wrapper repo.** Each lives in:
+- `SimpleTimeSyncViewer` (xl1-sdk);
+- `SimpleBlockRunner` (chain-sdk);
+- or `ProducerActor` (`packages/producer`).
 
-The finalizer ticks every 500 ms. `findBestUncle` scores candidate chains by
-length, plus `PRODUCER_DIVERSITY_BONUS` for a producer other than the head's.
-The sort is stable, so among equal candidates the first one listed wins. A valid
-candidate wins by being in the pool before its rivals. Every millisecond between
-"this producer noticed" and `mempoolRunner.submitBlocks` is a millisecond a
-rival can use.
+None of them is reachable through `providerBindings`, the only extension point the presets have.
+Patching the bundle is off the table.
 
-## Evidence
+The tracker is https://github.com/XYOracleNetwork/xl1-docker-images/issues (see #4). The source repos
+are not public.
 
-The producer's own `/statz` over about 39 h, `timings.timePayloadGeneration`:
+**Filing order**
+1. Proposal 1 first. Its issue text is in `single-call-anchor/ISSUE.md`, alongside the patch, tests
+   and benchmark.
+2. Then proposal 5, as a design discussion.
+3. Proposals 2, 3 and 4 are not worth filing yet.
 
-| | p50 | p95 | n |
-|---|---|---|---|
-| Pi | 475 ms | 594 ms | 4282 |
-| Windows | 578 ms | 815 ms | 4352 |
+## How a candidate wins
 
-For comparison, the whole of `mempoolSubmitBlock` is 162 / 180 ms p50.
-`[Slow] Generated time payload` was logged on 593 of 593 builds in 6 h on each
-node.
+The finalizer (`ChainHeadSelector.findBestHead`) re-selects every 500 ms, in this order:
+1. **Allow-list admission.**
+2. **`filterPacedHeartbeatCandidates`.** A transaction-less candidate qualifies only if
+   `candidateEpoch - headEpoch >= heartbeatInterval`. Both epochs are *signed* time-payload epochs.
+3. **`filterTimeValidUncles`.** This applies the time rules:
+   - `epoch-after-parent`;
+   - `epoch-not-future` (≤ observer clock + `maxClockSkewMs`, 30 s);
+   - `anchor-monotonic` (`anchor >= parentAnchor`);
+   - `anchor-not-ahead` (≤ observer EVM head + 2).
+4. **`findBestUncle`.** Scores each candidate chain by length, plus 1000 if its producer is not the
+   head's producer. A stable sort breaks ties, so the first-listed candidate wins.
 
-Probed from inside both containers against the preset's
-`default-evm-rpc` (`https://ethereum-sepolia-rpc.publicnode.com`):
+The shadow and slashing layers add:
+- `anchor-canonical`: the hash must be canonical after 32 EVM blocks;
+- eligibility evaluated at `max(parentAnchor, anchor - freshnessBandEvmBlocks)`, where the band is
+  2048.
 
-| | p50 | p90 |
-|---|---|---|
-| `eth_blockNumber` then `eth_getBlockByNumber(n)` (what ships) | 324–344 ms | 430–570 ms |
-| `eth_getBlockByNumber('latest')` (one call) | ~160 ms | — |
+So a stale-but-not-backwards anchor is never penalised; a backwards one is refused and reportable.
 
-The remaining ~70–135 ms of the time payload is `blockViewer.currentBlock()`,
-which re-fetches a head the block runner is already holding.
+**Chain scan, blocks 629731–631171 (last ~24 h; `chainscan.mjs`)**
+- 1440 blocks: 1050 carried transactions and **390 (27%) were heartbeats**. The all-time gap histogram
+  shows about 46%; the mix drifts.
+- `time.xl1Hash === previous` on **1441 of 1441** blocks.
+- No anchor went backwards. 150 blocks reused their parent's anchor.
+- Winning heartbeats landed a median of **1.07 s** after they fell due (p10 0.20 s, p90 2.4 s,
+  measured as candidate epoch − parent epoch − 60 000).
+- Heartbeat wins: Pi 50 and amd64 37, against 58–66 for each of the top four.
+- Transaction-block wins: Pi 131, amd64 111, top 189.
 
-## Call path as shipped
+## 1. Resolve the anchor in one call. **File first.**
 
-`SimpleBlockRunner.proposeNextValidBlock(head)` runs these steps in order, each
-awaited before the next:
+- **Redundant?** Yes. `getBlockNumber()` followed by `getBlock(n)` is two sequential round trips for a
+  pair that `getBlock('latest')` returns in one. The ethers 6.17 provider is built with
+  `staticNetwork: true`, so there is no hidden `eth_chainId`. Its 250 ms perform cache only dedupes
+  identical in-flight requests, and its 10 ms batch stall cannot merge calls that are awaited in turn.
+- **Correctness rules.** The anchor must be ≥ the parent's anchor, not more than 2 blocks ahead of the
+  observer, and canonical. `'latest'` is the same tip at call time, so every rule holds exactly as
+  today. Measured freshness difference: mean −0.03 / +0.04 blocks, bounded by ±1.
+  - The `xl1` and epoch fields are untouched.
+  - The ttl, single-flight and error text are untouched.
+  - One improvement: a load-balanced backend that is behind the number read can no longer null the
+    second read. Not observed in about 39 h of logs.
+- **Savings: measured.**
+  - In-container, real provider construction, 80 interleaved rounds: **134 ms (amd64) and 164 ms (Pi)
+    at p50**, about 160–175 ms at p90.
+  - That is roughly 28–35% of today's `timePayloadGeneration` p50 of 475–578 ms.
+- **Where:** upstream only (xl1-sdk `SimpleTimeSyncViewer.currentEthereumAnchor`).
+- **Smallest regression test:** "exactly one provider call, `getBlock('latest')`" plus "ttl 0 returns
+  successive tips". Both are in `single-call-anchor/anchor.test.mjs`; mutants fail them.
 
-```
-chainId()                                  cached
-mempoolViewer.pendingTransactions()        RPC   ~130-195 ms
-getBlockRewardTransfers(nextBlock)         ~1 ms
-generateTransactionFeeTransfers(...)       local
-generateTimePayload()                      ~475-578 ms  <- this issue
-  SimpleTimeSyncViewer.currentTimePayload()
-    currentTimeAndHash('xl1')              blockViewer.currentBlock()    REST ~70-135 ms
-    currentTimeAndHash('ethereum')
-      currentEthereumAnchor()
-        provider.getBlockNumber()          EVM RPC ~160 ms
-        provider.getBlock(blockNumber)     EVM RPC ~160 ms
-filterByFunded(head._hash, ...)            one batched accountBalances (5.5.0)
-accountBalances([XYO_STEP_REWARD_ADDRESS]) RPC
-runBuildValidateRetryLoop
-  resolveSupersedes(head)                  chain params
-  buildNextBlock -> validateBlock -> sign
-mempoolRunner.submitBlocks([block])        RPC   ~160-180 ms
-```
+## 2. Reuse an anchor only when it cannot go backwards. **Hold.**
 
-## Proposals, independent of one another, smallest first
+- **Redundant?** Partly. Sepolia ticks every ~12 s, and 10% of blocks reuse their parent's anchor, so
+  some reads return what the producer already had.
+- **Correctness rules.** Reuse is safe only if the cached height is ≥ the parent block's
+  `time.ethereum`, stays inside `freshnessBandEvmBlocks`, and stays canonical.
+  - A plain TTL (`ethereumAnchorCacheTtlMs` > 0) violates the first rule whenever the parent was built
+    after our cache was filled. That is why the knob must stay at 0.
+  - The guard needs the parent's time payload. `ProducerActor` keeps only `head` (the bound witness)
+    from `currentBlock()` and passes that to the runner, so the guard means a signature change through
+    `produceNextBlock` / `currentTimePayload`.
+- **Savings: estimate only.** Once proposal 1 lands, at most about 140–170 ms per cache hit, with an
+  unknown hit rate.
+- **Where:** upstream (xl1-sdk and chain-sdk). This is an API change.
+- **Smallest regression test:** a property test that, over random interleavings of provider tips and
+  parent anchors, the emitted anchor is never below the parent's.
 
-### 1. Resolve the anchor in one call
+## 3. Build the time payload from the head in hand. **Retracted as a latency item.**
 
-`currentEthereumAnchor()` makes two round trips, first for the number and then
-for the block, when one `getBlock('latest')` returns both. Freshness is the
-same: the anchor is still the provider's tip at call time.
+- **Redundant?** Not on `producer-rest`. `RestBlockViewer.currentBlock()` has a 1000 ms head cache
+  (`CURRENT_BLOCK_CACHE_TTL_MS`), and `headFetch` filled it about 150–250 ms earlier in the same
+  cycle, so the time payload's read is normally a cache hit.
+  - On role `producer`, `TimeSyncViewer` is `JsonRpcTimeSyncViewer`. The remote server builds the
+    payload, so the proposal does not apply there.
+- **Correctness rules.** `xl1`/`xl1Hash` name the parent. A mismatch is possible only when more than
+  about 1 s passes between `headFetch` and the time payload (pendingTransactions max was 18–30 s,
+  p95 about 230–320 ms).
+  - No 5.5.0 validator checks `xl1Hash` against `previous`.
+  - None of the 1441 finalized blocks shows a mismatch.
+- **Savings:** about 0 on `producer-rest` (measured by construction). The earlier 70–135 ms claim was
+  wrong.
+- **Where:** upstream. At best a hardening change; not worth an issue on the evidence.
+- **Smallest regression test:** with the viewer's current block advanced past `head`, the payload
+  still names `head`.
 
-```ts
-const block = await provider.getBlock('latest')
-const value: [number, Hash] = [block.number, asHash(assertEx(block.hash, ...), true)]
-```
+## 4. Overlap the independent awaits in `proposeNextValidBlock`. **Hold until proposal 1 lands.**
 
-**Saves:** about 160 ms p50 per candidate.
-**Tests:**
-- The anchor equals what the two-call path would return, under a mocked
-  provider.
-- A `null` block or a missing hash still throws the same errors.
-- `ethereumAnchorCacheTtlMs` behaviour is unchanged.
+- **Independent?** Yes. None of these reads another's result:
+  - `generateTimePayload()`, which reads the head cache and the EVM;
+  - `filterByFunded` (one batched `accountBalances(senders, {head})`, only when there are
+    transactions);
+  - the step-reward `accountBalances([XYO_STEP_REWARD_ADDRESS])`, which is unqualified;
+  - `resolveSupersedes` (chain params).
+- **Correctness rules.**
+  - The epoch is stamped inside the time payload at call time; starting that call earlier only makes
+    it earlier, never later than the build.
+  - A heartbeat still qualifies only on signed spacing.
+  - `Promise.all` must keep today's error path, with any failing leg reaching
+    `Error proposing next valid block`.
+- **Savings: estimate.** They collapse to the longest leg, but the balance reads are not timed by
+  `/statz`, so the gain cannot be sized. Add timing for them first, off-path and asynchronous.
+- **Where:** upstream (chain-sdk `SimpleBlockRunner`).
+- **Smallest regression test:** under deterministic mocks, candidates are byte-identical to the serial
+  path, and a rejecting leg still fails the attempt.
 
-### 2. Reuse an anchor only when it cannot go backwards
+## 5. Arm a one-shot check for when a heartbeat falls due. **Second to file, as a design discussion.**
 
-`ethereumAnchorCacheTtlMs` exists, but any TTL above 0 is unsafe as it stands.
-A cached anchor can be older than the anchor in the parent block. The candidate
-then fails `anchor-monotonic` in the finalizer's `timeValidPrefix`, and the
-slashing module records "the anchor went backwards" as verified. The producer
-already holds the parent block and its time payload, so the safe rule is
-checkable locally:
-
-```ts
-// in currentTimePayload(head) / currentEthereumAnchor(parentAnchor)
-const cached = this.cachedEthereumAnchor()
-if (cached !== undefined && cached[0] >= parentAnchor) return cached   // same block or newer: cannot go backwards
-return await this.fetchFreshAnchor()
-```
-
-A refresh can run off the hot path, for example on a timer or right after each
-successful submit, so that the guard usually hits. The guard, not the timer, is
-what keeps it safe. Staleness must also stay inside the chain's
-`freshnessBandEvmBlocks`, which `evaluationPoint` already takes into account.
-
-**Saves:** up to about 330 ms p50 per candidate whenever the guard hits.
-**Tests:**
-- A parent anchor ahead of the cache forces a fresh fetch.
-- An expired TTL forces a fresh fetch.
-- Property test: over random interleavings of provider tips and parent anchors,
-  the emitted anchor is never below the parent's.
-- A cache hit makes no provider call.
-
-### 3. Build the time payload from the head in hand
-
-`currentTimePayload()` calls `blockViewer.currentBlock()` for `xl1` and
-`xl1Hash`, both commented "this is for the previous block". The runner already
-holds that block as `head`. Re-fetching costs a REST round trip (70–135 ms). It
-also opens a race: if the head advances between `headFetch` and
-`generateTimePayload`, the payload names a newer block than the candidate's
-`previous`. No validator in 5.5.0 checks `xl1Hash` against `previous`, so this
-is silent today.
-
-```ts
-generateTimePayload(head) -> timeSyncViewer.currentTimePayload({ xl1: head.block, xl1Hash: head._hash })
-```
-
-**Saves:** 70–135 ms p50 per candidate and removes the mismatch window.
-**Tests:**
-- The payload's `xl1` and `xl1Hash` equal the `head` argument even when the
-  viewer's current block has moved.
-- Callers that pass no head keep the current behaviour.
-
-### 4. Overlap the independent awaits in `proposeNextValidBlock`
-
-None of these read another's result:
-
-- `generateTimePayload()`
-- `filterByFunded(...)`
-- the step-reward `accountBalances`
-- `resolveSupersedes(head)`
-
-```ts
-const [timePayload, [initialFundedTransactions, initialFundedTransfers], stepRewardBalances, supersedes] =
-  await Promise.all([
-    this.generateTimePayload(head),
-    this.filterByFunded(head._hash, nextBlockTransactions, transactionTransfers, shouldValidateBalances),
-    this.accountBalanceViewer.accountBalances([XYO_STEP_REWARD_ADDRESS]),
-    this.resolveSupersedes(head),
-  ])
-```
-
-`epoch` is still stamped inside the time payload at call time. The finalizer's
-`epoch-after-parent` and heartbeat-spacing rules read that value, so moving
-the call earlier cannot make a heartbeat qualify sooner than it should.
-
-**Saves:** the shorter legs collapse into the longest, about 100–300 ms p50,
-depending on how many of 1–3 have landed.
-**Tests:**
-- Candidates are byte-identical to the serial path under deterministic mocks.
-- A rejection in any leg still reaches the existing
-  `Error proposing next valid block` path.
-
-### 5. Arm a check for the moment a heartbeat falls due
-
-About **46%** of sequence blocks are heartbeats. In the block-gap histogram
-from a chain scan, 22020 of 48320 gaps fall in the 60–65 s bucket. A heartbeat
-is due at a time the producer already knows: `headEpoch(head) +
-heartbeatInterval`, and `headEpoch` is cached per head. With a fixed poll every
-producer notices it `uniform(0, interval)` late, about 2 s on average at 4000 ms,
-and the winner is decided by where each producer's timer phase happens to fall.
-
-In `ProducerActor`, when a head is recorded:
-
-```ts
-const due = epoch + heartbeatInterval
-clearTimeout(this._heartbeatTimer)
-this._heartbeatTimer = setTimeout(() => void this.produceBlock(), Math.max(0, due - Date.now() + 25))
-```
-
-- `produceBlock()`'s mutex and `concurrentChecksSkipped` already guard against
-  overlapping the poll.
-- It is one extra check per head, only when a heartbeat is actually pending.
-  The steady poll rate does not change, so there is no added load on the RPC.
-- The small offset keeps `Date.now() - epoch > heartbeatInterval` strictly true
-  and absorbs millisecond timer jitter. It stays well inside the finalizer's
-  `maxClockSkewMs`.
-
-**Saves:** about half the poll interval of detection lag on roughly half of
-all blocks.
-**Tests:**
-- With fake timers, the one-shot fires at `epoch + interval + ε` and builds a
-  heartbeat.
-- A head change before it fires cancels and re-arms it.
-- A transaction-carrying head never triggers a heartbeat early.
-- The timer is cleared in `stopHandler`.
-
-## Expected effect and how to judge it
-
-- 1–4 together: about 300–450 ms less per candidate at p50, more at p90.
-- 5: about 2 s mean detection lag removed on heartbeat heights.
-
-None of this changes validation or the poll floor. Measure accepted share
-(Δ chain-counted blocks ÷ Δ height) over equal windows of at least 72 h, before
-and after, next to each competitor's share from the same scan. Supporting signals:
-
-- `timePayloadGeneration` p50 falls;
-- win rate on heights whose parent gap was 60 s or more rises.
-
-With about 6700 heights per 72 h at roughly 12% share, a difference below about
-1.1 percentage points is noise.
+- **Redundant or independent?** It adds work rather than removing it: one extra `produceBlock()` per
+  head, only while a heartbeat is pending.
+  - The due moment is known in advance: `headEpoch(head) + heartbeatInterval`, and `headEpoch` is
+    already cached per head.
+  - With a fixed poll, detection lag is uniform(0, interval): a mean of 2.0 s at 4000 ms and 2.5 s at
+    5000 ms.
+- **Correctness rules.**
+  - The producer's `heartbeatRequired` is `Date.now() - epoch > heartbeatInterval`, strictly
+    greater.
+  - The finalizer requires `candidateEpoch - headEpoch >= heartbeatInterval` on signed epochs, and the
+    candidate's epoch is stamped after that check. Firing at `due + ε` is therefore always accepted.
+  - The producer's `heartbeatInterval` must equal the finalizer's; ours is 60000, matching the
+    observed spacing.
+  - The existing mutex covers overlap with the poll.
+  - A head change must cancel and re-arm the timer, and `stopHandler` must clear it.
+- **Savings: estimate.** Winning heartbeats land a median of 1.07 s after due; our lag is uniform(0, 4)
+  s plus about 0.5 s of build and submit. A due-time trigger would put ours at about ε + build.
+  - That is the largest *competitive* effect of the five, on 27–46% of blocks. It is also the least
+    proven: the win-rate change cannot be known without a trial.
+- **Side observation for the issue.** `maxClockSkewMs` (30 s) lets a producer whose clock runs fast
+  qualify a heartbeat early in real time.
+  - Nothing in the scan shows a rival doing this: the minimum lags are 9–108 ms for everyone.
+  - Signed gaps cannot reveal skew, though, and the incentive exists.
+- **Where:** upstream (`ProducerActor`).
+- **Smallest regression test:** with fake timers, the one-shot fires at `epoch + interval + ε` and
+  builds a heartbeat, and a head change before it fires cancels and re-arms.

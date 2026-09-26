@@ -1,0 +1,23 @@
+diff --git src/modules/protocol-sdk/simple/timeSync2/SimpleTimeSyncViewer.ts src/modules/protocol-sdk/simple/timeSync2/SimpleTimeSyncViewer.ts
+index 8480ed6..aa903b7 100644
+--- src/modules/protocol-sdk/simple/timeSync2/SimpleTimeSyncViewer.ts
++++ src/modules/protocol-sdk/simple/timeSync2/SimpleTimeSyncViewer.ts
+@@ -189,10 +189,14 @@ export class SimpleTimeSyncViewer extends AbstractCreatableProvider<SimpleTimeSy
+ 
+     const provider = assertEx(this.ethProvider, () => 'Ethereum provider not configured')
+     const promise = (async (): Promise<[number, Hash]> => {
+-      const blockNumber = (await provider.getBlockNumber()) ?? 0
+-      const block = await provider.getBlock(blockNumber)
+-      const blockHash = asHash(assertEx(block?.hash, () => 'Block hash not found'), true)
+-      const value: [number, Hash] = [blockNumber, blockHash]
++      // One round trip for the tip's number and hash together. Asking for the number and then
++      // the block by that number costs a second sequential round trip on every time payload, and
++      // behind a load-balanced RPC the two reads can land on backends at different heights (the
++      // second then returns null). 'latest' is the same tip the number read returned, so the
++      // anchor is exactly as fresh; it only arrives in one response instead of two.
++      const block = assertEx(await provider.getBlock('latest'), () => 'Block hash not found')
++      const blockHash = asHash(assertEx(block.hash, () => 'Block hash not found'), true)
++      const value: [number, Hash] = [block.number, blockHash]
+       const ttl = this.options.ethereumAnchorCacheTtlMs
+       if (ttl > 0) this.ethereumAnchor = { expiresAt: Date.now() + ttl, value }
+       return value

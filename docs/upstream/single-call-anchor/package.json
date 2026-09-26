@@ -1,0 +1,15 @@
+{
+  "name": "xl1-single-call-anchor-poc",
+  "private": true,
+  "type": "module",
+  "description": "Tests and benchmark for the SimpleTimeSyncViewer single-call anchor proposal. Not part of the producer.",
+  "scripts": {
+    "test": "node --test anchor.test.mjs",
+    "bench": "node bench.mjs"
+  },
+  "dependencies": {
+    "@ariestools/sdk": "9.0.0",
+    "@xyo-network/xl1-sdk": "5.7.0",
+    "ethers": "6.17.0"
+  }
+}

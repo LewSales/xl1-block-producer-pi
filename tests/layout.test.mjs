@@ -22,7 +22,7 @@ const html = readFileSync(join(here, '..', 'dashboard', 'index.html'), 'utf8')
 const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/)
 assert.ok(scriptMatch, 'index.html must have its script inline — did the <script> tag move?')
 const script = scriptMatch[1]
-const renderBoundary = script.indexOf('async function tick()')
+const renderBoundary = script.indexOf('async function tick(')
 assert.ok(renderBoundary > 0, 'could not find the tick() boundary — did render() get renamed?')
 // Only the declarations up to render(): tick()/setInterval/fetch never run.
 const renderSource = script.slice(0, renderBoundary)

@@ -352,7 +352,9 @@ render() {
       @sh "LAG=\(.chain.finalizationLag // "")",
       @sh "REW=\(.chain.balances.reward.xl1 // "")",
       @sh "DELTA=\(.chain.balances.reward.sinceStart.xl1 // "")",
-      @sh "SUB=\(.node.blocksPublished // "")",
+      # Chain-counted wins. .node.blocksPublished greps the log for "Published
+      # block", which the producer never emits, so it sat frozen or at zero.
+      @sh "SUB=\(.derived.producedObserved // "")",
       @sh "ERRS=\(.node.errorCount // "")",
       @sh "CST=\(.node.container.state // "")",
       @sh "HLIVE=\(.health.ok)",
@@ -494,7 +496,7 @@ render() {
     line "  ${D}REWARD${R}  ${B}${FG_W}${REW}${R} ${D}XL1${R}${dl}"
   }
 
-  line "  ${D}SUBMIT${R}  $(pad "${SUB:-—}" 12) ${D}errors${R} $( [[ "${ERRS:-0}" -gt 0 ]] 2>/dev/null && printf '%s' "${FG_Y}${ERRS}${R}" || printf '%s' "${ERRS:-0}" )"
+  line "  ${D}BLOCKS${R}  $(pad "${SUB:-—}" 12) ${D}errors${R} $( [[ "${ERRS:-0}" -gt 0 ]] 2>/dev/null && printf '%s' "${FG_Y}${ERRS}${R}" || printf '%s' "${ERRS:-0}" )"
   line ""
 
   # --- node + system ------------------------------------------------------

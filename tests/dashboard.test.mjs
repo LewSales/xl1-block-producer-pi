@@ -286,19 +286,32 @@ test('trendDaily reports per-day differences, not cumulative readings', async ()
 test('the last block links into the explorer, and absence is stated', () => {
   baselineHealthyState()
   m.state.chain = { ok: true, chainIdMatchesPreset: true, balances: {}, currentBlock: 575_800 }
-  m.state.node = { ok: true, stale: false, container: { running: true }, blocksPublished: 3,
-                   lastPublishedBlock: 575_735, lastPublishedAt: '2099-01-01T00:00:00Z' }
-  const dv = m.derived()
-  assert.equal(dv.lastBlock, 575_735)
-  // /block/number/<n>. The bare /block/<n> form resolves to a blank page rather
-  // than a 404, so a wrong link here fails silently and looks like a dead node.
-  assert.equal(dv.lastBlockUrl, 'https://explore.xyo.network/xl1/sequence/block/number/575735')
-  assert.equal(dv.blocksSinceLast, 65, 'distance from the head is the useful figure')
+  m.state.node = { ok: true, stale: false, container: { running: true } }
+  const saved = { lastBlock: m.production.lastBlock, lastBlockAt: m.production.lastBlockAt }
+  try {
+    m.production.lastBlock = 575_735
+    m.production.lastBlockAt = Date.UTC(2099, 0, 1)
+    const dv = m.derived()
+    assert.equal(dv.lastBlock, 575_735)
+    // /block/number/<n>. The bare /block/<n> form resolves to a blank page rather
+    // than a 404, so a wrong link here fails silently and looks like a dead node.
+    assert.equal(dv.lastBlockUrl, 'https://explore.xyo.network/xl1/sequence/block/number/575735')
+    assert.equal(dv.blocksSinceLast, 65, 'distance from the head is the useful figure')
+    assert.equal(dv.lastBlockAt, '2099-01-01T00:00:00.000Z', 'the time comes off the block, not the log')
 
-  m.state.node = { ok: true, stale: false, container: { running: true }, blocksPublished: 0 }
-  const none = m.derived()
-  assert.equal(none.lastBlock, undefined)
-  assert.equal(none.lastBlockUrl, undefined, 'no block means no link, not a link to nothing')
+    // The collector's log-derived fields are never a stand-in for the chain:
+    // "Published block" is never logged, so they are stale or zero by nature.
+    m.production.lastBlock = undefined
+    m.production.lastBlockAt = undefined
+    m.state.node = { ok: true, stale: false, container: { running: true }, blocksPublished: 3,
+                     lastPublishedBlock: 575_735, lastPublishedAt: '2099-01-01T00:00:00Z' }
+    const none = m.derived()
+    assert.equal(none.lastBlock, undefined, 'a log-derived block is not reported as a win')
+    assert.equal(none.lastBlockUrl, undefined, 'no block means no link, not a link to nothing')
+    assert.equal(none.lastBlockAt, undefined)
+  } finally {
+    Object.assign(m.production, saved)
+  }
 })
 
 test('thermal clock reduction is not called healthy', () => {
@@ -947,7 +960,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.0', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.3.1', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')

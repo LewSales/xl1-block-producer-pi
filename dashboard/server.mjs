@@ -262,7 +262,8 @@ async function persistTrend() {
     // Written under a new key on purpose. Rows already on disk carry blocks:0,
     // and diffing a real cumulative count against those zeros would post the
     // entire running total as a single day's production on the changeover day.
-    blocks: state.node?.blocksPublished,
+    // The old key is no longer written at all — trendDaily still reads it for
+    // days recorded before cblocks existed.
     cblocks: production.counted,
     tempC: state.system?.cpuTempC,
   }
@@ -374,6 +375,8 @@ let baselineBalance // first balance we saw, to show earned-since-start
 const production = {
   counted: 0,
   lastBlock: undefined,
+  // Chain timestamp of lastBlock (ms), when the block carries one.
+  lastBlockAt: undefined,
   scannedFrom: undefined,
   scannedTo: undefined,
   // Blocks actually read, which is the only honest denominator for a share.
@@ -1189,7 +1192,10 @@ async function scanProduction(viewer, currentNum) {
         // of "produced", so the headline and the table can never disagree.
         if (self && signers.has(self)) {
           production.counted += 1
-          if (production.lastBlock === undefined || n > production.lastBlock) production.lastBlock = n
+          if (production.lastBlock === undefined || n > production.lastBlock) {
+            production.lastBlock = n
+            production.lastBlockAt = Number.isFinite(epoch) && epoch > 0 ? epoch : undefined
+          }
         }
       }
 
@@ -2612,14 +2618,14 @@ function derived(board = peerBoard()) {
     // The last block this node actually landed, and how far the chain has moved
     // since. "Blocks submitted: 3" is a number taken on faith; a height is
     // something an operator can open and see.
-    // The chain is the authority. The collector's log-derived figure stays as a
-    // fallback for a node whose address is not configured, but it is not what
-    // this reports when the chain can answer.
-    lastBlock: production.lastBlock ?? state.node?.lastPublishedBlock,
-    lastBlockUrl: explorerBlock(production.lastBlock ?? state.node?.lastPublishedBlock),
-    lastBlockAt: state.node?.lastPublishedAt,
-    blocksSinceLast: (state.chain?.currentBlock !== undefined && (production.lastBlock ?? state.node?.lastPublishedBlock) !== undefined)
-      ? state.chain.currentBlock - Number(production.lastBlock ?? state.node.lastPublishedBlock)
+    // Chain only. The collector's log-derived fallback keyed off "Published
+    // block", which the producer never logs, so it was never a real fallback —
+    // just a way for a stale or zero figure to stand in for the chain's answer.
+    lastBlock: production.lastBlock,
+    lastBlockUrl: explorerBlock(production.lastBlock),
+    lastBlockAt: production.lastBlockAt !== undefined ? new Date(production.lastBlockAt).toISOString() : undefined,
+    blocksSinceLast: (state.chain?.currentBlock !== undefined && production.lastBlock !== undefined)
+      ? state.chain.currentBlock - Number(production.lastBlock)
       : undefined,
     producedObserved: production.counted,
     producedSince: production.scannedFrom,
@@ -2664,8 +2670,8 @@ const snapshot = () => ({
       commitUrl: clean ? `${source}/commit/${commit}` : undefined,
       // Who wrote each half. Configurable rather than hardcoded so a fork does
       // not end up crediting someone else's brand for its own dashboard.
-      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
-      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      brandName: envStr('DASH_BRAND_NAME', 'Oxyon'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://oxyon.io/xl1/'),
       upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
       upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
     }
@@ -2863,8 +2869,8 @@ function publicView(board) {
       version: BUILD_STAMP.version ?? DASH_VERSION,
       commit: BUILD_STAMP.commit ?? envStr('DASH_COMMIT', 'unknown'),
       source: envStr('DASH_SOURCE_URL', '').replace(/\/+$/, '') || undefined,
-      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
-      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      brandName: envStr('DASH_BRAND_NAME', 'Oxyon'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://oxyon.io/xl1/'),
       upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
       upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
     },

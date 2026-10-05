@@ -5,18 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>XL1 Producer</title>
 <style>
+  /* Oxyon materials: matte graphite, hairlines, champagne gold -- the same
+     tokens as oxyon.io, because these producers are Oxyon's. Dark only, as
+     Oxyon is. ok/warn/bad are Oxyon's own sage, sand and rose. */
   :root {
-    color-scheme: light dark;
-    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea;
-    --fg: #14171a; --muted: #666e78;
-    --ok: #1a7f47; --warn: #a86500; --bad: #b3261e; --accent: #572aff;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e1013; --panel: #171a1f; --line: #262b33;
-      --fg: #e8eaed; --muted: #939ba6;
-      --ok: #4ec97f; --warn: #e0a341; --bad: #ef6a60; --accent: #8f74ff;
-    }
+    color-scheme: dark;
+    --bg: #0a0a0c; --panel: #121216; --line: #232329;
+    --fg: #e8e9ec; --muted: #96989f;
+    --ok: #8fc9a8; --warn: #d9b37a; --bad: #e08a8a; --accent: #c9a545;
   }
 
   /* Section accent system. One hue per DATA CATEGORY, not per card -- several
@@ -27,26 +23,14 @@
      this redesign went too monochromatic and the one before it went rainbow.
      Set per card with style="--c: var(--acc-x)". */
   :root {
-    --acc-producer: #1a7f47;  /* producer status / performance -- green */
-    --acc-rewards:  #a6720b;  /* rewards / earnings -- gold */
-    --acc-network:  #4f46e5;  /* network health -- indigo/purple */
-    --acc-chain:    #2f7ae5;  /* chain / finality -- blue */
-    --acc-race:     #0891b2;  /* candidate race -- cyan */
-    --acc-latency:  #c2540d;  /* latency / timing -- orange */
-    --acc-ops:      #0f766e;  /* operations / reliability -- teal */
-    --acc-analytics:#7c3aed;  /* historical analytics -- violet */
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --acc-producer: #4ec97f;
-      --acc-rewards:  #e0a341;
-      --acc-network:  #818cf8;
-      --acc-chain:    #6aa8ff;
-      --acc-race:     #22d3ee;
-      --acc-latency:  #ff9d52;
-      --acc-ops:      #2dd4bf;
-      --acc-analytics:#c4b5fd;
-    }
+    --acc-producer: #8fc9a8;  /* producer status / performance -- sage */
+    --acc-rewards:  #c9a545;  /* rewards / earnings -- Oxyon gold */
+    --acc-network:  #9db3d4;  /* network health -- steel blue */
+    --acc-chain:    #c9ccd3;  /* chain / finality -- titanium */
+    --acc-race:     #b9d99a;  /* candidate race -- lime */
+    --acc-latency:  #d9b37a;  /* latency / timing -- sand */
+    --acc-ops:      #8fb4b0;  /* operations / reliability -- patina */
+    --acc-analytics:#b7a6d6;  /* historical analytics -- lilac */
   }
   * { box-sizing: border-box; }
   body {
@@ -194,7 +178,7 @@
   table.board { max-width: 760px; }
   .you-badge {
     display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
-    padding: 1px 5px; border-radius: 999px; background: var(--accent); color: #fff;
+    padding: 1px 5px; border-radius: 999px; background: var(--accent); color: #17130a;
     margin-left: 4px; vertical-align: 1px;
   }
   /* Candidate race. The pulse is one cell per chain block, oldest left, so the
@@ -418,8 +402,8 @@ const MARK_OXYON = `<svg viewBox="0 0 48 48" width="12" height="12" aria-hidden=
     <path d="M23 5 A19 19 0 0 0 23 43"/><path d="M25 5 A19 19 0 0 1 25 43"/>
     <path d="M11.5 16 L21 24 L11.5 32"/><path d="M36.5 16 L27 24 L36.5 32"/>
   </g>
-  <rect x="9" y="22" width="12" height="4" fill="#c99a3b"/>
-  <rect x="27" y="22" width="12" height="4" fill="#c99a3b"/></svg>`
+  <rect x="9" y="22" width="12" height="4" fill="#c9a545"/>
+  <rect x="27" y="22" width="12" height="4" fill="#c9a545"/></svg>`
 const origin = (kind, b = {}) => {
   const link = (href, title, inner) => href
     ? `<a class="origin" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${inner}</a>`

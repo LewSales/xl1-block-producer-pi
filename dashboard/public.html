@@ -13,30 +13,28 @@
   versioning contract; a redesign changes how this looks, never what it reads.
 -->
 <style>
+  /* Oxyon materials: matte graphite, hairlines, champagne gold -- the same
+     tokens as oxyon.io, because these producers are Oxyon's. Dark only, as
+     Oxyon is. ok/warn/bad are Oxyon's own sage, sand and rose. */
   :root {
-    color-scheme: light dark;
-    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --fg:#12151a; --muted:#5a6472;
-    --ok:#1a7f47; --warn:#b4690e; --bad:#c0392b; --accent:#2b6f6a;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#0e1013; --panel:#171a1f; --line:#262b33; --fg:#e6e9ee; --muted:#9aa4b2;
-            --ok:#4ec97f; --warn:#e0a341; --bad:#ff8a7a; --accent:#5fc9c0; }
+    color-scheme: dark;
+    --bg: #0a0a0c; --panel: #121216; --line: #232329;
+    --fg: #e8e9ec; --muted: #96989f;
+    --ok: #8fc9a8; --warn: #d9b37a; --bad: #e08a8a; --accent: #c9a545;
   }
   /* Section accent system -- same palette as the private dashboard, so the
      two read as one instrument. One hue per DATA CATEGORY, used narrowly: a
      left border, the heading, the headline metric, that card's own bars/chart.
      Never a filled card background. Set per card with style="--c: var(--acc-x)". */
   :root {
-    --acc-producer: #1a7f47; --acc-rewards:  #a6720b; --acc-network: #4f46e5;
-    --acc-chain:    #2f7ae5; --acc-race:     #0891b2; --acc-latency: #c2540d;
-    --acc-ops:      #0f766e; --acc-analytics:#7c3aed;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --acc-producer: #4ec97f; --acc-rewards:  #e0a341; --acc-network: #818cf8;
-      --acc-chain:    #6aa8ff; --acc-race:     #22d3ee; --acc-latency: #ff9d52;
-      --acc-ops:      #2dd4bf; --acc-analytics:#c4b5fd;
-    }
+    --acc-producer: #8fc9a8;  /* producer status / performance -- sage */
+    --acc-rewards:  #c9a545;  /* rewards / earnings -- Oxyon gold */
+    --acc-network:  #9db3d4;  /* network health -- steel blue */
+    --acc-chain:    #c9ccd3;  /* chain / finality -- titanium */
+    --acc-race:     #b9d99a;  /* candidate race -- lime */
+    --acc-latency:  #d9b37a;  /* latency / timing -- sand */
+    --acc-ops:      #8fb4b0;  /* operations / reliability -- patina */
+    --acc-analytics:#b7a6d6;  /* historical analytics -- lilac */
   }
   * { box-sizing:border-box }
   body { margin:0; background:var(--bg); color:var(--fg);

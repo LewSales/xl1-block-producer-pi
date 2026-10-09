@@ -1,0 +1,15 @@
+[Unit]
+Description=Publish the XL1 block-race observation
+Documentation=https://github.com/LewSales/xl1-block-producer-pi
+After=network-online.target xl1-race.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=xl1pi
+Group=xl1pi
+# Same publisher and repository as the status page, a different file:
+# race-<network>.json (see race-publish.env.template).
+ExecStart=/usr/bin/env XL1_PUBLISH_ENV=/etc/xl1/publish-race.env /usr/local/bin/xl1-publish.sh
+SuccessExitStatus=0 1
+TimeoutStartSec=120

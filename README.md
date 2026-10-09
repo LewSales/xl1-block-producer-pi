@@ -398,6 +398,45 @@ A run that could not read the status document deliberately sends **no** ping.
 
 ---
 
+## The block-race observer
+
+The chain records which candidate won each height and throws away the rest: who
+else offered a block, and when it arrived. That exists only if someone watches.
+`scripts/race/race-service.mjs` watches the network this producer is on, from the
+producer's own place on the network, and `xl1-race-publish` pushes the result to
+xl1-status-data as `race-<network>.json`. oxyon.io/xl1/race/ reads it beside the
+Windows host's observer, which watches the other network. The code is the same
+as `scripts/race/` in xl1-block-producer-windows; keep the two identical.
+
+It is built to cost the producer nothing:
+- **A separate container.** It reuses `xl1-dashboard:local` for its Node runtime only.
+  It has no Docker socket and no producer files, its code is read-only, and its state is
+  in `/var/lib/xl1-race`.
+- **Hard limits.** A quarter of one core at a low CPU weight, and 96 MB.
+- **It steps aside.** Every minute it reads the dashboard's public status. While the
+  producer's 95th-percentile cycle is above `RACE_GUARD_P95_MS` (2500), it stops
+  polling for 10 minutes and says so in its log.
+- **Gentle polling.** The candidate pool every 750 ms, the head every 1 s and pending
+  transactions every 2 s, all read-only public endpoints.
+
+Install (once):
+
+```
+sudo install -d -m 755 /srv/xl1-race
+sudo install -m 644 scripts/race/race-service.mjs scripts/race/race-lib.mjs /srv/xl1-race/
+sudo install -d -o 1000 -g 1000 -m 755 /var/lib/xl1-race
+sudo install -d -o xl1pi -g xl1pi -m 755 /var/lib/xl1-publish-race
+sudo install -m 600 race.env.template /etc/xl1/race.env                    # RACE_NETWORK = the producer's network
+sudo install -m 600 -o xl1pi race-publish.env.template /etc/xl1/publish-race.env   # FILE = race-<network>.json
+sudo install -m 644 systemd/xl1-race.service systemd/xl1-race-publish.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now xl1-race.service xl1-race-publish.timer
+```
+
+Check it: `curl -s 127.0.0.1:8097/health`. To stop it, run
+`sudo systemctl disable --now xl1-race.service xl1-race-publish.timer`; nothing else
+depends on it.
+
 ## Which role reads the chain how
 
 `XL1_ROLE` in `/etc/xl1/sequence-producer.env` picks one of two role presets,

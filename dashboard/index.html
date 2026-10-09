@@ -1038,11 +1038,14 @@ function render(d) {
     if (fl) {
       const dot = (n) => !n.ok ? 'bad'
         : n.status === 'down' ? 'bad' : n.status === 'degraded' ? 'warn' : 'ok'
+      const netName = (x) => x ? x.charAt(0).toUpperCase() + x.slice(1) : '—'
+      const mixed = (fl.networks?.length ?? 0) > 1
       const row = (n) => `<tr${n.isSelf ? ' class="self"' : ''}>
         <td><span class="alert-dot ${dot(n)}">●</span> ${esc(n.label)}${n.isSelf ? ' <span class="you-badge">YOU</span>' : ''}</td>
         <td>${n.ok
           ? `<span class="${n.status === 'ok' ? 'ok' : n.status === 'down' ? 'bad' : 'warn'}">${esc(n.status)}</span>`
           : `<span class="bad">unreachable</span>`}</td>
+        <td${n.network && n.network !== fl.combinedNetwork ? ' class="warn"' : ''}>${esc(netName(n.network))}</td>
         <td>${n.blocksTotal !== undefined ? num(n.blocksTotal) : '—'}</td>
         <td>${n.sharePercent !== undefined ? n.sharePercent + '%' : '—'}</td>
         <td>${n.rank !== undefined ? '#' + num(n.rank) + (n.producers ? ' of ' + num(n.producers) : '') : '—'}</td>
@@ -1058,15 +1061,17 @@ function render(d) {
         <h2><span class="ico" aria-hidden="true">🛰️</span>Fleet</h2>
         <div class="big ${fl.reachable === fl.total ? 'ok' : 'warn'}">${num(fl.reachable)}<span class="sub" style="font-size:16px"> of ${num(fl.total)}</span></div>
         <div class="sub">nodes answering${fl.combinedBlocks !== undefined
-          ? ` · ${num(fl.combinedBlocks)} block(s) between ${num(fl.combinedFrom)} of them` : ''}</div>
+          ? ` · ${num(fl.combinedBlocks)} block(s) between ${num(fl.combinedFrom)} of them${mixed ? ` on ${esc(netName(fl.combinedNetwork))}` : ''}` : ''}</div>
         <table class="board">
-          <thead><tr><th>Node</th><th>State</th><th>Blocks</th><th>Share</th><th>Rank</th><th>Alerts</th><th>Build</th></tr></thead>
+          <thead><tr><th>Node</th><th>State</th><th>Network</th><th>Blocks</th><th>Share</th><th>Rank</th><th>Alerts</th><th>Build</th></tr></thead>
           <tbody>${fl.nodes.map(row).join('')}</tbody>
         </table>
         ${fl.combinedSharePercent !== undefined
           ? `<div class="sub">combined share of the chain: ${fl.combinedSharePercent}%</div>`
           : `<div class="sub">No combined share: each node scans its own window, and shares only add up when
               they cover the same blocks. The block counts above are each node's own tally.</div>`}
+        ${mixed ? `<div class="sub">These nodes are on different networks (${fl.networks.map((x) => esc(netName(x))).join(', ')}).
+              Each node's blocks, share and rank are on its own network, and only nodes on ${esc(netName(fl.combinedNetwork))} are added together.</div>` : ''}
         ${fl.rejected?.length ? `<div class="sub warn">ignored: ${fl.rejected.map(esc).join('; ')}</div>` : ''}
         <div class="sub">peers polled every ${num(fl.pollSeconds)}s · each is another dashboard, never the chain</div>
       </section>`)

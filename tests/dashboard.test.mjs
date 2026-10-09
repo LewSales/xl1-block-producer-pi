@@ -1483,7 +1483,7 @@ test('a peer summary keeps only the fields the card draws', () => {
     status: 'degraded',
     problems: ['a', 'b', 'c', 'd', 'e', 'f'],
     build: { version: '2.2.3', commit: 'abc' },
-    chain: { currentBlock: 100 },
+    chain: { currentBlock: 100, network: 'mainnet' },
     derived: { blocksByWindow: { day24h: 12 } },
     peers: { self: { blocks: 500, sharePercent: 9.5, rank: 4, address: 'aa' }, producers: 8, scannedBlocks: 1000 },
     alerts: { installed: true, running: true, active: [{ key: 'x' }] },
@@ -1492,6 +1492,7 @@ test('a peer summary keeps only the fields the card draws', () => {
     history: { height: new Array(240).fill({ t: 1, v: 2 }) },
   })
   assert.equal(summary.blocksTotal, 500)
+  assert.equal(summary.network, 'mainnet', 'the peer says which chain its counts are on')
   assert.equal(summary.alertsFiring, 1)
   assert.equal(summary.problems.length, 4, 'problems are capped, not copied wholesale')
   assert.equal(summary.history, undefined, 'a peer cannot push its history into this payload')
@@ -1505,7 +1506,7 @@ test('an unrecognised status from a peer is not taken at face value', () => {
 test('combined share is withheld unless the nodes scanned the same blocks', async () => {
   process.env.DASH_FLEET = 'a=http://127.0.0.1:9/api/status'
   const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}`)
-  fresh.fleet.set('a', { label: 'a', ok: true, blocksTotal: 100, sharePercent: 5, scannedBlocks: 2000 })
+  fresh.fleet.set('a', { label: 'a', ok: true, network: 'sequence', blocksTotal: 100, sharePercent: 5, scannedBlocks: 2000 })
   // This node scanned a different window, so the two shares describe different
   // denominators and adding them would be arithmetic on unlike things.
   fresh.production.scanned = 1000
@@ -1516,6 +1517,24 @@ test('combined share is withheld unless the nodes scanned the same blocks', asyn
   assert.equal(view.combinedSharePercent, undefined, 'unlike windows do not add')
   assert.equal(view.combinedBlocks, 150, 'but the block counts still total')
   assert.equal(view.combinedFrom, 2, 'and say how many nodes they came from')
+})
+
+test('blocks on another network are shown but never added in', async () => {
+  process.env.DASH_FLEET = 'b=http://127.0.0.1:9/api/status,c=http://127.0.0.1:9/api/status'
+  const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}n`)
+  fresh.fleet.set('b', { label: 'b', ok: true, network: 'mainnet', blocksTotal: 4000, sharePercent: 22, scannedBlocks: 1000 })
+  // No network at all: an older or odd peer. Not assumed to be on this chain.
+  fresh.fleet.set('c', { label: 'c', ok: true, blocksTotal: 7, sharePercent: 1, scannedBlocks: 1000 })
+  fresh.production.scanned = 1000
+  fresh.peers.set(SELF, 50)
+  const view = fresh.fleetView(fresh.peerBoard())
+  assert.equal(view.nodes.find((n) => n.isSelf).network, 'sequence', 'this node names its own network')
+  assert.equal(view.nodes.find((n) => n.label === 'b').network, 'mainnet', 'and each peer keeps its own')
+  assert.equal(view.combinedBlocks, 50, 'mainnet and unlabelled blocks are not added to a sequence total')
+  assert.equal(view.combinedFrom, 1)
+  assert.equal(view.combinedNetwork, 'sequence')
+  assert.deepEqual(view.networks.sort(), ['mainnet', 'sequence'])
+  assert.equal(view.combinedSharePercent, undefined, 'one node is no combination')
 })
 
 test('an unreachable peer is a row, not an omission', async () => {

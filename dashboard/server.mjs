@@ -1978,6 +1978,9 @@ function fleetSummary(doc) {
     problems: Array.isArray(doc?.problems) ? doc.problems.slice(0, 4) : [],
     version: doc?.build?.version,
     commit: doc?.build?.commit,
+    // Which chain the peer is on. Nodes in one fleet can sit on different
+    // networks, and a block count means nothing without its chain.
+    network: typeof doc?.chain?.network === 'string' ? doc.chain.network : undefined,
     chainBlock: doc?.chain?.currentBlock,
     // Blocks won, on the two windows worth comparing between machines.
     blocks24h: d.blocksByWindow?.day24h,
@@ -2045,6 +2048,7 @@ function fleetView(board) {
     isSelf: true,
     status: overall().status,
     version: BUILD_STAMP.version ?? DASH_VERSION,
+    network: NETWORK,
     chainBlock: state.chain?.currentBlock,
     blocksTotal: board?.self?.blocks,
     sharePercent: board?.self?.sharePercent,
@@ -2062,7 +2066,12 @@ function fleetView(board) {
   // Combined production, over the nodes that could actually be read. Stated
   // with a count of how many contributed, because a total that silently drops
   // an unreachable machine reads as that machine having produced nothing.
-  const counted = nodes.filter((n) => Number.isFinite(n.blocksTotal))
+  //
+  // Only nodes on this node's network are added: a sequence block and a
+  // mainnet block are different chains' blocks, and their sum is no tally of
+  // anything. A peer that does not say its network is not assumed to match.
+  const counted = nodes.filter((n) => Number.isFinite(n.blocksTotal) && n.network === NETWORK)
+  const networks = [...new Set(nodes.map((n) => n.network).filter(Boolean))]
   const combinedBlocks = counted.reduce((a, n) => a + n.blocksTotal, 0)
 
   return {
@@ -2071,6 +2080,8 @@ function fleetView(board) {
     total: nodes.length,
     combinedBlocks: counted.length ? combinedBlocks : undefined,
     combinedFrom: counted.length,
+    combinedNetwork: NETWORK,
+    networks,
     // Shares are only additive when every node read the same blocks. They do
     // not here -- each scans its own window -- so the combined share is offered
     // only when the windows match, and withheld rather than approximated.

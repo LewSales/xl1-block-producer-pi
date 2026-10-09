@@ -1,0 +1,50 @@
+[Unit]
+Description=XL1 block-race observer (read-only, beside the producer)
+Documentation=https://github.com/LewSales/xl1-block-producer-pi
+# The chain keeps only the winning block; who else offered one, and when, exists
+# only if someone watches. This watches the network the producer is on, from the
+# producer's own network position, and serves race.json on loopback for
+# xl1-race-publish to push to xl1-status-data.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+After=docker.service network-online.target xl1-producer.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=30
+# Missing code would make Docker mount an empty directory and the container fail
+# in a way that reads like a code fault. Refuse to start instead.
+ExecStartPre=/usr/bin/test -f /srv/xl1-race/race-service.mjs
+ExecStartPre=/usr/bin/test -f /srv/xl1-race/race-lib.mjs
+ExecStartPre=/usr/bin/test -f /etc/xl1/race.env
+ExecStartPre=-/usr/bin/docker rm -f xl1-race
+
+# It never touches the producer: no Docker socket, no producer files, read-only
+# code, its own state directory. It reads XYO's public endpoints and, for the
+# guard, the dashboard's public status on loopback (hence --network host).
+#
+# It yields to the producer by construction: a quarter of one core at a low CPU
+# weight, 96 MB, and RACE_GUARD_URL pauses its polling whenever the producer's
+# 95th-percentile cycle rises above RACE_GUARD_P95_MS. It reuses the dashboard
+# image only for its Node runtime.
+ExecStart=/usr/bin/docker run --rm --name xl1-race \
+  --env-file /etc/xl1/race.env \
+  -e RACE_STATE_DIR=/state \
+  --network host \
+  --read-only --tmpfs /tmp \
+  --no-healthcheck \
+  --cpus 0.25 --cpu-shares 128 \
+  --memory 96m --memory-swap 96m \
+  -v /srv/xl1-race:/race:ro \
+  -v /var/lib/xl1-race:/state:rw \
+  --log-driver json-file --log-opt max-size=2m --log-opt max-file=2 \
+  --entrypoint node \
+  xl1-dashboard:local /race/race-service.mjs
+
+ExecStop=/usr/bin/docker stop -t 10 xl1-race
+
+[Install]
+WantedBy=multi-user.target

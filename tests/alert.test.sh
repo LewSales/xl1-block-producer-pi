@@ -82,6 +82,41 @@ OUT3="$(XL1_ALERT_ENV="${WORK}/alert3.env" bash "${ALERT}" --status 2>&1)"
 hasnt "a complaint the chain contradicts does not page" "ineligible"    "${OUT3}"
 hasnt "a producing node is not called stalled"          "not-producing" "${OUT3}"
 
+# The other two shapes the dashboard serves. Not landing for 500 blocks: the
+# symptom pages as not-producing, and the complaint is NOT named as the cause.
+cat > "${WORK}/status4.json" <<'JSON'
+{"status":"degraded","health":{"ok":true},"chain":{"ok":true},
+ "node":{"ok":true,"stale":false,"container":{"running":true},
+         "eligibility":{"blocked":true,"key":"insufficient-stake","reason":"insufficient stake"},
+         "eligibilityIgnored":true,"eligibilityCategory":"not-landing",
+         "eligibilityNote":"not landing blocks: last one 500 blocks ago; the node reports insufficient stake (unconfirmed)"},
+ "release":{"ok":true},"derived":{"blocksSinceLast":500,"secondsPerBlock":9},
+ "system":{"throttle":{"undervoltageNow":false},"swap":{"usedPercent":0}}}
+JSON
+# Never seen on chain: the complaint is the only explanation, and pages with
+# its evidence in the message.
+cat > "${WORK}/status5.json" <<'JSON'
+{"status":"degraded","health":{"ok":true},"chain":{"ok":true},
+ "node":{"ok":true,"stale":false,"container":{"running":true},
+         "eligibility":{"blocked":true,"key":"insufficient-stake","selfReport":"insufficient stake",
+                        "reason":"insufficient stake (the node’s own report; no block from this node has been seen on chain)"},
+         "eligibilityIgnored":false,"eligibilityCategory":"unconfirmed"},
+ "release":{"ok":true},"derived":{},
+ "system":{"throttle":{"undervoltageNow":false},"swap":{"usedPercent":0}}}
+JSON
+for n in 4 5; do cat > "${WORK}/alert${n}.env" <<ENV
+XL1_ALERT_URL=http://127.0.0.1:${PORT}/status${n}.json
+XL1_ALERT_STATE=${WORK}/.alert-state${n}
+XL1_ALERT_NAME=testnode
+ENV
+done
+OUT4="$(XL1_ALERT_ENV="${WORK}/alert4.env" bash "${ALERT}" --status 2>&1)"
+OUT5="$(XL1_ALERT_ENV="${WORK}/alert5.env" bash "${ALERT}" --status 2>&1)"
+has   "not landing pages as not-producing"               "not-producing" "${OUT4}"
+hasnt "a missing block is not called insufficient stake" "ineligible"    "${OUT4}"
+has   "never seen on chain pages the complaint"          "ineligible"    "${OUT5}"
+has   "and the page carries its evidence"                "no block from this node has been seen on chain" "${OUT5}"
+
 OUT="$(A --status)"
 has  "real conditions are detected"      "ineligible"   "${OUT}"
 has  "version lag is detected"           "cli-behind"   "${OUT}"

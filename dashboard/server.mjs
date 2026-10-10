@@ -2254,28 +2254,89 @@ function blocksSinceOwn() {
     : undefined
 }
 
-/** Whether the node's eligibility complaint is a fault: not when this network
- *  does not enforce it, and not when the chain shows the node producing. */
-function eligibilityVerdict(node = state.node, sinceOwn = blocksSinceOwn()) {
-  if (!node?.eligibility?.blocked) return { counts: false }
-  if (node.eligibilityIgnored) return { counts: false, note: node.eligibilityNote }
-  if (Number.isFinite(sinceOwn) && sinceOwn >= 0 && sinceOwn <= ELIGIBILITY_CHAIN_BLOCKS) {
-    return {
-      counts: false,
-      contradicted: true,
-      note: `the chain shows this node produced ${sinceOwn} block${sinceOwn === 1 ? '' : 's'} ago`,
-    }
-  }
-  return { counts: true }
+// Chain evidence older than this is not evidence. Four polls, and never under a
+// minute, so one slow poll does not flip the verdict.
+const CHAIN_FRESH_MS = Math.max(4 * CHAIN_POLL_MS, 60_000)
+// The dashboard's own warm-up: until the first chain poll and scan land, "no
+// evidence" is a fact about this process, not about the producer.
+const ELIGIBILITY_WARMUP_MS = 2 * CHAIN_FRESH_MS
+
+/** What the chain can say about this node's production right now. */
+function chainEvidence(now = Date.now()) {
+  const c = state.chain
+  if (!c?.ok || c.currentBlock === undefined) return { usable: false, why: 'chain data unavailable' }
+  const age = now - Date.parse(c.polledAt ?? 0)
+  if (!(age <= CHAIN_FRESH_MS)) return { usable: false, why: `chain data is ${Math.round(age / 1000)} s old` }
+  if ((production.behind ?? 0) > ELIGIBILITY_CHAIN_BLOCKS) return { usable: false, why: `block scan is ${production.behind} blocks behind` }
+  if (production.lastBlock === undefined) return { usable: true, sinceOwn: undefined }
+  const sinceOwn = c.currentBlock - Number(production.lastBlock)
+  if (!(sinceOwn >= 0)) return { usable: false, why: 'own block reads ahead of the chain head' }
+  return { usable: true, sinceOwn }
 }
 
-/** The node as served: a complaint the chain contradicts is marked ignored, so
- *  the page shows it with its reason and the alerter (which reads
- *  eligibilityIgnored) does not page on it. */
+/** Classify the node's eligibility complaint against independent evidence.
+ *  Categories, each with its own evidence:
+ *    none          no complaint
+ *    producer-down container not running: the shutdown is the cause
+ *    not-enforced  this network does not enforce the complaint's rule
+ *    unverified    no fresh chain evidence; the self-report stands, labelled
+ *    contradicted  the chain shows a recent block from this node
+ *    not-landing   fresh chain, no block from this node for > N: reported as
+ *                  not landing blocks, the complaint as unconfirmed context --
+ *                  a missing block is not evidence of insufficient stake
+ *    unconfirmed   fresh chain, no block from this node ever seen: the
+ *                  complaint is the only explanation on offer, and counts
+ *  `counts` decides whether it is a fault named after the complaint. */
+function eligibilityVerdict(node = state.node, ev = chainEvidence(), now = Date.now()) {
+  const reason = node?.eligibility?.reason
+  if (!node?.eligibility?.blocked) return { category: 'none', counts: false }
+  if (node.container && node.container.running === false) {
+    return { category: 'producer-down', counts: false, note: 'the producer is not running; its last complaint is not a current fault' }
+  }
+  if (node.eligibilityIgnored) return { category: 'not-enforced', counts: false, note: node.eligibilityNote }
+  if (!ev.usable) {
+    const warming = now - Date.parse(state.startedAt ?? 0) < ELIGIBILITY_WARMUP_MS
+    return {
+      category: 'unverified',
+      counts: !warming,
+      note: warming ? 'dashboard starting: the chain has not been read yet' : `the node's own report; ${ev.why}`,
+      problem: `producer reports ${reason} — unverified: ${ev.why}`,
+    }
+  }
+  if (ev.sinceOwn === undefined) {
+    return {
+      category: 'unconfirmed',
+      counts: true,
+      note: 'the node’s own report; no block from this node has been seen on chain',
+      problem: `producer ineligible: ${reason} (the node’s own report; no block from it seen on chain)`,
+    }
+  }
+  const ago = `${ev.sinceOwn} block${ev.sinceOwn === 1 ? '' : 's'}`
+  if (ev.sinceOwn <= ELIGIBILITY_CHAIN_BLOCKS) {
+    return { category: 'contradicted', counts: false, contradicted: true, note: `the chain shows this node produced ${ago} ago` }
+  }
+  return {
+    category: 'not-landing',
+    counts: false,
+    note: `not landing blocks: last one ${ago} ago; the node reports ${reason} (unconfirmed)`,
+    problem: `not landing blocks: ${ago} since this node's last; it reports ${reason} (unconfirmed)`,
+  }
+}
+
+/** The node as served. Anything not counted as a complaint-named fault is
+ *  marked eligibilityIgnored, so the alerter (which reads it) pages only on
+ *  `unconfirmed` and `unverified`, and its message carries the evidence. The
+ *  alerter's own not-producing and producer-down checks cover the rest. */
 function nodeView() {
   const v = eligibilityVerdict()
-  if (!v.contradicted) return state.node
-  return { ...state.node, eligibilityIgnored: true, eligibilityContradicted: true, eligibilityNote: v.note }
+  if (v.category === 'none') return state.node
+  const out = { ...state.node, eligibilityCategory: v.category }
+  if (!v.counts) Object.assign(out, { eligibilityIgnored: true, eligibilityNote: v.note })
+  if (v.contradicted) out.eligibilityContradicted = true
+  if (v.counts && v.note) {
+    out.eligibility = { ...state.node.eligibility, selfReport: state.node.eligibility.reason, reason: `${state.node.eligibility.reason} (${v.note})` }
+  }
+  return out
 }
 
 function overall() {
@@ -2312,8 +2373,16 @@ function overall() {
   // A node can be up, healthy and unable to produce a single block. Nothing
   // else on this page distinguishes that from working — unless the chain shows
   // it producing, in which case the complaint is shown but is not a fault.
-  if (state.node.ok && eligibilityVerdict().counts) {
-    problems.push(`producer ineligible: ${state.node.eligibility.reason}`)
+  if (state.node.ok) {
+    const v = eligibilityVerdict()
+    // Counted complaints, and the not-landing symptom (a fault in itself,
+    // named for what the chain shows rather than for what the node claims).
+    if ((v.counts || v.category === 'not-landing') && v.problem) problems.push(v.problem)
+  }
+  // Chain evidence that stopped refreshing is a fault of its own: everything
+  // computed from it -- share, last block, the verdict above -- is frozen.
+  if (state.chain.ok && state.chain.polledAt && Date.now() - Date.parse(state.chain.polledAt) > CHAIN_FRESH_MS) {
+    problems.push(`chain data stale (${Math.round((Date.now() - Date.parse(state.chain.polledAt)) / 1000)} s)`)
   }
 
   const lag = versionLag(state.node?.cliVersion, state.release?.latest)
@@ -2980,7 +3049,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { eligibilityVerdict, nodeView, blocksSinceOwn, ELIGIBILITY_CHAIN_BLOCKS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

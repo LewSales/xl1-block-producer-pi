@@ -1759,8 +1759,12 @@ test('once the collector reports, the real host figures take over', async () => 
 // height 1756396, own block 1756385.
 
 const HOUR = 3_600_000
-function scenario({ complaint = 'insufficient-stake', running = true, chain = 'fresh', current = 1756396, lastOwn = 1756385, behind = 0, warm = true } = {}) {
+let savedSelfRecord
+function scenario({ complaint = 'insufficient-stake', running = true, chain = 'fresh', current = 1756396, lastOwn = 1756385, behind = 0, warm = true, record = 0 } = {}) {
   baselineHealthyState()
+  // This node's persisted production record (peers.json counts).
+  savedSelfRecord = m.peers.get(SELF)
+  if (record) m.peers.set(SELF, record); else m.peers.delete(SELF)
   m.state.startedAt = new Date(Date.now() - (warm ? HOUR : 1000)).toISOString()
   const reasons = { 'insufficient-stake': 'insufficient stake', 'not-allowed': 'not on the allowed-producer list' }
   m.state.node = {
@@ -1775,7 +1779,10 @@ function scenario({ complaint = 'insufficient-stake', running = true, chain = 'f
     : { ok: true, chainIdMatchesPreset: true, balances: {}, currentBlock: current, polledAt }
   Object.assign(m.production, { lastBlock: lastOwn === null ? undefined : lastOwn, behind })
 }
-function reset() { Object.assign(m.production, { lastBlock: undefined, behind: undefined }); m.state.startedAt = new Date().toISOString() }
+function reset() {
+  Object.assign(m.production, { lastBlock: undefined, behind: undefined }); m.state.startedAt = new Date().toISOString()
+  if (savedSelfRecord === undefined) m.peers.delete(SELF); else m.peers.set(SELF, savedSelfRecord)
+}
 const run = (opts) => { scenario(opts); try { return { o: m.overall(), n: m.snapshot().node, v: m.eligibilityVerdict() } } finally { reset() } }
 const has = (o, re) => o.problems.some((p) => re.test(p))
 
@@ -1879,4 +1886,43 @@ test('the per-network ignore list still applies on its own', () => {
 test('the verdict never rewrites collected state', () => {
   scenario({ lastOwn: null })
   try { m.snapshot(); assert.equal(m.state.node.eligibility.reason, 'insufficient stake'); assert.equal(m.state.node.eligibilityIgnored, false) } finally { reset() }
+})
+
+// 2026-10-10, 2.3.2 rollout: ~30 s after a dashboard restart the alerter paged
+// "cannot produce ... no block from this node seen on chain" for a node that had
+// produced a block seconds earlier. The head was known, our last block not yet.
+test('after a restart, a node with a production record is never "never seen"', () => {
+  const { o, n, v } = run({ lastOwn: null, record: 7300 })
+  assert.equal(v.category, 'unverified')
+  assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true, 'the alerter must not page "cannot produce"')
+  assert.match(n.eligibilityNote, /7300 blocks on record, its latest not yet located/)
+  assert.ok(!o.problems.some((p) => /ineligible/.test(p)), JSON.stringify(o.problems))
+})
+
+test('during warm-up, no own block seen yet is not a fault either', () => {
+  const { n, v } = run({ lastOwn: null, record: 0, warm: false })
+  assert.equal(v.category, 'unverified'); assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true)
+})
+
+test('a genuinely new node with no record, after warm-up, still pages unconfirmed', () => {
+  const { n, v } = run({ lastOwn: null, record: 0, warm: true })
+  assert.equal(v.category, 'unconfirmed'); assert.equal(n.eligibilityIgnored, false)
+})
+
+test('loadPeers restores the last own block from the persisted recent strip', async () => {
+  const { mkdtemp: mt, writeFile: wf } = await import('node:fs/promises')
+  const dir = await mt(join(tmpdir(), 'xl1-peers-'))
+  const f = join(dir, 'peers.json')
+  await wf(f, JSON.stringify({ v: 3, since: new Date().toISOString(), updatedAt: new Date().toISOString(), scannedFrom: 100, scannedTo: 200, scanned: 100, counts: { [SELF]: 12 },
+    recent: [{ n: 190, mine: true, t: 1000 }, { n: 195, mine: false, t: 2000 }, { n: 198, mine: true, t: 3000 }, { n: 199, mine: false, t: 4000 }], days: {} }))
+  const was = process.env.DASH_PEERS_FILE
+  process.env.DASH_PEERS_FILE = f
+  try {
+    const fresh = await import(`../dashboard/server.mjs?peers=${Date.now()}`)
+    await fresh.loadPeers()
+    assert.equal(fresh.production.lastBlock, 198)
+    assert.equal(fresh.production.lastBlockAt, 3000)
+  } finally { if (was === undefined) delete process.env.DASH_PEERS_FILE; else process.env.DASH_PEERS_FILE = was }
 })

@@ -975,6 +975,16 @@ async function loadPeers() {
     production.scannedFrom = doc.scannedFrom
     production.scannedTo = doc.scannedTo
     production.scanned = Number(doc.scanned) || 0
+    // The last block this node landed, from the persisted recent strip. Without
+    // it a restarted dashboard knows the head but not our last block until the
+    // scan next finds one -- and for that minute "no block of ours seen" was
+    // read as "never produced" and paged (2026-10-10, 2.3.2 rollout).
+    const ownRecent = (Array.isArray(doc.recent) ? doc.recent : []).filter((r) => r?.mine && Number.isFinite(Number(r.n)))
+    if (ownRecent.length && production.lastBlock === undefined) {
+      const last = ownRecent.reduce((a, b) => (Number(b.n) > Number(a.n) ? b : a))
+      production.lastBlock = Number(last.n)
+      if (Number.isFinite(Number(last.t))) production.lastBlockAt = Number(last.t)
+    }
     peersEvicted.addresses = Number(doc.evicted?.addresses) || 0
     peersEvicted.blocks = Number(doc.evicted?.blocks) || 0
     production.multiSigner = Boolean(doc.multiSigner)
@@ -2304,6 +2314,20 @@ function eligibilityVerdict(node = state.node, ev = chainEvidence(), now = Date.
     }
   }
   if (ev.sinceOwn === undefined) {
+    // "Not located yet" is not "never produced": a node with a production
+    // record, or a dashboard still warming up, has simply not found its latest
+    // block in this process yet.
+    const record = peers.get(PRODUCER_ADDRESS) ?? 0
+    const warming = now - Date.parse(state.startedAt ?? 0) < ELIGIBILITY_WARMUP_MS
+    if (record > 0 || warming) {
+      return {
+        category: 'unverified',
+        counts: false,
+        note: record > 0
+          ? `the node’s own report; this node has ${record} blocks on record, its latest not yet located`
+          : 'dashboard starting: the block scan has not run yet',
+      }
+    }
     return {
       category: 'unconfirmed',
       counts: true,

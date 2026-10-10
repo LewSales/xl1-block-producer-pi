@@ -60,6 +60,28 @@ has   "a launch that never produced is caught"  "never-produced" "$(mk2 1800 0)"
 hasnt "a producing launch is not accused"       "never-produced" "$(mk2 1800 4)"
 hasnt "a young container is given its grace"    "never-produced" "$(mk2 60 0)"
 
+# 2026-10-10: the node said "insufficient stake" about itself on Mainnet while
+# landing a block every few minutes. The dashboard now serves that complaint as
+# contradicted by the chain (eligibilityIgnored: true) -- this is the exact
+# shape it serves, and the alerter must not page "cannot produce" on it.
+cat > "${WORK}/status3.json" <<'JSON'
+{"status":"ok","health":{"ok":true},"chain":{"ok":true},
+ "node":{"ok":true,"stale":false,"container":{"running":true},
+         "eligibility":{"blocked":true,"key":"insufficient-stake","reason":"insufficient stake"},
+         "eligibilityIgnored":true,"eligibilityContradicted":true,
+         "eligibilityNote":"the chain shows this node produced 11 blocks ago"},
+ "release":{"ok":true},"derived":{"blocksSinceLast":11},
+ "system":{"throttle":{"undervoltageNow":false},"swap":{"usedPercent":0}}}
+JSON
+cat > "${WORK}/alert3.env" <<ENV
+XL1_ALERT_URL=http://127.0.0.1:${PORT}/status3.json
+XL1_ALERT_STATE=${WORK}/.alert-state3
+XL1_ALERT_NAME=testnode
+ENV
+OUT3="$(XL1_ALERT_ENV="${WORK}/alert3.env" bash "${ALERT}" --status 2>&1)"
+hasnt "a complaint the chain contradicts does not page" "ineligible"    "${OUT3}"
+hasnt "a producing node is not called stalled"          "not-producing" "${OUT3}"
+
 OUT="$(A --status)"
 has  "real conditions are detected"      "ineligible"   "${OUT}"
 has  "version lag is detected"           "cli-behind"   "${OUT}"

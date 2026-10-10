@@ -161,6 +161,17 @@ const ELIGIBILITY_IGNORED = (process.env.DASH_ELIGIBILITY_IGNORE ?? '')
   .split(',').map((x) => x.trim()).filter(Boolean)
 const ignoredKeys = new Set(ELIGIBILITY_IGNORED.length ? ELIGIBILITY_IGNORED : (IGNORED_BY_NETWORK[NETWORK] ?? []))
 
+// The node's complaint is its own opinion; the chain is the record. On Mainnet
+// since 2026-10-06 the Pi has logged "Producer … has insufficient stake" about
+// itself a dozen times an hour while landing about one block in five, and this
+// page and the alerter called that "Producer cannot produce". A per-network
+// ignore list cannot fix that — it would also hide the day enforcement starts.
+// So a complaint counts only when the chain does not contradict it: a block
+// signed by this node within the last N chain blocks (default 90, the alerter's
+// own stall threshold) means it can produce, whatever it says. No chain reading
+// means no contradiction, and the complaint counts.
+const ELIGIBILITY_CHAIN_BLOCKS = envNum('DASH_ELIGIBILITY_CHAIN_BLOCKS', 90)
+
 // XL1 balances are keyed by bare lowercase hex — a 0x prefix is rejected by the
 // gateway, and the env examples ship the 0x form, so normalize every address.
 const bareHex = (a) => (a ?? '').trim().replace(/^0x/i, '').toLowerCase()
@@ -2236,6 +2247,37 @@ async function pollSystem() {
 
 // ------------------------------------------------------------------- assembly
 
+/** Chain blocks since this node last landed one; undefined until both are read. */
+function blocksSinceOwn() {
+  return (state.chain?.currentBlock !== undefined && production.lastBlock !== undefined)
+    ? state.chain.currentBlock - Number(production.lastBlock)
+    : undefined
+}
+
+/** Whether the node's eligibility complaint is a fault: not when this network
+ *  does not enforce it, and not when the chain shows the node producing. */
+function eligibilityVerdict(node = state.node, sinceOwn = blocksSinceOwn()) {
+  if (!node?.eligibility?.blocked) return { counts: false }
+  if (node.eligibilityIgnored) return { counts: false, note: node.eligibilityNote }
+  if (Number.isFinite(sinceOwn) && sinceOwn >= 0 && sinceOwn <= ELIGIBILITY_CHAIN_BLOCKS) {
+    return {
+      counts: false,
+      contradicted: true,
+      note: `the chain shows this node produced ${sinceOwn} block${sinceOwn === 1 ? '' : 's'} ago`,
+    }
+  }
+  return { counts: true }
+}
+
+/** The node as served: a complaint the chain contradicts is marked ignored, so
+ *  the page shows it with its reason and the alerter (which reads
+ *  eligibilityIgnored) does not page on it. */
+function nodeView() {
+  const v = eligibilityVerdict()
+  if (!v.contradicted) return state.node
+  return { ...state.node, eligibilityIgnored: true, eligibilityContradicted: true, eligibilityNote: v.note }
+}
+
 function overall() {
   const problems = []
   if (!state.health.ok) problems.push('producer health probe failing')
@@ -2268,8 +2310,9 @@ function overall() {
   if (state.chain.ok && state.chain.chainIdMatchesPreset === false) problems.push('chain id differs from preset')
 
   // A node can be up, healthy and unable to produce a single block. Nothing
-  // else on this page distinguishes that from working.
-  if (state.node.ok && state.node.eligibility?.blocked && !state.node.eligibilityIgnored) {
+  // else on this page distinguishes that from working — unless the chain shows
+  // it producing, in which case the complaint is shown but is not a fault.
+  if (state.node.ok && eligibilityVerdict().counts) {
     problems.push(`producer ineligible: ${state.node.eligibility.reason}`)
   }
 
@@ -2688,6 +2731,7 @@ const snapshot = () => ({
     }
   })(),
   ...state,
+  node: nodeView(),
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   // One board per response. It was being rebuilt three times -- once in the
   // payload and twice inside derived() -- over the same tally, for three
@@ -2936,7 +2980,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { eligibilityVerdict, nodeView, blocksSinceOwn, ELIGIBILITY_CHAIN_BLOCKS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

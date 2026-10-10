@@ -1743,3 +1743,79 @@ test('once the collector reports, the real host figures take over', async () => 
   assert.equal(s.hostname, 'REAL-PC')
   assert.equal(s.memory.totalBytes, 16890322944)
 })
+
+// ------------------------------------------------- eligibility vs the chain
+// 2026-10-10: on Mainnet the Pi logged "Producer … has insufficient stake" about
+// itself ~12 times an hour while landing ~1 block in 5, and the page and the
+// alerter reported "Producer cannot produce". The figures below are that
+// node's real readings at 18:53Z (height 1756396, own block 1756385).
+
+function stakeComplaint() {
+  baselineHealthyState()
+  m.state.node = {
+    ok: true, stale: false, collectedAt: new Date().toISOString(),
+    container: { running: true },
+    eligibility: { blocked: true, key: 'insufficient-stake', reason: 'insufficient stake', window: '20m' },
+    eligibilityIgnored: false, // Mainnet: not in the per-network ignore list
+  }
+}
+function withChain(current, lastOwn) {
+  m.state.chain = { ...m.state.chain, currentBlock: current }
+  m.production.lastBlock = lastOwn
+}
+
+test('a stake complaint the chain contradicts is shown, not counted as a fault', () => {
+  stakeComplaint(); withChain(1756396, 1756385)
+  try {
+    const o = m.overall()
+    assert.ok(!o.problems.some((p) => /ineligible/i.test(p)), `got ${JSON.stringify(o.problems)}`)
+    assert.equal(o.status, 'ok')
+    const n = m.snapshot().node
+    assert.equal(n.eligibilityIgnored, true, 'the alerter reads eligibilityIgnored')
+    assert.equal(n.eligibilityContradicted, true)
+    assert.match(n.eligibilityNote, /produced 11 blocks ago/)
+    assert.equal(n.eligibility.reason, 'insufficient stake', 'what the node said is still served')
+    assert.equal(m.state.node.eligibilityIgnored, false, 'the verdict does not rewrite collected state')
+  } finally { withChain(undefined, undefined) }
+})
+
+test('a stake complaint with no recent block on chain is still a fault', () => {
+  stakeComplaint(); withChain(1756396, 1756396 - (m.ELIGIBILITY_CHAIN_BLOCKS + 1))
+  try {
+    assert.ok(m.overall().problems.some((p) => /ineligible: insufficient stake/.test(p)))
+    assert.equal(m.snapshot().node.eligibilityIgnored, false)
+  } finally { withChain(undefined, undefined) }
+})
+
+test('the threshold is inclusive at exactly N blocks', () => {
+  stakeComplaint(); withChain(1000, 1000 - m.ELIGIBILITY_CHAIN_BLOCKS)
+  try { assert.equal(m.eligibilityVerdict().counts, false) } finally { withChain(undefined, undefined) }
+})
+
+test('without a chain reading the complaint counts (fail safe)', () => {
+  stakeComplaint(); withChain(1756396, undefined)
+  try {
+    assert.equal(m.eligibilityVerdict().counts, true)
+    m.state.chain = { ok: true, chainIdMatchesPreset: true, balances: {} }; m.production.lastBlock = 1756385
+    assert.equal(m.eligibilityVerdict().counts, true, 'no current height either way')
+  } finally { withChain(undefined, undefined) }
+})
+
+test('a last block ahead of the current height is not taken as evidence', () => {
+  stakeComplaint(); withChain(100, 150)
+  try { assert.equal(m.eligibilityVerdict().counts, true) } finally { withChain(undefined, undefined) }
+})
+
+test('an authorization complaint is contradicted by the chain the same way', () => {
+  stakeComplaint()
+  m.state.node.eligibility = { blocked: true, key: 'not-allowed', reason: 'not on the allowed-producer list', window: '20m' }
+  withChain(500, 498)
+  try { assert.equal(m.eligibilityVerdict().counts, false) } finally { withChain(undefined, undefined) }
+})
+
+test('the per-network ignore list still applies on its own', () => {
+  stakeComplaint(); m.state.node.eligibilityIgnored = true; m.state.node.eligibilityNote = 'not enforced on sequence'
+  const v = m.eligibilityVerdict()
+  assert.deepEqual(v, { counts: false, note: 'not enforced on sequence' })
+  assert.equal(m.snapshot().node.eligibilityContradicted, undefined, 'nothing added when the chain was not the reason')
+})

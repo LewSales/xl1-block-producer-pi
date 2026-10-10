@@ -41,7 +41,9 @@ step "JavaScript syntax"
 for f in "${ROOT}/dashboard/server.mjs" "${HERE}/dashboard.test.mjs"; do
   if node --check "$f" 2>/dev/null; then ok "$(basename "$f")"; else bad "$(basename "$f") — syntax error"; fi
 done
-if node -e "const h=require('fs').readFileSync('${ROOT}/dashboard/index.html','utf8'); new Function(h.match(/<script>([\s\S]*)<\/script>/)[1])" 2>/dev/null; then
+# A relative path from inside ROOT: under Git Bash ${ROOT} is /c/..., which node
+# on Windows cannot open, so this reported a parse failure on a page that parses.
+if (cd "${ROOT}" && node -e "const h=require('fs').readFileSync('dashboard/index.html','utf8'); new Function(h.match(/<script>([\s\S]*)<\/script>/)[1])") 2>/dev/null; then
   ok "index.html inline script parses"
 else
   bad "index.html inline script does not parse"

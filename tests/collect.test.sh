@@ -8,6 +8,13 @@ COLLECT="${HERE}/../scripts/xl1-collect.sh"
 WORK="$(mktemp -d)"; trap 'rm -rf "${WORK}"' EXIT
 mkdir -p "${WORK}/bin" "${WORK}/state"
 FAILED=0
+
+# Results are read back with python3. Where it is missing (Windows, where
+# "python3" is a Store shortcut that prints and fails) every field read came
+# back empty and the suite reported ten collector faults that were not there.
+# Say it was skipped instead, as the alerter suite does without jq.
+python3 -c 'pass' >/dev/null 2>&1 || { echo "    skipped: python3 not available"; exit 0; }
+
 check() { if [[ "$2" == "$3" ]]; then printf '    ok   %s\n' "$1"; else printf '    FAIL %s\n         want: %s\n         got:  %s\n' "$1" "$3" "$2"; FAILED=$((FAILED+1)); fi; }
 
 mkdocker() { # $1 image id, $2 version, $3 log line

@@ -141,4 +141,54 @@ check "prior conditions preserved"       "$(grep -c . "${WORK}/.alert-state")" "
 OUT="$(A --status)"
 has  "--status admits it could not look" "COULD NOT READ STATUS" "${OUT}"
 
+# ---------------------------------------------------- maintenance holds (2.3.2)
+# A planned dashboard restart must not page as an outage, and must not be done
+# by switching alerting off. One named key, bounded, self-expiring.
+HD="${WORK}/hold"; mkdir -p "${HD}"
+DEAD="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+cat > "${WORK}/hold-dead.env" <<ENV
+XL1_ALERT_URL=http://127.0.0.1:${DEAD}/status.json
+XL1_ALERT_STATE=${HD}/.alert-state
+XL1_ALERT_NAME=testnode
+ENV
+H() { XL1_ALERT_ENV="${WORK}/hold-dead.env" bash "${ALERT}" "$@" 2>&1; }
+
+has   "a critical key is refused without the override"  "producer is down"     "$(H --hold node-down 10 producer window)"
+has   "a hold longer than the cap is refused"            "minutes must be"      "$(H --hold dashboard-unreachable 90 too long)"
+has   "a hold needs a reason"                            "give a reason"        "$(H --hold dashboard-unreachable 5)"
+has   "a hold is accepted"                               "held dashboard-unreachable for 5 min" "$(H --hold dashboard-unreachable 5 dashboard deploy)"
+has   "--holds lists it"                                 "dashboard-unreachable" "$(H --holds)"
+OUTH="$(H)"
+hasnt "a held unreachable dashboard does not page"       "Dashboard API did not answer" "${OUTH}"
+has   "the hold is logged on every run"                  "hold active: dashboard-unreachable" "${OUTH}"
+check "nothing is recorded as firing"                    "$(grep -c . "${HD}/.alert-state" 2>/dev/null || true)" "0"
+has   "the hold is published in .alert-status"           '"holds":\[{"key":"dashboard-unreachable"' "$(cat "${HD}/.alert-status")"
+
+# Unrelated conditions keep firing during a hold (served fixture, readable).
+python3 -m http.server ${PORT} --bind 127.0.0.1 --directory "${WORK}" >/dev/null 2>&1 & SRV=$!
+for _ in $(seq 1 20); do curl -fsS --max-time 1 -o /dev/null 2>/dev/null "http://127.0.0.1:${PORT}/status.json" && break; sleep 0.3; done
+cat > "${WORK}/hold-live.env" <<ENV
+XL1_ALERT_URL=http://127.0.0.1:${PORT}/status.json
+XL1_ALERT_STATE=${HD}/.alert-state
+XL1_ALERT_NAME=testnode
+ENV
+HL() { XL1_ALERT_ENV="${WORK}/hold-live.env" bash "${ALERT}" "$@" 2>&1; }
+OUTL="$(HL)"
+has   "other alerts still fire during a hold"            "Producer cannot produce" "${OUTL}"
+has   "and the stall alert too"                          "not landing anything"    "${OUTL}"
+
+# Held key that was already firing: no false recovery while held.
+HL --hold ineligible 5 test >/dev/null
+sed -i 's/"blocked":true/"blocked":false/' "${WORK}/status.json"
+hasnt "a held key never reports recovered"               "recovered — ineligible" "$(HL)"
+grep -q "^ineligible	" "${HD}/.alert-state" && printf '    ok   its state is carried forward\n' || { printf '    FAIL its state is carried forward\n'; FAILED=$((FAILED+1)); }
+HL --release ineligible >/dev/null
+has   "after release it resolves normally"               "recovered — ineligible" "$(HL)"
+
+# An expired hold has no effect.
+printf 'dashboard-unreachable\t1\told hold\n' > "${HD}/.alert-hold"
+kill "${SRV}" 2>/dev/null; wait "${SRV}" 2>/dev/null; SRV=""
+has   "an expired hold does not suppress"                "Dashboard API did not answer" "$(H)"
+has   "--release clears everything"                      "released all holds" "$(H --release)"
+
 exit $(( FAILED > 0 ))

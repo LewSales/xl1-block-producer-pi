@@ -203,7 +203,65 @@ else
   fi
 fi
 
+# --------------------------------------------------------------- maintenance holds
+#
+# A planned restart of something this watches (the dashboard, say) must not page
+# as an outage -- and must not be handled by switching alerting off, which also
+# silences the producer. A hold names ONE condition key, lasts at most
+# HOLD_MAX_MINUTES, and expires on its own; every other condition keeps firing.
+# The keys that mean the producer itself is down are refused unless
+# XL1_ALERT_HOLD_CRITICAL=1 says so explicitly (a producer maintenance window).
+#
+#   xl1-alert.sh --hold <key> <minutes> <reason...>
+#   xl1-alert.sh --release [key]       (all holds when no key)
+#   xl1-alert.sh --holds
+HOLD_FILE="$(dirname "${STATE}")/.alert-hold"
+HOLD_MAX_MINUTES="${XL1_ALERT_HOLD_MAX_MINUTES:-60}"
+CRITICAL_KEYS=" node-down container-missing container-stopped "
+NOW_HOLD="$(date +%s)"
+active_holds() {  # key<TAB>until<TAB>reason, unexpired only
+  [[ -s "${HOLD_FILE}" ]] || return 0
+  while IFS=$'\t' read -r k u r; do
+    [[ -n "${k}" && "${u}" =~ ^[0-9]+$ ]] && (( u > NOW_HOLD )) && printf '%s\t%s\t%s\n' "${k}" "${u}" "${r}"
+  done < "${HOLD_FILE}"
+}
+case "${MODE}" in
+  --hold)
+    key="${2:-}"; mins="${3:-}"; shift 3 2>/dev/null || true; reason="$*"
+    [[ "${key}" =~ ^[a-z0-9-]+$ ]] || { echo "xl1-alert: --hold needs a condition key (e.g. dashboard-unreachable)" >&2; exit 2; }
+    [[ "${mins}" =~ ^[0-9]+$ ]] && (( mins >= 1 && mins <= HOLD_MAX_MINUTES )) \
+      || { echo "xl1-alert: minutes must be 1-${HOLD_MAX_MINUTES}" >&2; exit 2; }
+    [[ -n "${reason}" ]] || { echo "xl1-alert: give a reason; it is logged with the hold" >&2; exit 2; }
+    if [[ "${CRITICAL_KEYS}" == *" ${key} "* && "${XL1_ALERT_HOLD_CRITICAL:-0}" != "1" ]]; then
+      echo "xl1-alert: ${key} means the producer is down; set XL1_ALERT_HOLD_CRITICAL=1 to hold it on purpose" >&2; exit 2
+    fi
+    mkdir -p "$(dirname "${HOLD_FILE}")"
+    { active_holds | grep -v "^${key}	" || true; printf '%s\t%s\t%s\n' "${key}" $(( NOW_HOLD + mins * 60 )) "${reason}"; } > "${HOLD_FILE}.tmp"
+    mv "${HOLD_FILE}.tmp" "${HOLD_FILE}"
+    echo "held ${key} for ${mins} min ($(date -d "@$(( NOW_HOLD + mins * 60 ))" -Is 2>/dev/null || echo "+${mins}m")): ${reason}"
+    exit 0 ;;
+  --release)
+    key="${2:-}"
+    if [[ -n "${key}" ]]; then { active_holds | grep -v "^${key}	" || true; } > "${HOLD_FILE}.tmp"; mv "${HOLD_FILE}.tmp" "${HOLD_FILE}"; echo "released ${key}"
+    else : > "${HOLD_FILE}"; echo "released all holds"; fi
+    exit 0 ;;
+  --holds)
+    h="$(active_holds)"; [[ -n "${h}" ]] && printf '%s\n' "${h}" || echo "no active holds"; exit 0 ;;
+esac
+HOLDS="$(active_holds)"
+is_held() { [[ -n "${HOLDS}" ]] && grep -q "^$1	" <<< "${HOLDS}"; }
+if [[ -n "${HOLDS}" ]]; then
+  while IFS=$'\t' read -r k u r; do echo "xl1-alert: hold active: ${k} until $(date -d "@${u}" -Is 2>/dev/null || echo "${u}") (${r})" >&2; done <<< "${HOLDS}"
+  HELD_OUT=""; KEPT=""
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    if is_held "${line%%|*}"; then HELD_OUT+="${line}"$'\n'; else KEPT+="${line}"$'\n'; fi
+  done <<< "${CONDITIONS}"
+  CONDITIONS="${KEPT%$'\n'}"
+fi
+
 if [[ "${MODE}" == "--status" ]]; then
+  [[ -n "${HELD_OUT:-}" ]] && printf 'held (not notified):\n%s' "${HELD_OUT}"
   # "Could not look" and "looked, found nothing" are different answers.
   if (( ! READABLE )); then printf 'COULD NOT READ STATUS\n%s\n' "${CONDITIONS}"
   elif [[ -z "${CONDITIONS}" ]]; then echo "nothing firing"
@@ -277,8 +335,11 @@ done <<< "${CONDITIONS}"
 # gone, seconds after the dashboard container died. Not seeing a problem is not
 # the same as the problem being fixed. Carry the old state forward untouched.
 if (( READABLE )); then
-  while IFS=$'\t' read -r key _; do
+  while IFS=$'\t' read -r key ts; do
     [[ -z "${key}" ]] && continue
+    # A held key is not observed, so it can be neither still-firing nor
+    # recovered: carry its entry forward and decide when the hold ends.
+    if is_held "${key}"; then NEW_STATE+="${key}	${ts}"$'\n'; continue; fi
     printf '%s' "${CONDITIONS}" | grep -q "^${key}|" || \
       send default "XL1 ${NODE_NAME}: recovered — ${key}" "Cleared $(date -Is)."
   done < "${STATE}"
@@ -320,7 +381,11 @@ STATUS_FILE="$(dirname "${STATE}")/.alert-status"
 # Advisory only, and never fatal: a dashboard that cannot read this shows one
 # row less, but an alerter that died writing its own telemetry would be a
 # monitoring tool defeated by itself.
-printf '{"node":"%s","ranAt":"%s","channels":[%s],"deadman":%s,"cooldownSeconds":%s,"stallBlocks":%s,"launchGraceSeconds":%s}' \
+# Active holds are published too: a held alert must be visible as held, never
+# indistinguishable from a quiet node. Keys and expiry only, no reasons.
+HOLDS_JSON=""
+while IFS=$'\t' read -r k u _; do [[ -n "${k}" ]] && HOLDS_JSON+="{\"key\":\"${k}\",\"until\":${u}},"; done <<< "${HOLDS:-}"
+printf '{"node":"%s","ranAt":"%s","channels":[%s],"deadman":%s,"cooldownSeconds":%s,"stallBlocks":%s,"launchGraceSeconds":%s,"holds":[%s]}' \
   "${NODE_NAME}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CHANNELS}" "${DEADMAN_SET}" \
-  "${COOLDOWN}" "${STALL_BLOCKS}" "${LAUNCH_GRACE}" \
+  "${COOLDOWN}" "${STALL_BLOCKS}" "${LAUNCH_GRACE}" "${HOLDS_JSON%,}" \
   > "${STATUS_FILE}.tmp" 2>/dev/null && mv "${STATUS_FILE}.tmp" "${STATUS_FILE}" 2>/dev/null || true

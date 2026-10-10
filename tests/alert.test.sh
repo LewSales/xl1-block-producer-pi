@@ -191,4 +191,18 @@ kill "${SRV}" 2>/dev/null; wait "${SRV}" 2>/dev/null; SRV=""
 has   "an expired hold does not suppress"                "Dashboard API did not answer" "$(H)"
 has   "--release clears everything"                      "released all holds" "$(H --release)"
 
+# A hold that cannot be written must say so and fail -- never print "held".
+# /proc cannot hold a directory even for root, which these tests run as.
+cat > "${WORK}/hold-ro.env" <<ENV
+XL1_ALERT_URL=http://127.0.0.1:${DEAD}/status.json
+XL1_ALERT_STATE=/proc/xl1-no-such-dir/.alert-state
+XL1_ALERT_NAME=testnode
+ENV
+OUTRO="$(XL1_ALERT_ENV="${WORK}/hold-ro.env" bash "${ALERT}" --hold dashboard-unreachable 5 unwritable 2>&1)"; RC=$?
+check "an unwritable hold exits nonzero"                 "${RC}" "1"
+has   "and says no hold is active"                       "NO hold is active" "${OUTRO}"
+hasnt "and never claims success"                         "^held "            "${OUTRO}"
+XL1_ALERT_ENV="${WORK}/hold-ro.env" bash "${ALERT}" --release dashboard-unreachable >/dev/null 2>&1; RC=$?
+check "releasing nothing in an unwritable place is not an error" "${RC}" "0"
+
 exit $(( FAILED > 0 ))

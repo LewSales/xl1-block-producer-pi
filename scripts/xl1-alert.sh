@@ -235,15 +235,36 @@ case "${MODE}" in
     if [[ "${CRITICAL_KEYS}" == *" ${key} "* && "${XL1_ALERT_HOLD_CRITICAL:-0}" != "1" ]]; then
       echo "xl1-alert: ${key} means the producer is down; set XL1_ALERT_HOLD_CRITICAL=1 to hold it on purpose" >&2; exit 2
     fi
-    mkdir -p "$(dirname "${HOLD_FILE}")"
-    { active_holds | grep -v "^${key}	" || true; printf '%s\t%s\t%s\n' "${key}" $(( NOW_HOLD + mins * 60 )) "${reason}"; } > "${HOLD_FILE}.tmp"
-    mv "${HOLD_FILE}.tmp" "${HOLD_FILE}"
+    # Success is reported only after the hold reads back as active. An
+    # unprivileged run used to print "held …" after the write had failed,
+    # which looks exactly like a hold that is protecting a deploy.
+    if ! { mkdir -p "$(dirname "${HOLD_FILE}")" 2>/dev/null \
+           && { active_holds | grep -v "^${key}	" || true; printf '%s\t%s\t%s\n' "${key}" $(( NOW_HOLD + mins * 60 )) "${reason}"; } > "${HOLD_FILE}.tmp" 2>/dev/null \
+           && mv "${HOLD_FILE}.tmp" "${HOLD_FILE}" 2>/dev/null; } \
+       || ! active_holds | grep -q "^${key}	"; then
+      rm -f "${HOLD_FILE}.tmp" 2>/dev/null
+      echo "xl1-alert: could not write ${HOLD_FILE} (permission? run with sudo) -- NO hold is active" >&2
+      exit 1
+    fi
     echo "held ${key} for ${mins} min ($(date -d "@$(( NOW_HOLD + mins * 60 ))" -Is 2>/dev/null || echo "+${mins}m")): ${reason}"
     exit 0 ;;
   --release)
     key="${2:-}"
-    if [[ -n "${key}" ]]; then { active_holds | grep -v "^${key}	" || true; } > "${HOLD_FILE}.tmp"; mv "${HOLD_FILE}.tmp" "${HOLD_FILE}"; echo "released ${key}"
-    else : > "${HOLD_FILE}"; echo "released all holds"; fi
+    if [[ -n "${key}" ]] && ! active_holds | grep -q "^${key}	"; then
+      echo "no active hold on ${key}"
+    elif [[ -n "${key}" ]]; then
+      if ! { { active_holds | grep -v "^${key}	" || true; } > "${HOLD_FILE}.tmp" 2>/dev/null && mv "${HOLD_FILE}.tmp" "${HOLD_FILE}" 2>/dev/null; } \
+         || active_holds | grep -q "^${key}	"; then
+        rm -f "${HOLD_FILE}.tmp" 2>/dev/null
+        echo "xl1-alert: could not update ${HOLD_FILE} (permission? run with sudo) -- ${key} is STILL held" >&2; exit 1
+      fi
+      echo "released ${key}"
+    else
+      if [[ -e "${HOLD_FILE}" ]] && ! : > "${HOLD_FILE}" 2>/dev/null; then
+        echo "xl1-alert: could not clear ${HOLD_FILE} (permission? run with sudo) -- holds are STILL active" >&2; exit 1
+      fi
+      echo "released all holds"
+    fi
     exit 0 ;;
   --holds)
     h="$(active_holds)"; [[ -n "${h}" ]] && printf '%s\n' "${h}" || echo "no active holds"; exit 0 ;;

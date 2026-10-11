@@ -114,7 +114,7 @@ const FULL = {
     producers: 8, scannedBlocks: 1000, scannedFrom: 11300, scannedTo: 12300, since: new Date().toISOString(),
     selfRank: 4, self: { address: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocks: 42, sharePercent: 4.2, rank: 4, isSelf: true },
     top: [
-      { address: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', label: 'Leader', blocks: 300, sharePercent: 30, rank: 1, isSelf: false, url: 'https://x/c' },
+      { address: 'fb4c535221f91c1811bd42f70b6ec305aa658551', label: 'Leader', blocks: 300, sharePercent: 30, rank: 1, isSelf: false, url: 'https://x/c' },
       { address: 'cccccccccccccccccccccccccccccccccccccccc', blocks: 200, sharePercent: 20, rank: 2, isSelf: false },
       { address: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', blocks: 42, sharePercent: 4.2, rank: 4, isSelf: true },
     ],
@@ -125,7 +125,7 @@ const FULL = {
     observed: { blocks: 1000, fromBlock: 11300, toBlock: 12300, daysKept: 30 },
     concentration: { producers: 8, blocks: 1000, leaderShare: 30, top3Share: 60, nakamoto: 2, nakamoto67: 4, evenShare: 12.5 },
     blockTime: { samples: 900, meanSeconds: 53, medianSeconds: 52, p95Seconds: 70, p99Seconds: 90, minSeconds: 30, maxSeconds: 120, edges: Array.from({ length: 10 }, (_, i) => 20 + i * 10), buckets: [1, 5, 20, 200, 400, 200, 50, 15, 8, 1], rejected: { nonConsecutive: 0, nonPositive: 0 } },
-    drift: { comparable: true, rows: [{ address: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', label: 'Leader', blocks: 300, previousBlocks: 250, sharePercent: 30, previousSharePercent: 27, deltaPercent: 3 }] },
+    drift: { comparable: true, rows: [{ address: 'fb4c535221f91c1811bd42f70b6ec305aa658551', label: 'Leader', blocks: 300, previousBlocks: 250, sharePercent: 30, previousSharePercent: 27, deltaPercent: 3 }] },
     churn: { quietAfterDays: 7, seenToday: 6, seenThisWeek: 8, comparable: true, arrived: [], quiet: [], daysStored: 14 },
     selfShare: 4.2,
   },
@@ -148,9 +148,10 @@ test('every card sorts into exactly one of the four topic groups', () => {
   const groups = groupsOf(els.grid.innerHTML)
   assert.deepEqual(Object.keys(groups), ['Producer performance', 'Network health', 'Production performance', 'Analytics'],
     'the four groups must appear in this order, and only these four')
-  assert.deepEqual(groups['Producer performance'], ['Producer', 'Rewards', 'What it is worth', 'Trends'])
+  assert.deepEqual(groups['Producer performance'], ['Producer', 'Software & host', 'Rewards', 'What it is worth', 'Trends'],
+    'Software & host is the second box: the versions a node runs should never be buried')
   assert.deepEqual(groups['Network health'], ['Chain', 'Alerts', 'XL1 Network', 'Producer standings'])
-  assert.deepEqual(groups['Production performance'], ['Operations', 'Candidate race', 'Latency', 'Software & host'])
+  assert.deepEqual(groups['Production performance'], ['Operations', 'Candidate race', 'Latency'])
   assert.deepEqual(groups['Analytics'], ['Block time', 'Continuity', 'Producer movement', 'Fleet', 'Raspberry Pi'])
 })
 
@@ -170,9 +171,9 @@ test('mobile order matches the sequence the brief specifies, KPIs and cards alik
   assert.deepEqual(mobileOrder(grid), [
     'Blocks won', 'Network rank', 'Last 24h', 'Observed share', 'Current block',
     'Chain',
-    'Producer', 'Rewards', 'What it is worth', 'Trends',
+    'Producer', 'Software & host', 'Rewards', 'What it is worth', 'Trends',
     'XL1 Network', 'Alerts',
-    'Operations', 'Candidate race', 'Latency', 'Software & host',
+    'Operations', 'Candidate race', 'Latency',
     'Block time', 'Producer movement', 'Fleet', 'Raspberry Pi', 'Continuity',
     'Producer standings',
   ])
@@ -181,14 +182,14 @@ test('mobile order matches the sequence the brief specifies, KPIs and cards alik
 test('a card missing for want of data just disappears -- it does not strand its group', () => {
   const noLatencyOrRace = { ...FULL, derived: { ...FULL.derived, latency: undefined, race: undefined } }
   const groups = groupsOf(renderTo(noLatencyOrRace).grid.innerHTML)
-  assert.deepEqual(groups['Production performance'], ['Operations', 'Software & host'],
+  assert.deepEqual(groups['Production performance'], ['Operations'],
     'the group renders with whatever it has; a missing card leaves no gap, no error, no empty stack')
 })
 
 test('the standings table marks this node with a YOU badge, not just a tinted row', () => {
   const grid = renderTo(FULL).grid.innerHTML
   const standings = grid.slice(grid.indexOf('Producer standings'))
-  assert.match(standings, /class="peer-name">Leader<\/span>[\s\S]*?<tr class="self">/,
+  assert.match(standings, /class="peer-name">FreeCryptoA<\/span>[\s\S]*?<tr class="self">/,
     'the leader row renders before the self row in this fixture')
   assert.match(standings, /<tr class="self">[\s\S]{0,400}you-badge">YOU</,
     'the self row must carry the YOU badge')
@@ -236,4 +237,24 @@ test('mobile promotes rows and groups with display:contents rather than a second
   assert.match(mobile, /\.kpi-row,\s*\.group,\s*\.group-grid\s*\{\s*display:\s*contents/,
     'no second render path: mobile order comes from promoting the same markup, not rebuilding it')
   assert.match(mobile, /order:\s*var\(--mo\)/)
+})
+
+test('producers are named and coloured as on oxyon.io; unlisted addresses are Other, never a local label', () => {
+  const grid = renderTo(FULL).grid.innerHTML
+  const standings = grid.slice(grid.indexOf('Producer standings'))
+  assert.match(standings, /<i class="pdot" style="background:var\(--op-freecryptoa-dark\)"><\/i><span class="peer-name">FreeCryptoA<\/span>/,
+    'a registered producer gets its oxyon.io name and operator colour')
+  assert.doesNotMatch(standings, /peer-name">Leader</, 'the local label is replaced by the registry name')
+  assert.match(standings, /<i class="pdot op-other"[^>]*><\/i><span class="mono"[^>]*>cccccc…cccc<\/span><span class="op-tag">Other<\/span>/,
+    'an unlisted address is shown by address, marked Other, with no colour')
+  const mainnet = { ...FULL, chain: { ...FULL.chain, network: 'mainnet' }, peers: { ...FULL.peers, top: [{ address: 'ca08120874f071739d932b24da41cc13299123b3', blocks: 9, sharePercent: 9, rank: 1, isSelf: false }] } }
+  assert.match(renderTo(mainnet).grid.innerHTML, /peer-name">Oxyon · Pi</, 'names follow the network: ca08 is "Oxyon · Pi" on Mainnet')
+})
+
+test('the header shows the dashboard and xl1-cli versions', () => {
+  const els = renderTo(FULL)
+  assert.equal(els.verchip.hidden, false)
+  assert.match(els.verchip.innerHTML, /dashboard <b>9\.9\.9<\/b>.*xl1-cli <b>5\.3\.2<\/b>/)
+  const behind = renderTo({ ...FULL, release: { ...FULL.release, installed: '5.3.1', lag: 'patch' } })
+  assert.match(behind.verchip.innerHTML, /xl1-cli <b class="warn">5\.3\.1<\/b>/, 'a CLI behind the latest release is flagged')
 })

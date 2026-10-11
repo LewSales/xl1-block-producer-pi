@@ -331,6 +331,26 @@
     letter-spacing: 0.03em; border: 1px solid var(--line); color: var(--muted);
     white-space: nowrap;
   }
+  /* The versions this node runs, in the header where nobody has to scroll for them. */
+  .verchip {
+    display: inline-flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600;
+    padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+    border: 1px solid color-mix(in srgb, var(--acc-producer) 45%, var(--line));
+    background: color-mix(in srgb, var(--acc-producer) 10%, transparent); color: var(--fg);
+  }
+  .verchip .sep { color: var(--muted); font-weight: 400; }
+  .verchip b.warn { color: var(--warn); }
+  /* Producer identity: the same operator groups and colours as oxyon.io/xl1/producers/.
+     "Other" (no established owner) gets no operator colour, only a dashed outline. */
+  :root {
+    --op-oxyon-light: #E6C56A; --op-oxyon-dark: #98701D;
+    --op-jim-light: #80B9F1; --op-jim-dark: #24548C;
+    --op-freecryptoa-light: #83D4A7; --op-freecryptoa-dark: #176A48;
+    --op-other: #8d9199;
+  }
+  .pdot { display: inline-block; flex: none; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+  .pdot.op-other { background: transparent; outline: 1px dashed var(--op-other); outline-offset: -1px; }
+  .op-tag { font-size: 10.5px; color: var(--muted); margin-left: 4px; }
   .logfoot { color: var(--muted); font-size: 11px; margin-top: 7px; }
   .banner {
     margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
@@ -346,6 +366,7 @@
   <span class="chip" title="An independent project. Not built, endorsed, or supported by XYO.">unofficial</span>
   <span class="device mono" id="device" hidden></span>
   <span class="net" id="net">—</span>
+  <span class="verchip" id="verchip" hidden></span>
   <span class="addr mono" id="hdraddr" hidden></span>
   <span class="spacer"></span>
   <span class="updated" id="updated" hidden></span>
@@ -381,6 +402,57 @@ const dur = (s) => {
 // verifies once and then never reads again — used wherever a full address
 // would otherwise crowd out the number the card is actually about.
 const shortAddr = (a) => `${String(a ?? '').slice(0, 6)}…${String(a ?? '').slice(-4)}`
+
+// Producer names and colours: a copy of oxyon.io's identity registry
+// (oxyon-io-site src/static/xl1/app/labels.mjs, 2026-10-10), so this page names
+// every producer the way oxyon.io/xl1/producers/ does. An address with no
+// established owner is shown by address as Other -- never given a guessed name.
+const OPERATORS = {
+  sequence: {
+    ca08120874f071739d932b24da41cc13299123b3: ['Oxyon · 23b3', 'oxyon', 'dark'],
+    '2152e6aec996742fb6e52ae1aad87bd44f2ccc91': ['Oxyon · Windows', 'oxyon', 'light'],
+    a6567633ac83a7017f3a2ef20fbbed890a2adae9: ['Jim · Pi 4', 'jim', 'light'],
+    '30251291ac55017d90a3c892ab5604bdacf9bcde': ['Jim · Pi 4 (2)', 'jim', 'dark'],
+    fb4c535221f91c1811bd42f70b6ec305aa658551: ['FreeCryptoA', 'freecryptoa', 'dark'],
+  },
+  mainnet: {
+    ca08120874f071739d932b24da41cc13299123b3: ['Oxyon · Pi', 'oxyon', 'dark'],
+    '2152e6aec996742fb6e52ae1aad87bd44f2ccc91': ['Oxyon · Windows', 'oxyon', 'light'],
+    a6567633ac83a7017f3a2ef20fbbed890a2adae9: ['Jim · Pi 4', 'jim', 'light'],
+    '30251291ac55017d90a3c892ab5604bdacf9bcde': ['Jim · Pi 4 (2)', 'jim', 'dark'],
+    fb4c535221f91c1811bd42f70b6ec305aa658551: ['FreeCryptoA', 'freecryptoa', 'dark'],
+    c3d1a1c9781a41e69c0d0892ac6541f50151979f: ['FreeCryptoA (2)', 'freecryptoa', 'light'],
+  },
+}
+let NET = 'sequence'
+const opOf = (addr) => {
+  const e = OPERATORS[NET]?.[String(addr ?? '').replace(/^0x/i, '').toLowerCase()]
+  return e ? { name: e[0], group: e[1], shade: e[2] } : { group: 'other' }
+}
+const opColour = (addr) => { const o = opOf(addr); return o.group === 'other' ? null : 'var(--op-' + o.group + '-' + o.shade + ')' }
+const pdot = (addr) => {
+  const c = opColour(addr)
+  return c ? '<i class="pdot" style="background:' + c + '"></i>' : '<i class="pdot op-other" title="Other: no established owner"></i>'
+}
+/** Rename every producer row in the payload from the registry: a listed address
+ *  gets its oxyon.io name; any other address loses whatever local label it had
+ *  and is shown by address, as Other. Rows are recognised by a 40-hex address. */
+function applyRegistry(d) {
+  NET = d.chain?.network ?? NET
+  const seen = new Set()
+  const walk = (v) => {
+    if (!v || typeof v !== 'object' || seen.has(v)) return
+    seen.add(v)
+    if (Array.isArray(v)) { v.forEach(walk); return }
+    if (typeof v.address === 'string' && /^(0x)?[0-9a-f]{40}$/i.test(v.address)) {
+      const o = opOf(v.address)
+      v.label = o.name ?? (v.isSelf ? 'this node' : undefined)
+      v.op = o.group
+    }
+    for (const k of Object.keys(v)) walk(v[k])
+  }
+  walk(d.peers); walk(d.network); walk(d.movement); walk(d.race)
+}
 // A focusable info glyph rather than a bare title="" on running text: the
 // same explanation, but reachable with a keyboard and revealed on
 // :focus-visible as well as :hover.
@@ -536,10 +608,22 @@ function kpiRow(d) {
 }
 
 function render(d) {
+  applyRegistry(d)
   const failed = false
   const state = headerState(d, failed)
   setStatusPill(state)
   $('net').textContent = d.chain?.ok ? `${d.chain.networkName} · chain ${d.chain.chainId.slice(0, 10)}…` : 'chain unreachable'
+
+  // Dashboard and CLI versions, up front: the first thing asked about a node.
+  const vc = $('verchip')
+  const cliNow = d.release?.installed
+  if (d.build?.version || cliNow) {
+    vc.innerHTML = [d.build?.version && ('dashboard <b>' + esc(d.build.version) + '</b>'),
+      cliNow && ('xl1-cli <b' + (d.release?.lag && d.release.lag !== 'current' ? ' class="warn"' : '') + '>' + esc(cliNow) + '</b>')]
+      .filter(Boolean).join('<span class="sep">·</span>')
+    vc.title = d.release?.latest ? 'latest xl1-cli: ' + d.release.latest : ''
+    vc.hidden = false
+  } else vc.hidden = true
 
   const deviceEl = $('device')
   const deviceLabel = d.system?.hostname || d.node?.host?.hostname
@@ -579,6 +663,7 @@ function render(d) {
   // is nothing to keep in sync between where a card is written and where it
   // appears — it appears wherever it was pushed.
   const groups = { performance: [], network: [], production: [], analytics: [] }
+  let softwareCard = ''
   let bannerHtml = ''
   let logHtml = ''
   const dv = d.derived ?? {}
@@ -933,8 +1018,8 @@ function render(d) {
         ])}
         ${co.producers > 0 ? `<div class="conc-bar" title="Observed share, largest producer first">${
           topRows.map((r, i) => `<i class="${i < (co.nakamoto ?? 0) ? 'nk' : ''}" style="width:${Math.max(0.5, r.sharePercent ?? 0)}%${
-            r.isSelf ? ';background:var(--ok)' : ''}" title="${esc(r.label ?? shortAddr(r.address))} — ${r.sharePercent}%"></i>`).join('')
-        }</div><div class="sub" style="margin-top:4px"><span class="ok">green is this node</span> · outlined segments are counted toward the Nakamoto coefficient</div>` : ''}
+            (opColour(r.address) ? ';background:' + opColour(r.address) : ';background:transparent;outline:1px dashed var(--op-other);outline-offset:-1px') + (r.isSelf ? ';box-shadow:inset 0 0 0 2px var(--fg)' : '')}" title="${esc(r.label ?? shortAddr(r.address))} — ${r.sharePercent}%"></i>`).join('')
+        }</div><div class="sub" style="margin-top:4px">coloured by operator, as on oxyon.io (dashed = Other) · the ringed segment is this node · outlined segments are counted toward the Nakamoto coefficient</div>` : ''}
         <div class="banner">Observed by this dashboard over blocks ${num(ob.fromBlock)}–${num(ob.toBlock)}, not a
           protocol-wide census. A producer that never appeared in that window is not counted.</div>
       </section>`)
@@ -1408,7 +1493,9 @@ function render(d) {
       : aptAge > 48 ? `<span class="warn">${Math.round(aptAge / 24)}d</span>`
       : `<span class="ok">${aptAge < 1 ? '<1' : Math.round(aptAge)}h</span>`
 
-    groups.production.push(`<section style="--c: var(--acc-ops); --mo:86">
+    // Second box on the page, straight after Producer: which versions this node
+    // runs is the first thing anyone checking on it asks.
+    softwareCard = (`<section style="--c: var(--acc-ops); --mo:61">
       <h2><span class="ico" aria-hidden="true">📦</span>Software &amp; host</h2>
       <div class="big">${esc(rel.installed ?? '—')}</div>
       <div class="sub">xl1&#8209;cli in the running container</div>
@@ -1465,7 +1552,8 @@ function render(d) {
         ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.address)}">${esc(short(r.address))}</a>`
         : `<span class="mono" title="${esc(r.address)}">${esc(short(r.address))}</span>`
       const you = r.isSelf ? ' <span class="you-badge">YOU</span>' : ''
-      return (name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex) + you
+      const other = r.op === 'other' ? '<span class="op-tag">Other</span>' : ''
+      return pdot(r.address) + (name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex) + other + you
     }
 
     const rows = [...(pb.top ?? [])]
@@ -1496,7 +1584,7 @@ function render(d) {
     const tr_ = (r, cls = '') => `<tr class="${cls}${r.isSelf ? ' self' : ''}">
       <td>${num(r.rank)}</td>
       <td>${nameCell(r)}</td>
-      <td class="barcell"><div class="peer-bar"><i style="width:${Math.max(r.sharePercent ? 2 : 0, ((r.sharePercent ?? 0) / lead) * 100)}%"></i></div></td>
+      <td class="barcell"><div class="peer-bar"><i style="width:${Math.max(r.sharePercent ? 2 : 0, ((r.sharePercent ?? 0) / lead) * 100)}%;background:${opColour(r.address) ?? 'color-mix(in srgb, var(--op-other) 55%, transparent)'}"></i></div></td>
       <td>${cell(wToday, r.address)}</td>
       <td>${cell(wWeek, r.address)}</td>
       <td>${num(r.blocks)}</td>
@@ -1583,6 +1671,7 @@ function render(d) {
     ? `<section class="group"><h2 class="group-heading"><span class="ico" aria-hidden="true">${icon}</span>${esc(title)}</h2><div class="group-grid">${items.join('')}</div></section>`
     : ''
 
+  if (softwareCard) groups.performance.splice(groups.performance.length ? 1 : 0, 0, softwareCard)
   $('grid').innerHTML = bannerHtml
     + `<div class="kpi-row">${kpiRow(d)}</div>`
     + groupSection('⚡', 'Producer performance', groups.performance)

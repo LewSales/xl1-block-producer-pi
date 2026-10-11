@@ -969,7 +969,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.6', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.3.7', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -2208,6 +2208,7 @@ test('live attribution starts at the hand-over block and never overlaps the hist
 test('rewardsView: no lifetime claim until the walk reaches block 1', async () => {
   const viewer = await setup()
   m.peers.set(SELF, 40) // live counts since scannedFrom (801..1000: 40 SELF blocks)
+  m.ledger.recordedBlocks = 20 // the ledger's own blocks, 901..1000
   try {
     await m.backfillHistory(viewer, 1000)
     let v = m.rewardsView(1000, 'sequence')
@@ -2216,12 +2217,49 @@ test('rewardsView: no lifetime claim until the walk reaches block 1', async () =
     await walk(viewer)
     v = m.rewardsView(1000, 'sequence')
     assert.equal(v.history.coverage, 'complete'); assert.equal(v.history.percent, 100)
-    assert.equal(v.lifetime.blocks, 200, '160 pre-scan + 40 since scanning began')
+    assert.equal(v.lifetime.blocks, 200, '160 pre-scan + 20 in-scan + 20 in the ledger, all read from the chain')
+    assert.equal(v.lifetime.liveCounterBlocks, 200, 'the live counter agrees here')
     assert.equal(v.lifetime.firstBlock, 5)
     assert.equal(v.lifetime.basis, 'chain records from block 1')
     assert.equal(v.inScanRecorded.blocks, 20, 'in-scan rewards read from the chain')
     assert.equal(v.reconstructed, undefined, 'and they replace the reconstruction')
-  } finally { m.peers.delete(SELF) }
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('lifetime blocks come from chain-read counts, not a live counter that over-counted', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 42) // two more than the chain shows (the pre-2.3.5 overlap)
+  m.ledger.recordedBlocks = 20
+  try {
+    await walk(viewer)
+    const v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.lifetime.blocks, 200, 'chain-read: 160 + 20 + 20')
+    assert.equal(v.lifetime.liveCounterBlocks, 202, 'the live counter is shown beside it, not used')
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('the public rewards projection: own record only, labelled, checkable', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 40); m.ledger.recordedBlocks = 20
+  try {
+    await m.backfillHistory(viewer, 1000)
+    let pub = m.publicView(m.peerBoard()).rewards
+    assert.ok(pub, 'rewards are published')
+    assert.equal(pub.lifetime, undefined, 'no lifetime while the walk is partial')
+    assert.equal(pub.history.coverage, 'partial')
+    assert.match(pub.evidence.blockFile, /^https:\/\/blocks\.(mainnet|sequence)\.xyo\.space\/block\/number\/\{n\}\.json$/)
+    assert.equal(pub.evidence.method, 'https://oxyon.io/xl1/about-data/#rewards')
+    m.chainHistory.error = 'CANARY-GATEWAY-ERROR http://10.0.0.9'
+    await walk(viewer)
+    pub = m.publicView(m.peerBoard()).rewards
+    const text = JSON.stringify(pub)
+    assert.equal(pub.lifetime.blocks, 200, 'lifetime appears once the walk reaches block 1')
+    assert.equal('lifetimeSigners' in pub, false, 'other producers\' totals are not published')
+    assert.equal('recipient' in pub, false)
+    assert.equal(text.includes('CANARY-GATEWAY-ERROR'), false, 'error text never leaves the house')
+    assert.equal(pub.recorded.since !== undefined || pub.recorded.blocks !== undefined, true, 'recorded keeps its label')
+    if (pub.nextStep) assert.equal(pub.nextStep.status, 'projection')
+  } finally { m.peers.delete(SELF); resetLedger(); m.chainHistory.error = undefined }
 })
 
 test('rewardsView reports a disagreement between history and the live count', async () => {

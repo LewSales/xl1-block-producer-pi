@@ -589,8 +589,14 @@ function rewardsView(currentBlock = state.chain?.currentBlock, net = NETWORK) {
     const pre = h.self.preScan
     const ownFirst = h.self.first ?? ledger.since
     const lifetimeRecorded = recordedSinceScan + pre.recorded
+    // Blocks from the chain-read buckets only -- before the scan, inside it, and
+    // the ledger since -- which are disjoint and duplicate-guarded. The live
+    // counter is kept beside it: before 2.3.5 overlapping polls could count a
+    // block twice there (Sequence: +2 against an independent block-file count).
+    const chainReadBlocks = pre.blocks + h.self.inScan.blocks + ledger.recordedBlocks + ledger.estimatedBlocks + ledger.unknownBlocks
     view.lifetime = {
-      blocks: pre.blocks + (peers.get(selfAddr) ?? 0),
+      blocks: chainReadBlocks,
+      liveCounterBlocks: pre.blocks + (peers.get(selfAddr) ?? 0),
       earnedXl1: x(total + pre.recorded),
       recordedXl1: x(lifetimeRecorded),
       feesXl1: x(ledger.fees + h.self.inScan.fees + pre.fees),
@@ -3321,6 +3327,32 @@ const snapshot = () => ({
 // without anyone deciding it should.
 const PUBLIC_LABEL = envStr('DASH_PUBLIC_LABEL', '')
 
+/** The public projection of rewardsView(): this producer's chain record only. */
+function publicRewards() {
+  const r = rewardsView()
+  const pick = (o, keys) => (o ? Object.fromEntries(keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]])) : undefined)
+  return {
+    network: r.network,
+    perBlock: r.perBlock,
+    nextStep: r.nextStep && { ...r.nextStep, status: 'projection' },
+    recorded: r.recorded,
+    estimated: r.estimated,
+    unknownBlocks: r.unknownBlocks,
+    reconstructed: r.reconstructed,
+    inScanRecorded: pick(r.inScanRecorded, ['xl1', 'blocks', 'missing', 'feesXl1', 'from', 'to', 'discrepancy']),
+    fees: r.fees,
+    earned: r.earned,
+    history: r.history && pick(r.history, ['coverage', 'coveredDownTo', 'to', 'percent', 'preScan']),
+    lifetime: r.lifetime,
+    // Where anyone can check a figure without trusting this file.
+    evidence: {
+      blockFile: `https://blocks.${r.network}.xyo.space/block/number/{n}.json`,
+      method: 'https://oxyon.io/xl1/about-data/#rewards',
+      note: 'Each figure is read from reward transfers recorded in the blocks; a reward balance is never treated as earnings.',
+    },
+  }
+}
+
 function publicView(board) {
   const dv = derived(board)
   const nw = networkView(board)
@@ -3464,6 +3496,13 @@ function publicView(board) {
       }
     })(),
 
+    // Rewards, as the chain records them. The same figures as the dashboard's
+    // own reward accounting, minus anything that is not about this producer's
+    // public record: no other producers' totals, no error text. Each figure
+    // keeps its source label (recorded / estimated / reconstructed / unknown),
+    // and "lifetime" appears only once the history walk has reached block 1.
+    rewards: publicRewards(),
+
     // Which build produced this, so a stale page is identifiable as one.
     build: {
       version: BUILD_STAMP.version ?? DASH_VERSION,
@@ -3525,7 +3564,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { attributedReward, historyBlock, backfillHistory, singleFlight, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

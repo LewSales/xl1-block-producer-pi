@@ -38,6 +38,8 @@ process.env.DASH_PEER_LABELS ??= [
 // Day bucketing is read at import. Pinned to UTC so the window assertions below
 // mean the same thing on a laptop in Denver and in CI.
 process.env.DASH_DAY_TZ ??= 'UTC'
+// History checkpoints go to a temp file, never the real state directory.
+process.env.DASH_HISTORY_FILE ??= join(tmpdir(), `xl1-history-test-${process.pid}.json`)
 const m = await import('../dashboard/server.mjs')
 
 // ---------------------------------------------------------------- pure logic
@@ -967,7 +969,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.3', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.3.4', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -2059,4 +2061,198 @@ test('the page carries no hardcoded per-block reward', async () => {
   const page = await readFile(new URL('../dashboard/index.html', import.meta.url), 'utf8')
   assert.doesNotMatch(page, /~50 XL1|worthOf\(50\)|pays in fixed 50/, 'per-block reward must come from dv.rewards')
   assert.match(page, /dv\.rewards/)
+})
+
+// ------------------------------------------------------------ lifetime history
+// 2.3.4: blocks and rewards from before the dashboard began scanning, read from
+// the chain by a bounded walk down to block 1. Synthetic chains below; the
+// real-block fixtures cover parsing.
+const STEP = m.STEP_REWARD_ADDRESS
+const OTHER = 'b'.repeat(40)
+const hx = (x) => x.toString(16)
+// A block signed by `signer` paying `producer` XL1 to `rewardTo` (default: the signer).
+const blk = (n, signer, producer, { rewardTo = signer, payloads = true, fee } = {}) => {
+  const bw = { block: n, addresses: [signer] }
+  if (!payloads) return [bw, undefined]
+  const p = [{ schema: 'network.xyo.transfer', from: '0'.repeat(40), transfers: { [STEP]: hx(xl1(String(producer * 9))), [rewardTo]: hx(xl1(String(producer))) } }]
+  if (fee) p.push({ schema: 'network.xyo.transfer', from: 'c'.repeat(40), transfers: { [rewardTo]: hx(xl1(fee)) } })
+  return [bw, p]
+}
+function historyViewer(chain, { short = new Set() } = {}) {
+  const calls = []
+  return {
+    calls,
+    block: {
+      blocksByNumber: async (to, limit) => {
+        calls.push([to, limit])
+        const out = []
+        for (let n = to; n > to - limit && n >= 1; n--) if (chain.has(n) && !short.has(n)) out.push(chain.get(n))
+        return out
+      },
+    },
+  }
+}
+function resetHistoryState() {
+  const blank = () => ({ blocks: 0, recorded: 0n, recordedBlocks: 0, missing: 0, fees: 0n })
+  Object.assign(m.chainHistory, { scannedFrom: undefined, ledgerSince: undefined, attrSince: undefined, cursor: undefined, done: false, error: undefined, counts: new Map(), attributed: new Map(), self: { preScan: blank(), inScan: blank(), first: undefined }, lastWrite: 0 })
+  m.liveAttributed.clear()
+  Object.assign(m.production, { attrSince: undefined, error: undefined })
+}
+/** Chain 1..N: SELF signs every 5th block; the reward era changes at `era`. */
+function syntheticChain(N, { era = 0, early = 25, late = 50 } = {}) {
+  const c = new Map()
+  for (let n = 1; n <= N; n++) c.set(n, blk(n, n % 5 === 0 ? SELF : OTHER, n < era ? early : late, { fee: n % 5 === 0 ? '0.0001' : undefined }))
+  return c
+}
+async function setup({ N = 1000, scannedFrom = 801, ledgerSince = 901, cursor = 1000, chain = syntheticChain(1000) } = {}) {
+  resetHistoryState(); resetLedger()
+  Object.assign(m.production, { scannedFrom, cursor })
+  m.ledger.since = ledgerSince
+  m.initHistory()
+  return historyViewer(chain)
+}
+const walk = async (viewer, max = 50) => { for (let i = 0; i < max && !m.chainHistory.done; i++) await m.backfillHistory(viewer, m.production.cursor) }
+
+test('attribution excludes the step-reward share and follows the reward address', async () => {
+  const [, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  assert.equal(m.attributedReward(payloads), xl1('47.5'), 'the step share (427.5) is not the producer’s')
+  const [, seq] = JSON.parse(await fixture('sequence-block-669230.json'))
+  assert.equal(m.attributedReward(seq), xl1('50'))
+  assert.equal(m.attributedReward([blk(1, OTHER, 50, { rewardTo: 'd'.repeat(40) })[1]].flat()), xl1('50'), 'separate reward address still attributed')
+  assert.equal(m.attributedReward(undefined), undefined)
+})
+
+test('history boundaries: it covers exactly the blocks below the live hand-over', async () => {
+  await setup()
+  assert.equal(m.chainHistory.attrSince, 1001, 'live attribution starts at the next scanned block')
+  assert.equal(m.production.attrSince, 1001)
+  assert.equal(m.chainHistory.cursor, 1000)
+  assert.equal(m.historyBlock(1001, SELF, undefined), 'out-of-range', 'never touches what the live scan attributes')
+})
+
+test('a full walk: pre-scan blocks counted once, in-scan blocks rewarded but not recounted', async () => {
+  const viewer = await setup()
+  await walk(viewer)
+  const h = m.chainHistory
+  assert.equal(h.done, true)
+  // SELF signs every 5th block: 160 below 801 (pre-scan), 20 in 801..900 (in-scan, pre-ledger).
+  assert.equal(h.counts.get(SELF), 160, 'pre-scan count only -- in-scan blocks are already in the live counts')
+  assert.equal(h.self.preScan.blocks, 160)
+  assert.equal(h.self.inScan.blocks, 20)
+  assert.equal(h.self.inScan.recorded, xl1('50') * 20n)
+  assert.equal(h.self.preScan.fees, xl1('0.0001') * 160n)
+  assert.equal(h.self.first, 5)
+  // Blocks >= ledgerSince belong to the 2.3.3 ledger and are not in the self buckets.
+  assert.equal(h.self.preScan.blocks + h.self.inScan.blocks, 180)
+})
+
+test('historical eras are taken from each block, never today’s rate', async () => {
+  const viewer = await setup({ chain: syntheticChain(1000, { era: 400 }) })
+  await walk(viewer)
+  const pre = m.chainHistory.self.preScan
+  // SELF blocks below 400: 79 at 25 XL1; 400..800: 81 at 50 XL1.
+  assert.equal(pre.recorded, xl1('25') * 79n + xl1('50') * 81n)
+})
+
+test('a partial gateway answer never advances the checkpoint', async () => {
+  resetHistoryState(); resetLedger()
+  Object.assign(m.production, { scannedFrom: 801, cursor: 1000 }); m.ledger.since = 901; m.initHistory()
+  const viewer = historyViewer(syntheticChain(1000), { short: new Set([950]) })
+  await m.backfillHistory(viewer, 1000)
+  assert.equal(m.chainHistory.cursor, 1000, 'block 950 missing: the batch is retried, not skipped')
+  assert.match(m.chainHistory.error, /199 of 200 blocks/)
+  assert.equal(m.chainHistory.self.inScan.blocks, 0, 'nothing from the incomplete batch was counted')
+})
+
+test('an interrupted walk resumes from its checkpoint with no block counted twice', async () => {
+  const chain = syntheticChain(1000)
+  let viewer = await setup({ chain })
+  await m.backfillHistory(viewer, 1000) // two batches: 601..1000
+  const saved = JSON.parse(JSON.stringify(m.historyDoc()))
+  assert.equal(saved.cursor, 600)
+  // "restart"
+  resetHistoryState()
+  assert.equal(m.restoreHistory(saved), true)
+  Object.assign(m.production, { attrSince: m.chainHistory.attrSince })
+  viewer = historyViewer(chain)
+  await walk(viewer)
+  assert.equal(m.chainHistory.done, true)
+  assert.equal(m.chainHistory.counts.get(SELF), 160, 'same totals as an uninterrupted walk')
+  assert.equal(m.chainHistory.self.inScan.blocks, 20)
+  assert.equal(viewer.calls[0][0], 600, 'resumed exactly below the checkpoint')
+})
+
+test('blocks without payloads are counted as unrecorded, never priced', async () => {
+  const chain = syntheticChain(1000)
+  chain.set(500, blk(500, SELF, 50, { payloads: false }))
+  const viewer = await setup({ chain })
+  await walk(viewer)
+  assert.equal(m.chainHistory.self.preScan.missing, 1)
+  assert.equal(m.chainHistory.self.preScan.recordedBlocks, 159)
+})
+
+test('live attribution starts at the hand-over block and never overlaps the history', async () => {
+  const viewer = await setup()
+  await walk(viewer)
+  // Live scan: blocks 1001..1005 attributed live; anything below attrSince is history's.
+  for (let n = 996; n <= 1005; n++) {
+    const [bw, p] = blk(n, n % 5 === 0 ? SELF : OTHER, 50)
+    if (m.production.attrSince !== undefined && n >= m.production.attrSince) {
+      const a = m.attributedReward(p); m.liveAttributed.set(bw.addresses[0], (m.liveAttributed.get(bw.addresses[0]) ?? 0n) + a)
+    }
+  }
+  assert.equal(m.liveAttributed.get(SELF), xl1('50'), 'only block 1005 is live')
+  assert.equal(m.chainHistory.attributed.get(SELF), xl1('50') * 200n, 'history: every SELF block below 1001')
+})
+
+test('rewardsView: no lifetime claim until the walk reaches block 1', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 40) // live counts since scannedFrom (801..1000: 40 SELF blocks)
+  try {
+    await m.backfillHistory(viewer, 1000)
+    let v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.history.coverage, 'partial')
+    assert.equal(v.lifetime, undefined, 'a partial history is never labelled lifetime')
+    await walk(viewer)
+    v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.history.coverage, 'complete'); assert.equal(v.history.percent, 100)
+    assert.equal(v.lifetime.blocks, 200, '160 pre-scan + 40 since scanning began')
+    assert.equal(v.lifetime.firstBlock, 5)
+    assert.equal(v.lifetime.basis, 'chain records from block 1')
+    assert.equal(v.inScanRecorded.blocks, 20, 'in-scan rewards read from the chain')
+    assert.equal(v.reconstructed, undefined, 'and they replace the reconstruction')
+  } finally { m.peers.delete(SELF) }
+})
+
+test('rewardsView reports a disagreement between history and the live count', async () => {
+  const viewer = await setup()
+  m.ledger.preLedgerBlocks = 21 // the live scan claims one more in-scan block than the chain shows
+  try {
+    await walk(viewer)
+    assert.match(m.rewardsView(1000, 'sequence').inScanRecorded.discrepancy, /history found 20 own blocks where the live scan counted 21/)
+  } finally { resetLedger() }
+})
+
+test('lifetime recorded and the independent attribution agree', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 40)
+  try {
+    await walk(viewer)
+    // Ledger (>= 901) as the live scan would have recorded it: 20 SELF blocks.
+    m.ledger.recorded = xl1('50') * 20n; m.ledger.recordedBlocks = 20
+    const v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.lifetime.recordedXl1, String(50 * 200))
+    assert.equal(v.lifetime.attributedXl1, String(50 * 200), 'two methods, one answer')
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('history checkpoints survive JSON exactly (BigInt strings)', async () => {
+  const viewer = await setup()
+  await walk(viewer)
+  const doc = JSON.parse(JSON.stringify(m.historyDoc()))
+  const before = m.chainHistory.self.preScan.fees
+  resetHistoryState(); m.restoreHistory(doc)
+  assert.equal(m.chainHistory.self.preScan.fees, before)
+  assert.equal(m.chainHistory.done, true)
+  assert.equal(m.restoreHistory({ v: 2 }), false, 'an unknown version is refused')
 })

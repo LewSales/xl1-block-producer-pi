@@ -275,6 +275,27 @@ function recordedRewards(payloads, recipient) {
   return out
 }
 
+// The protocol's step-reward pool (xl1-protocol XYO_STEP_REWARD_ADDRESS). A
+// block's producer reward is every zero-address transfer except this share --
+// the same attribution the official explorer uses, and it follows the reward to
+// whatever reward address the producer configured.
+const STEP_REWARD_ADDRESS = '1216197612161976121619761216197612161976'
+
+/** Producer reward a block attributes to its signer (atto), or undefined when
+ *  the block carries no zero-address reward transfer at all. */
+function attributedReward(payloads) {
+  if (!Array.isArray(payloads)) return undefined
+  let amount
+  for (const p of payloads) {
+    if (p?.schema !== 'network.xyo.transfer' || bare(p.from) !== ZERO_ADDRESS || !p.transfers || typeof p.transfers !== 'object') continue
+    for (const [to, hex] of Object.entries(p.transfers)) {
+      if (bare(to) === STEP_REWARD_ADDRESS) continue
+      try { amount = (amount ?? 0n) + BigInt(`0x${bare(hex)}`) } catch { /* not a number: ignored */ }
+    }
+  }
+  return amount
+}
+
 // Our block rewards, one block at a time, as the production scan finds them.
 // Amounts are atto-XL1 BigInts; persisted as strings with the scan cursor so a
 // restart neither loses nor double-counts a block.
@@ -335,6 +356,137 @@ function restoreLedger(doc) {
   })
 }
 
+// ------------------------------------------------------------------ history
+//
+// Lifetime coverage: a bounded walk from just below the live scan's starting
+// point down to block 1, so blocks and rewards from before this dashboard
+// began scanning come from the chain's own records too. Ranges never overlap:
+//   n <  scannedFrom          -> counts (all signers) + rewards  ("pre-scan")
+//   scannedFrom <= n < attrSince -> rewards only; those blocks are already in
+//                                   the live counts                ("in-scan")
+//   our own rewards for n >= ledgerSince stay with the 2.3.3 ledger.
+// A batch only advances the checkpoint when the gateway returned every block
+// number in it; anything less is retried, never skipped.
+const HISTORY_FILE = envStr('DASH_HISTORY_FILE', '/var/lib/xl1/dashboard/chainHistory.json')
+const HISTORY_BATCHES = envNum('DASH_HISTORY_BATCHES', 2, 1) // per chain poll, 200 blocks each
+const HISTORY_BATCH = 200
+const chainHistory = {
+  scannedFrom: undefined, ledgerSince: undefined, attrSince: undefined,
+  cursor: undefined, // next (highest) block still to read; history covers (cursor, attrSince)
+  done: false, error: undefined,
+  counts: new Map(), // signer -> pre-scan blocks
+  attributed: new Map(), // signer -> producer reward attributed, n < attrSince (atto)
+  self: { preScan: { blocks: 0, recorded: 0n, recordedBlocks: 0, missing: 0, fees: 0n }, inScan: { blocks: 0, recorded: 0n, recordedBlocks: 0, missing: 0, fees: 0n }, first: undefined },
+  lastWrite: 0,
+}
+// Live per-signer attribution, from attrSince upward (persisted in peers.json).
+const liveAttributed = new Map()
+
+/** Account one historical block. Pure apart from `history`; exported for tests. */
+function historyBlock(n, signer, payloads, { self = PRODUCER_ADDRESS || REWARD_ADDRESS, recipient = REWARD_ADDRESS || PRODUCER_ADDRESS } = {}) {
+  const h = chainHistory
+  if (!(n < h.attrSince)) return 'out-of-range'
+  const attr = attributedReward(payloads)
+  if (n < h.scannedFrom) h.counts.set(signer, (h.counts.get(signer) ?? 0) + 1)
+  if (attr !== undefined) h.attributed.set(signer, (h.attributed.get(signer) ?? 0n) + attr)
+  if (self && signer === self && n < h.ledgerSince) {
+    const b = n < h.scannedFrom ? h.self.preScan : h.self.inScan
+    b.blocks += 1
+    const rec = recordedRewards(payloads, recipient)
+    b.fees += rec.fees
+    if (rec.reward !== undefined) { b.recorded += rec.reward; b.recordedBlocks += 1 } else b.missing += 1
+    if (h.self.first === undefined || n < h.self.first) h.self.first = n
+  }
+  return n < h.scannedFrom ? 'pre-scan' : 'in-scan'
+}
+
+/** One bounded step of the history walk. Runs after the live scan, only when it
+ *  is caught up, and never more than HISTORY_BATCHES batches per chain poll. */
+async function backfillHistory(viewer, currentNum) {
+  const h = chainHistory
+  if (h.done || h.cursor === undefined || h.attrSince === undefined) return
+  if (production.error || (production.cursor !== undefined && currentNum - production.cursor > 5)) return
+  for (let b = 0; b < HISTORY_BATCHES && h.cursor >= 1; b++) {
+    const to = h.cursor, from = Math.max(1, to - HISTORY_BATCH + 1), limit = to - from + 1
+    let blocks
+    try { blocks = await viewer.block.blocksByNumber(to, limit) } catch (error) { h.error = error.message?.slice(0, 160); return }
+    const inRange = new Map()
+    for (const entry of blocks ?? []) {
+      const bw = Array.isArray(entry) ? entry[0] : entry
+      const n = Number(bw?.block)
+      if (Number.isInteger(n) && n >= from && n <= to) inRange.set(n, entry)
+    }
+    if (inRange.size !== limit) { h.error = `gateway returned ${inRange.size} of ${limit} blocks for ${from}-${to}; will retry`; return }
+    for (const [n, entry] of inRange) {
+      const bw = Array.isArray(entry) ? entry[0] : entry
+      const signer = bare((bw?.addresses ?? [])[0])
+      if (!signer) continue
+      historyBlock(n, signer, Array.isArray(entry) ? entry[1] : undefined)
+    }
+    h.cursor = from - 1
+    h.error = undefined
+    if (h.cursor < 1) h.done = true
+  }
+  await persistHistory()
+}
+
+function historyDoc() {
+  const h = chainHistory
+  return {
+    v: 1, updatedAt: new Date().toISOString(),
+    scannedFrom: h.scannedFrom, ledgerSince: h.ledgerSince, attrSince: h.attrSince,
+    cursor: h.cursor, done: h.done,
+    counts: Object.fromEntries(h.counts),
+    attributed: Object.fromEntries([...h.attributed].map(([k, v]) => [k, v.toString()])),
+    self: { first: h.self.first, ...Object.fromEntries(['preScan', 'inScan'].map((k) => [k, { ...h.self[k], recorded: h.self[k].recorded.toString(), fees: h.self[k].fees.toString() }])) },
+  }
+}
+async function persistHistory(force = false) {
+  if (chainHistory.cursor === undefined) return
+  if (!force && !chainHistory.done && Date.now() - chainHistory.lastWrite < 60_000) return
+  try {
+    await writeFile(`${HISTORY_FILE}.tmp`, JSON.stringify(historyDoc()))
+    await rename(`${HISTORY_FILE}.tmp`, HISTORY_FILE)
+    chainHistory.lastWrite = Date.now()
+  } catch (error) { chainHistory.error = `could not save history: ${error.message?.slice(0, 120)}` }
+}
+function restoreHistory(doc) {
+  if (!doc || doc.v !== 1) return false
+  const big = (x) => { try { return BigInt(x ?? 0) } catch { return 0n } }
+  const int = (x) => (Number.isFinite(Number(x)) ? Number(x) : undefined)
+  Object.assign(chainHistory, {
+    scannedFrom: int(doc.scannedFrom), ledgerSince: int(doc.ledgerSince), attrSince: int(doc.attrSince),
+    cursor: int(doc.cursor), done: Boolean(doc.done), error: undefined,
+    counts: new Map(Object.entries(doc.counts ?? {}).map(([k, v]) => [k, Number(v) || 0])),
+    attributed: new Map(Object.entries(doc.attributed ?? {}).map(([k, v]) => [k, big(v)])),
+    self: {
+      first: int(doc.self?.first),
+      ...Object.fromEntries(['preScan', 'inScan'].map((k) => {
+        const d = doc.self?.[k] ?? {}
+        return [k, { blocks: int(d.blocks) ?? 0, recorded: big(d.recorded), recordedBlocks: int(d.recordedBlocks) ?? 0, missing: int(d.missing) ?? 0, fees: big(d.fees) }]
+      })),
+    },
+  })
+  return true
+}
+async function loadHistory() {
+  try { restoreHistory(JSON.parse(await readFile(HISTORY_FILE, 'utf8'))) } catch { /* first run: initialised by initHistory */ }
+}
+/** Fix the history's boundaries once, from the live scan and the ledger. */
+function initHistory() {
+  const h = chainHistory
+  if (h.attrSince !== undefined) return
+  if (production.scannedFrom === undefined || ledger.since === undefined || production.cursor === undefined) return
+  h.scannedFrom = production.scannedFrom
+  h.ledgerSince = ledger.since
+  // Live attribution starts with the next scanned block -- unless it already
+  // started (history file lost, peers file kept): then reuse that point, or the
+  // blocks between the two would be attributed twice.
+  h.attrSince = production.attrSince ?? production.cursor + 1
+  production.attrSince = h.attrSince
+  h.cursor = h.attrSince - 1
+}
+
 /** The rewards section of the API: what was recorded, what is estimated or
  *  reconstructed (and on what basis), and what is unknown -- never one number
  *  pretending to be all three. */
@@ -361,7 +513,18 @@ function rewardsView(currentBlock = state.chain?.currentBlock, net = NETWORK) {
   if (ledger.unknownBlocks) view.unknownBlocks = ledger.unknownBlocks
   view.fees = { xl1: x(ledger.fees) }
   let reconstructed = 0n
-  if (ledger.preLedgerBlocks) {
+  // Once the history walk has passed below the scan's starting block, every
+  // pre-ledger block in the scan range has its reward read from the chain, and
+  // that replaces the reconstruction.
+  const h = chainHistory
+  const inScanCovered = h.attrSince !== undefined && h.cursor !== undefined && h.cursor < h.scannedFrom
+  if (inScanCovered) {
+    const s = h.self.inScan
+    view.inScanRecorded = { xl1: x(s.recorded), blocks: s.recordedBlocks, missing: s.missing, feesXl1: x(s.fees), from: h.scannedFrom, to: h.ledgerSince - 1 }
+    if (ledger.preLedgerBlocks !== undefined && s.blocks !== ledger.preLedgerBlocks) {
+      view.inScanRecorded.discrepancy = `history found ${s.blocks} own blocks where the live scan counted ${ledger.preLedgerBlocks}`
+    }
+  } else if (ledger.preLedgerBlocks) {
     const from = ledger.preLedgerFrom, to = (ledger.since ?? currentBlock ?? 0) - 1
     const per = Number.isInteger(from) && to >= from ? REWARD_ERAS[net]?.(from, to) : undefined
     if (per !== undefined) {
@@ -371,8 +534,55 @@ function rewardsView(currentBlock = state.chain?.currentBlock, net = NETWORK) {
       view.reconstructed = { blocks: ledger.preLedgerBlocks, from, to, xl1: undefined, basis: 'unknown: range is not inside one verified era' }
     }
   }
-  const total = ledger.recorded + ledger.estimated + reconstructed
-  view.earned = { xl1: x(total), recordedShare: total > 0n ? Number(ledger.recorded * 10000n / total) / 100 : undefined }
+  const inScanRec = inScanCovered ? h.self.inScan.recorded : 0n
+  const recordedSinceScan = ledger.recorded + inScanRec
+  const total = recordedSinceScan + ledger.estimated + reconstructed
+  view.earned = {
+    xl1: x(total), scope: 'since scanning began',
+    from: h.scannedFrom ?? ledger.preLedgerFrom ?? ledger.since,
+    recordedShare: total > 0n ? Number(recordedSinceScan * 10000n / total) / 100 : undefined,
+  }
+
+  // History coverage: how much of the chain below the scan has been read.
+  const selfAddr = PRODUCER_ADDRESS || REWARD_ADDRESS
+  if (h.attrSince !== undefined && h.cursor !== undefined) {
+    const top = h.attrSince - 1
+    const pre = h.self.preScan
+    view.history = {
+      coverage: h.done ? 'complete' : 'partial',
+      coveredDownTo: h.cursor + 1, to: top,
+      percent: top > 0 ? Number((((top - h.cursor) / top) * 100).toFixed(2)) : 100,
+      error: h.error,
+      preScan: { blocks: pre.blocks, recordedXl1: x(pre.recorded), recordedBlocks: pre.recordedBlocks, missing: pre.missing, feesXl1: x(pre.fees) },
+    }
+  }
+  // Lifetime is claimed only when the history reaches block 1: until then a
+  // "lifetime" total would be a partial one with a confident label.
+  if (h.done) {
+    const pre = h.self.preScan
+    const ownFirst = h.self.first ?? ledger.since
+    const lifetimeRecorded = recordedSinceScan + pre.recorded
+    view.lifetime = {
+      blocks: pre.blocks + (peers.get(selfAddr) ?? 0),
+      earnedXl1: x(total + pre.recorded),
+      recordedXl1: x(lifetimeRecorded),
+      feesXl1: x(ledger.fees + h.self.inScan.fees + pre.fees),
+      unrecordedBlocks: pre.missing + (inScanCovered ? h.self.inScan.missing : 0) + ledger.estimatedBlocks + ledger.unknownBlocks,
+      firstBlock: ownFirst,
+      basis: 'chain records from block 1',
+      // Independent method: every block this node signed, attributed from the
+      // protocol reward transfers (as the explorer does). Should equal recorded.
+      attributedXl1: x((h.attributed.get(selfAddr) ?? 0n) + (liveAttributed.get(selfAddr) ?? 0n)),
+    }
+    // Lifetime standings for reconciliation: blocks and attributed rewards for
+    // every signer, from block 1 to now.
+    const signers = new Set([...h.counts.keys(), ...peers.keys()])
+    view.lifetimeSigners = [...signers].map((a) => ({
+      address: a,
+      blocks: (h.counts.get(a) ?? 0) + (peers.get(a) ?? 0),
+      attributedXl1: x((h.attributed.get(a) ?? 0n) + (liveAttributed.get(a) ?? 0n)),
+    })).sort((p, q) => q.blocks - p.blocks).slice(0, 20)
+  }
   return view
 }
 
@@ -1158,6 +1368,10 @@ async function loadPeers() {
     production.scannedTo = doc.scannedTo
     production.scanned = Number(doc.scanned) || 0
     restoreLedger(doc.ledger)
+    if (doc.attribution && Number.isFinite(Number(doc.attribution.since))) {
+      production.attrSince = Number(doc.attribution.since)
+      for (const [k, v] of Object.entries(doc.attribution.bySigner ?? {})) { try { liveAttributed.set(k, BigInt(v)) } catch { /* skip */ } }
+    }
     // The last block this node landed, from the persisted recent strip. Without
     // it a restarted dashboard knows the head but not our last block until the
     // scan next finds one -- and for that minute "no block of ours seen" was
@@ -1256,6 +1470,8 @@ async function persistPeers(force = false) {
     recent: production.recent.slice(-RECENT_BLOCKS),
     // Reward ledger, written with the cursor it was counted against.
     ledger: ledgerDoc(),
+    // Live per-signer reward attribution and the block it starts at.
+    attribution: { since: production.attrSince, bySigner: Object.fromEntries([...liveAttributed].map(([k, v]) => [k, v.toString()])) },
     days: Object.fromEntries([...days.entries()].sort().map(([key, day]) => [key, {
       scanned: day.scanned,
       counts: Object.fromEntries([...day.counts.entries()].sort((a, b) => b[1] - a[1])),
@@ -1386,6 +1602,13 @@ async function scanProduction(viewer, currentNum) {
 
         production.scanned += 1
         for (const addr of signers) peers.set(addr, (peers.get(addr) ?? 0) + 1)
+        // Per-signer producer reward, from attrSince upward (the history walk
+        // covers everything below it), so lifetime rewards never overlap.
+        if (production.attrSince !== undefined && n >= production.attrSince) {
+          const attr = attributedReward(Array.isArray(entry) ? entry[1] : undefined)
+          const signer = [...signers][0]
+          if (attr !== undefined) liveAttributed.set(signer, (liveAttributed.get(signer) ?? 0n) + attr)
+        }
 
         // A block with no timestamp in either place is counted in the totals and
         // left out of every day window rather than filed under an invented
@@ -1659,6 +1882,9 @@ async function pollChain() {
 
     await scanProduction(viewer, currentNum)
     await backfillDays(viewer)
+    // Lifetime history: last, bounded, and only when the live scan is caught up.
+    initHistory()
+    await backfillHistory(viewer, currentNum)
 
     sample('height', currentNum)
     sample('blocks', production.counted)
@@ -3272,7 +3498,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { attributedReward, historyBlock, backfillHistory, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -3293,6 +3519,9 @@ if (isMain) {
   // Before pollChain: the first scan reads the resumed cursor, and starting it
   // from a fresh window instead would re-count every block in the overlap.
   await loadPeers()
+  await loadHistory()
+  // The history and the live attribution must agree on where one hands over.
+  if (chainHistory.attrSince !== undefined && production.attrSince === undefined) production.attrSince = chainHistory.attrSince
   if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
   await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet(), pollPrice()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
@@ -3336,7 +3565,7 @@ if (isMain) {
       // Flush first: a restart is exactly when the last few minutes of tallying
       // would otherwise be dropped, and deploys are frequent enough for that to
       // add up to a visibly wrong record.
-      persistPeers(true).catch(() => {}).finally(() => {
+      Promise.all([persistPeers(true), persistHistory(true)]).catch(() => {}).finally(() => {
         server.close(() => process.exit(0))
       })
       setTimeout(() => process.exit(0), 3000).unref()

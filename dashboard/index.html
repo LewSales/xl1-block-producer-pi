@@ -744,9 +744,13 @@ function render(d) {
         const rw = dv.rewards ?? {}
         if (!rw.earned) return ''
         return dl([
-          ['Block rewards earned', `${esc(rw.earned.xl1)} XL1 ${info('Recorded = read from the reward transfer inside each of this node’s blocks. Reconstructed = blocks counted before recording began, priced only where one verified reward era covers them. Estimated = blocks whose transfer could not be read, priced by the protocol schedule. Fees are listed separately.')}`],
+          rw.lifetime && ['Lifetime blocks', `${num(rw.lifetime.blocks)} <span class="sub">since block #${num(rw.lifetime.firstBlock)} · read from the chain back to block 1</span>`],
+          rw.lifetime && ['Lifetime rewards', `${esc(rw.lifetime.earnedXl1)} XL1 <span class="sub">${rw.lifetime.unrecordedBlocks ? `${num(rw.lifetime.unrecordedBlocks)} block(s) unrecorded` : 'every block recorded on chain'} · fees ${esc(rw.lifetime.feesXl1)} XL1</span>`],
+          !rw.lifetime && rw.history && ['Lifetime history', `<span class="sub">reading the chain backwards: ${num(rw.history.percent)}% (down to block #${num(rw.history.coveredDownTo)})${rw.history.error ? ' — ' + esc(rw.history.error) : ''}; lifetime totals appear when it reaches block 1</span>`],
+          ['Rewards since scanning began', `${esc(rw.earned.xl1)} XL1 ${info('Recorded = read from the reward transfer inside each of this node’s blocks. Reconstructed = blocks counted before recording began, priced only where one verified reward era covers them. Estimated = blocks whose transfer could not be read, priced by the protocol schedule. Fees are listed separately.')}`],
           rw.recorded?.blocks && ['Recorded on chain', `${esc(rw.recorded.xl1)} XL1 <span class="sub">${num(rw.recorded.blocks)} block(s) since #${num(rw.recorded.since)}</span>`],
-          rw.reconstructed && ['Before recording', rw.reconstructed.xl1 !== undefined
+          rw.inScanRecorded && ['Before recording', `${esc(rw.inScanRecorded.xl1)} XL1 <span class="sub">${num(rw.inScanRecorded.blocks)} block(s) · read from the chain${rw.inScanRecorded.discrepancy ? ` · <span class="warn">${esc(rw.inScanRecorded.discrepancy)}</span>` : ''}</span>`],
+          !rw.inScanRecorded && rw.reconstructed && ['Before recording', rw.reconstructed.xl1 !== undefined
             ? `${esc(rw.reconstructed.xl1)} XL1 <span class="sub">${num(rw.reconstructed.blocks)} block(s) × ${esc(rw.reconstructed.perBlockXl1)} · reconstructed</span>`
             : `<span class="warn">unknown</span> <span class="sub">${num(rw.reconstructed.blocks)} block(s) — not inside one verified reward era</span>`],
           rw.estimated && ['Estimated', `${esc(rw.estimated.xl1)} XL1 <span class="sub">${num(rw.estimated.blocks)} block(s) without a readable transfer</span>`],

@@ -442,7 +442,33 @@ Whether a complaint *counts* depends on the network. Sequence is federated:
 producers are authorized by an allowlist and staking is not how it decides who
 may produce, so a stake complaint there is the node reciting a rule this network
 does not enforce. Those are shown greyed and marked "not enforced on sequence",
-kept off the problem list, and never alerted. Override per deployment with
+kept off the problem list, and never alerted.
+
+**Stake, as of xl1-cli 5.6.2 (checked 2026-10-11).** What is enforced and what
+is merely logged are different things:
+
+- The producer's own check (`validateCurrentStake`) asks only for *some* active
+  stake on the producer address -- `requiredMinimumStake = 1n`, one atto. When it
+  finds none it logs `Producer … has insufficient stake.` and `Add stake to
+  contract address … for the producer to declare it's intent.`, and skips
+  re-declaring its intent. It does not stop the node building blocks.
+- The protocol's eligibility thresholds (`minProducerStakeAtto`,
+  `minProducerSelfBondAtto`, and a stake age of `minStakeAgeEvmBlocks` = 100,800
+  EVM blocks) come from the network's configuration and default to zero.
+- Observed: all four Oxyon producers -- Mainnet and Sequence -- log that
+  complaint every few hours and still land blocks and receive rewards. Stake is
+  therefore **not enforced for production today, on either network**. The
+  dashboard's chain-evidence check (a complaint contradicted by landed blocks is
+  shown as contradicted, not as "cannot produce") exists because of this.
+- XYO's founder said on 2026-10-09 that XYO's own producers are staked, that it
+  "only requires like 1000 XYO or something", and that he did not think the
+  requirement was enforced yet, "but it may". Treat that as a signal of intent,
+  not a documented threshold: no 1,000 XYO figure appears in the 5.6.2 code, and
+  enforcement may arrive in a later release or network configuration.
+
+The stake the check looks for is stake *on the producer address* in the
+network's staking contract (the "contract address" in the log line). Stake held
+elsewhere, or staked toward a different address, does not count toward it. Override per deployment with
 `DASH_ELIGIBILITY_IGNORE` in `/etc/xl1/dashboard.env` — a comma-separated list
 of keys (`insufficient-stake`, `no-intent`, `unseasoned`, `self-bond`,
 `not-allowed`, `too-slow`, `no-balance`).
@@ -626,9 +652,15 @@ blocks — they are simply never accepted. `Published block: …` in the log mea
 reads that same line, so treat it as submissions, not earnings. The reward
 balance is the number that tells you whether blocks are actually landing.
 
-**Producer economics.** At step 0 the block reward is 500 XL1 and the producer
-share is 10%, so roughly 50 XL1 per accepted block. Continued authorization
-requires a stake declaration.
+**Producer economics.** Every block records its own reward, so read it from the
+block rather than assuming a rate (the dashboard does). The block reward started
+at 500 XL1 and falls 5% every 1,000,000 blocks; the producer's share is 10%
+today and was 5% before 2026-07-29 on Mainnet (block #1,345,064) and 2026-07-28
+on Sequence (#528,119). Today a Mainnet block pays the producer 47.5 XL1 and a
+Sequence block 50 XL1, plus any transaction fees. The full table, with each
+boundary linked to XYO's block files: https://oxyon.io/xl1/about-data/#rewards.
+Staking is logged but not enforced for production today (see "When a healthy
+node produces nothing").
 
 **Port 30303** is opened and mapped to match Jim's runbook. The federated
 producer preset submits over outbound JSON-RPC to the public gateway and binds

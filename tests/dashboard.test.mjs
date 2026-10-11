@@ -2154,14 +2154,15 @@ test('historical eras are taken from each block, never today’s rate', async ()
   assert.equal(pre.recorded, xl1('25') * 79n + xl1('50') * 81n)
 })
 
-test('a partial gateway answer never advances the checkpoint', async () => {
+test('a partial gateway answer never advances the checkpoint past the missing block', async () => {
   resetHistoryState(); resetLedger()
   Object.assign(m.production, { scannedFrom: 801, cursor: 1000 }); m.ledger.since = 901; m.initHistory()
   const viewer = historyViewer(syntheticChain(1000), { short: new Set([950]) })
   await m.backfillHistory(viewer, 1000)
-  assert.equal(m.chainHistory.cursor, 1000, 'block 950 missing: the batch is retried, not skipped')
-  assert.match(m.chainHistory.error, /199 of 200 blocks/)
-  assert.equal(m.chainHistory.self.inScan.blocks, 0, 'nothing from the incomplete batch was counted')
+  // Smaller batches read 951..1000 completely; block 950 itself is missing at every size.
+  assert.equal(m.chainHistory.cursor, 950, 'the walk stops exactly above the hole and never passes it')
+  assert.match(m.chainHistory.error, /even at the smallest batch/)
+  assert.equal(m.chainHistory.self.inScan.blocks, 0, 'nothing below the hole was counted')
 })
 
 test('an interrupted walk resumes from its checkpoint with no block counted twice', async () => {
@@ -2334,4 +2335,34 @@ test('a 2.3.4 (v1) history file is discarded, and the walk restarts from the sav
   assert.equal(m.chainHistory.counts.get(SELF), 160)
   assert.equal(m.chainHistory.self.inScan.blocks, 20)
   assert.equal(m.restoreHistory(JSON.parse(JSON.stringify(m.historyDoc()))), true, 'its own format still restores')
+})
+
+test('a range the gateway truncates at full size is walked in smaller batches, still complete and counted once', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const base = historyViewer(chain)
+  // Like the real gateway: a request that spans block 950 stops at 951 and returns only the newer part,
+  // unless the batch is small (<= 50); everything else is answered in full.
+  const calls = []
+  const truncating = { calls, block: { blocksByNumber: async (to, limit) => {
+    calls.push([to, limit])
+    const out = await base.block.blocksByNumber(to, limit)
+    const lowest = to - limit + 1
+    return (lowest <= 950 && to > 950 && limit > 50) ? out.filter((e) => e[0].block > 950) : out
+  } } }
+  await walk(truncating, 80)
+  assert.equal(m.chainHistory.done, true, 'the walk gets past the truncating range instead of retrying forever')
+  assert.equal(m.chainHistory.error, undefined)
+  assert.equal(m.chainHistory.counts.get(SELF), 160, 'pre-scan count unchanged')
+  assert.equal(m.chainHistory.self.inScan.blocks, 20, 'in-scan count unchanged: nothing skipped, nothing doubled')
+  assert.ok(calls.some(([, l]) => l <= 50), 'it fell back to a smaller batch')
+})
+
+test('a batch still partial at the smallest size is retried, never skipped', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const viewer = historyViewer(chain, { short: new Set([995]) }) // missing at every size
+  await m.backfillHistory(viewer, 1000)
+  assert.equal(m.chainHistory.cursor, 1000, 'the checkpoint did not move past the hole')
+  assert.match(m.chainHistory.error, /even at the smallest batch/)
 })

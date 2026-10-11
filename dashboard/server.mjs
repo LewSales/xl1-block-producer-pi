@@ -428,19 +428,29 @@ async function historyStep(viewer, currentNum) {
   if (h.done || h.cursor === undefined || h.attrSince === undefined) return
   if (production.error || (production.cursor !== undefined && currentNum - production.cursor > 5)) return
   for (let b = 0; b < HISTORY_BATCHES && h.cursor >= 1; b++) {
-    const to = h.cursor, from = Math.max(1, to - HISTORY_BATCH + 1), limit = to - from + 1
-    let blocks
-    try { blocks = await viewer.block.blocksByNumber(to, limit) } catch (error) { h.error = error.message?.slice(0, 160); return }
-    // Belt and braces: if anything moved the checkpoint while we waited, this
-    // batch is no longer ours to count.
-    if (h.cursor !== to) return
-    const inRange = new Map()
-    for (const entry of blocks ?? []) {
-      const bw = Array.isArray(entry) ? entry[0] : entry
-      const n = Number(bw?.block)
-      if (Number.isInteger(n) && n >= from && n <= to) inRange.set(n, entry)
+    const to = h.cursor
+    // A partial answer is retried with a smaller batch, never skipped. The
+    // gateway truncates some ranges at full size and answers them completely
+    // in smaller pieces (2026-10-11: blocksByNumber(204002, 200) returned the
+    // newest 47 every time; 50 at a time returned all of them).
+    let size = HISTORY_BATCH, from, limit, inRange
+    for (;;) {
+      from = Math.max(1, to - size + 1); limit = to - from + 1
+      let blocks
+      try { blocks = await viewer.block.blocksByNumber(to, limit) } catch (error) { h.error = error.message?.slice(0, 160); return }
+      // Belt and braces: if anything moved the checkpoint while we waited, this
+      // batch is no longer ours to count.
+      if (h.cursor !== to) return
+      inRange = new Map()
+      for (const entry of blocks ?? []) {
+        const bw = Array.isArray(entry) ? entry[0] : entry
+        const n = Number(bw?.block)
+        if (Number.isInteger(n) && n >= from && n <= to) inRange.set(n, entry)
+      }
+      if (inRange.size === limit) break
+      if (size <= HISTORY_MIN_BATCH) { h.error = `gateway returned ${inRange.size} of ${limit} blocks for ${from}-${to}, even at the smallest batch; will retry`; return }
+      size = Math.max(HISTORY_MIN_BATCH, Math.ceil(size / 2))
     }
-    if (inRange.size !== limit) { h.error = `gateway returned ${inRange.size} of ${limit} blocks for ${from}-${to}; will retry`; return }
     for (const [n, entry] of inRange) {
       const bw = Array.isArray(entry) ? entry[0] : entry
       const signer = bare((bw?.addresses ?? [])[0])
@@ -455,6 +465,7 @@ async function historyStep(viewer, currentNum) {
 }
 
 const HISTORY_FORMAT = 2
+const HISTORY_MIN_BATCH = 10
 function historyDoc() {
   const h = chainHistory
   return {

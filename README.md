@@ -468,7 +468,10 @@ is merely logged are different things:
 
 The stake the check looks for is stake *on the producer address* in the
 network's staking contract (the "contract address" in the log line). Stake held
-elsewhere, or staked toward a different address, does not count toward it. Override per deployment with
+elsewhere, or staked toward a different address, does not count toward it.
+In particular, XYO staked to the network staking pool (`1969…1969`, the usual
+choice in the staking app) is network stake: it is real and active, but it is
+not stake *on the producer*, and the producer will still log the complaint. Override per deployment with
 `DASH_ELIGIBILITY_IGNORE` in `/etc/xl1/dashboard.env` — a comma-separated list
 of keys (`insufficient-stake`, `no-intent`, `unseasoned`, `self-bond`,
 `not-allowed`, `too-slow`, `no-balance`).

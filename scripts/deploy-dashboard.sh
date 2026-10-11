@@ -3,6 +3,11 @@
 #
 #   ./scripts/deploy-dashboard.sh [host]
 #
+# Holds the alerter's dashboard-unreachable key for the restart and refuses to
+# deploy if that hold cannot be set and read back. Refresh sudo on the Pi first
+# (ssh -t xl1pi@xl1pi sudo -v). XL1_DEPLOY_NO_HOLD=1 deploys without one, for a
+# host that has no alerter installed.
+#
 # What this replaces: cross-building an arm64 image and pushing 110 MB over the
 # tunnel for a CSS change. That took ten to fifteen minutes, and three times it
 # exited zero having copied nothing — leaving the Pi quietly serving an older
@@ -48,6 +53,27 @@ printf '\ndeploying %s · %s to %s\n' "${VERSION}" "${COMMIT}" "${HOST}"
 
 node --check "${HERE}/dashboard/server.mjs" || die "server.mjs does not parse — refusing to deploy"
 ok "server.mjs parses"
+
+# The restart below takes the dashboard offline for a few seconds, which the
+# alerter reports as dashboard-unreachable. Hold that one key first -- and no
+# hold, no deploy. On 2026-10-11 the hold failed (the cached sudo had expired),
+# the deploy went ahead anyway, and the operator was paged for a planned restart.
+# Checked before anything is copied: a refused deploy leaves the Pi untouched.
+HOLD_KEY=dashboard-unreachable
+HOLD_MIN="${XL1_DEPLOY_HOLD_MINUTES:-15}"
+ALERT=/usr/local/bin/xl1-alert.sh
+HELD=0
+if [[ "${XL1_DEPLOY_NO_HOLD:-0}" == 1 ]]; then
+  printf '  %s!%s XL1_DEPLOY_NO_HOLD=1 -- deploying without an alert hold
+' "${RED}" "${RESET}"
+else
+  ssh -o ConnectTimeout=10 "${HOST}" "sudo -n ${ALERT} --hold ${HOLD_KEY} ${HOLD_MIN} 'dashboard ${VERSION} ${COMMIT} deploy'" >/dev/null 2>&1     || die "could not set the ${HOLD_KEY} alert hold -- refusing to deploy. Refresh sudo (ssh -t ${HOST} sudo -v) and retry"
+  ssh -o ConnectTimeout=10 "${HOST}" "sudo -n ${ALERT} --holds" 2>/dev/null | grep -q "^${HOLD_KEY}	"     || die "the ${HOLD_KEY} hold did not read back -- refusing to deploy"
+  HELD=1
+  ok "alert hold set (${HOLD_KEY}, ${HOLD_MIN} min)"
+  # A deploy that fails after this point leaves the hold to expire by itself, so
+  # a dashboard left down still pages once the hold is over.
+fi
 
 ssh -o ConnectTimeout=10 "${HOST}" "mkdir -p ${DEST}" 2>/dev/null \
   || die "cannot create ${DEST} — run: sudo install -d -o \$USER -g \$USER -m 755 ${DEST}"
@@ -101,4 +127,15 @@ done
 [[ "${SERVING:-}" == "${VERSION} ${COMMIT}" ]] \
   || die "serving '${SERVING:-nothing}', expected '${VERSION} ${COMMIT}' — the bind mount is not in effect"
 ok "serving ${SERVING}"
+
+# Held keys are not observed, so releasing now cannot produce a "recovered"
+# message for a restart the alerter never saw.
+if (( HELD )); then
+  if ssh -o ConnectTimeout=10 "${HOST}" "sudo -n ${ALERT} --release ${HOLD_KEY}" >/dev/null 2>&1; then
+    ok "alert hold released"
+  else
+    printf '  %s!%s could not release the hold; it expires within %s min
+' "${RED}" "${RESET}" "${HOLD_MIN}"
+  fi
+fi
 printf '  %sdone%s\n\n' "${DIM}" "${RESET}"

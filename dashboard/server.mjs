@@ -252,6 +252,16 @@ const REWARD_ERAS = {
 }
 
 const bare = (a) => String(a ?? '').replace(/^0x/i, '').toLowerCase()
+/** Wrap an async task so a call made while the previous one is still running is
+ *  dropped, not queued: the next interval tick picks up where it left off. */
+function singleFlight(fn) {
+  let busy = false
+  return async (...args) => {
+    if (busy) return
+    busy = true
+    try { return await fn(...args) } finally { busy = false }
+  }
+}
 
 /** What a block recorded for `recipient`: its share of the zero-address reward
  *  transfer, that transfer's total, and fees other addresses paid it. */
@@ -401,8 +411,19 @@ function historyBlock(n, signer, payloads, { self = PRODUCER_ADDRESS || REWARD_A
 }
 
 /** One bounded step of the history walk. Runs after the live scan, only when it
- *  is caught up, and never more than HISTORY_BATCHES batches per chain poll. */
+ *  is caught up, and never more than HISTORY_BATCHES batches per chain poll.
+ *
+ *  Single-flight: two steps reading the same cursor across the gateway await
+ *  would both count the batch. In production that happened whenever a chain
+ *  poll outlasted its 15 s interval (2.3.4: +101 own blocks on Mainnet, +53 on
+ *  Sequence, against an independent count of the block files). */
+let historyBusy = false
 async function backfillHistory(viewer, currentNum) {
+  if (historyBusy) return
+  historyBusy = true
+  try { await historyStep(viewer, currentNum) } finally { historyBusy = false }
+}
+async function historyStep(viewer, currentNum) {
   const h = chainHistory
   if (h.done || h.cursor === undefined || h.attrSince === undefined) return
   if (production.error || (production.cursor !== undefined && currentNum - production.cursor > 5)) return
@@ -410,6 +431,9 @@ async function backfillHistory(viewer, currentNum) {
     const to = h.cursor, from = Math.max(1, to - HISTORY_BATCH + 1), limit = to - from + 1
     let blocks
     try { blocks = await viewer.block.blocksByNumber(to, limit) } catch (error) { h.error = error.message?.slice(0, 160); return }
+    // Belt and braces: if anything moved the checkpoint while we waited, this
+    // batch is no longer ours to count.
+    if (h.cursor !== to) return
     const inRange = new Map()
     for (const entry of blocks ?? []) {
       const bw = Array.isArray(entry) ? entry[0] : entry
@@ -430,10 +454,11 @@ async function backfillHistory(viewer, currentNum) {
   await persistHistory()
 }
 
+const HISTORY_FORMAT = 2
 function historyDoc() {
   const h = chainHistory
   return {
-    v: 1, updatedAt: new Date().toISOString(),
+    v: HISTORY_FORMAT, updatedAt: new Date().toISOString(),
     scannedFrom: h.scannedFrom, ledgerSince: h.ledgerSince, attrSince: h.attrSince,
     cursor: h.cursor, done: h.done,
     counts: Object.fromEntries(h.counts),
@@ -451,7 +476,9 @@ async function persistHistory(force = false) {
   } catch (error) { chainHistory.error = `could not save history: ${error.message?.slice(0, 120)}` }
 }
 function restoreHistory(doc) {
-  if (!doc || doc.v !== 1) return false
+  // An older format is discarded, not migrated: v1 files (2.3.4) may hold batches
+  // counted twice, and the walk restarts from the same hand-over point.
+  if (!doc || doc.v !== HISTORY_FORMAT) return false
   const big = (x) => { try { return BigInt(x ?? 0) } catch { return 0n } }
   const int = (x) => (Number.isFinite(Number(x)) ? Number(x) : undefined)
   Object.assign(chainHistory, {
@@ -3498,7 +3525,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { attributedReward, historyBlock, backfillHistory, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { attributedReward, historyBlock, backfillHistory, singleFlight, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -3530,7 +3557,9 @@ if (isMain) {
   // take the process down, so none of these promises may go unwatched.
   const guard = (fn, name) => () => { Promise.resolve(fn()).catch((e) => console.error(`xl1-dashboard: ${name} failed —`, e)) }
 
-  setInterval(guard(pollChain, 'pollChain'), CHAIN_POLL_MS).unref()
+  // Single-flight: a chain poll can outlast its interval (a slow gateway, a
+  // catch-up scan), and two overlapping polls would scan the same blocks twice.
+  setInterval(guard(singleFlight(pollChain), 'pollChain'), CHAIN_POLL_MS).unref()
   // Checked often, written rarely — persistTrend decides for itself whether
   // enough time has passed, so the cadence lives in one place.
   setInterval(guard(persistTrend, 'persistTrend'), 60_000).unref()

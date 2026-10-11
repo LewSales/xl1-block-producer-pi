@@ -969,7 +969,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.4', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.3.5', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -2254,5 +2254,46 @@ test('history checkpoints survive JSON exactly (BigInt strings)', async () => {
   resetHistoryState(); m.restoreHistory(doc)
   assert.equal(m.chainHistory.self.preScan.fees, before)
   assert.equal(m.chainHistory.done, true)
-  assert.equal(m.restoreHistory({ v: 2 }), false, 'an unknown version is refused')
+  assert.equal(m.restoreHistory({ v: 3 }), false, 'an unknown version is refused')
+})
+
+test('overlapping walk steps never count a batch twice (a slow poll overlapping the next)', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const fast = historyViewer(chain)
+  // A gateway slow enough that the next 15 s tick starts while this one waits.
+  const slow = { calls: fast.calls, block: { blocksByNumber: async (to, limit) => { await new Promise((r) => setTimeout(r, 20)); return fast.block.blocksByNumber(to, limit) } } }
+  for (let i = 0; i < 50 && !m.chainHistory.done; i++) await Promise.all([m.backfillHistory(slow, 1000), m.backfillHistory(slow, 1000), m.backfillHistory(slow, 1000)])
+  assert.equal(m.chainHistory.done, true)
+  assert.equal(m.chainHistory.counts.get(SELF), 160, 'pre-scan count identical to a single walker')
+  assert.equal(m.chainHistory.self.inScan.blocks, 20, 'in-scan count identical to a single walker')
+  assert.equal(m.chainHistory.self.preScan.blocks, 160)
+})
+
+test('the chain poll is single-flight: a tick that finds the last one still running is skipped', async () => {
+  let running = 0, peak = 0, runs = 0
+  const tick = m.singleFlight(async () => { runs++; running++; peak = Math.max(peak, running); await new Promise((r) => setTimeout(r, 20)); running-- })
+  await Promise.all([tick(), tick(), tick()])
+  assert.equal(peak, 1, 'never two at once')
+  assert.equal(runs, 1, 'overlapping ticks are dropped, not queued')
+  await tick()
+  assert.equal(runs, 2, 'the next tick after it finished runs normally')
+})
+
+test('a 2.3.4 (v1) history file is discarded, and the walk restarts from the saved hand-over', async () => {
+  const chain = syntheticChain(1000)
+  let viewer = await setup({ chain })
+  await m.backfillHistory(viewer, 1000)
+  const v1 = { ...JSON.parse(JSON.stringify(m.historyDoc())), v: 1 }
+  resetHistoryState()
+  assert.equal(m.restoreHistory(v1), false, 'v1 may hold double-counted batches')
+  Object.assign(m.production, { attrSince: 1001 }) // persisted in peers.json
+  m.initHistory()
+  assert.equal(m.chainHistory.attrSince, 1001, 'same hand-over: nothing attributed twice')
+  assert.equal(m.chainHistory.cursor, 1000, 'walk restarts from just below it')
+  viewer = historyViewer(chain)
+  await walk(viewer)
+  assert.equal(m.chainHistory.counts.get(SELF), 160)
+  assert.equal(m.chainHistory.self.inScan.blocks, 20)
+  assert.equal(m.restoreHistory(JSON.parse(JSON.stringify(m.historyDoc()))), true, 'its own format still restores')
 })

@@ -967,7 +967,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.2', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.3.3', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -1925,4 +1925,138 @@ test('loadPeers restores the last own block from the persisted recent strip', as
     assert.equal(fresh.production.lastBlock, 198)
     assert.equal(fresh.production.lastBlockAt, 3000)
   } finally { if (was === undefined) delete process.env.DASH_PEERS_FILE; else process.env.DASH_PEERS_FILE = was }
+})
+
+// ------------------------------------------------------------ reward accounting
+// 2.3.3: the page said "~50 XL1 per block" everywhere. Mainnet passed block
+// 1,000,000 on 2026-05-19 and has paid producers 47.5 since; Sequence's history
+// followed other rules entirely. Rewards now come from the transfer recorded in
+// each of our blocks. Fixtures are real public blocks from XYO's block CDN.
+const A18 = 10n ** 18n
+const xl1 = (s) => { const [w, f = ''] = String(s).split('.'); return BigInt(w) * A18 + BigInt((f + '0'.repeat(18)).slice(0, 18)) }
+function resetLedger() {
+  Object.assign(m.ledger, { since: undefined, through: undefined, preLedgerBlocks: undefined, preLedgerFrom: undefined, recorded: 0n, recordedBlocks: 0, estimated: 0n, estimatedBlocks: 0, unknownBlocks: 0, fees: 0n, last: undefined })
+}
+
+test('the protocol schedule: 500, then x0.95 every 1,000,000 blocks, floor 10', () => {
+  assert.equal(m.protocolBlockReward(1), xl1('500'))
+  assert.equal(m.protocolBlockReward(999_999), xl1('500'), 'last block of step 1')
+  assert.equal(m.protocolBlockReward(1_000_000), xl1('475'), 'first block of step 2 (Mainnet, 2026-05-19)')
+  assert.equal(m.protocolBlockReward(1_999_999), xl1('475'))
+  assert.equal(m.protocolBlockReward(2_000_000), xl1('451.25'))
+  assert.equal(m.protocolBlockReward(3_000_000), xl1('428.6875'))
+  assert.equal(m.protocolBlockReward(200_000_000), xl1('10'), 'never below the 10 XL1 floor')
+  assert.equal(m.protocolBlockReward(0), undefined, 'block 0 is the creator allocation, not a producer reward')
+  assert.equal(m.protocolProducerReward(999_999), xl1('50'))
+  assert.equal(m.protocolProducerReward(1_000_000), xl1('47.5'))
+  assert.equal(m.protocolProducerReward(2_000_000), xl1('45.125'))
+})
+
+test('a real Mainnet block records 47.5 XL1 to its producer, plus a fee', async () => {
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  const r = m.recordedRewards(payloads, bw.addresses[0])
+  assert.equal(r.reward, xl1('47.5'))
+  assert.equal(r.total, xl1('475'))
+  assert.equal(r.fees, xl1('0.0001216'), 'a transaction fee paid to the producer inside its block')
+})
+
+test('a real Sequence block records 50 XL1 to its producer', async () => {
+  const [bw, payloads] = JSON.parse(await fixture('sequence-block-669230.json'))
+  const r = m.recordedRewards(payloads, bw.addresses[0])
+  assert.equal(r.reward, xl1('50')); assert.equal(r.total, xl1('500'))
+})
+
+test('the reward follows the reward address, not the signer', async () => {
+  const [, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  assert.equal(m.recordedRewards(payloads, 'f'.repeat(40)).reward, undefined, 'a different recipient was paid nothing')
+})
+
+test('the ledger: recorded first, estimated (Mainnet) or unknown (Sequence) without a transfer', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  const me = bw.addresses[0]
+  try {
+    assert.equal(m.accountBlock(1758531, payloads, { recipient: me, net: 'mainnet' }), 'recorded')
+    assert.equal(m.accountBlock(1758600, undefined, { recipient: me, net: 'mainnet' }), 'estimated')
+    assert.equal(m.accountBlock(669_300, undefined, { recipient: me, net: 'sequence' }), 'unknown')
+    assert.equal(m.ledger.recorded, xl1('47.5')); assert.equal(m.ledger.estimated, xl1('47.5'))
+    assert.equal(m.ledger.unknownBlocks, 1)
+    assert.equal(m.ledger.fees, xl1('0.0001216'))
+    assert.equal(m.ledger.last.n, 1758531)
+  } finally { resetLedger() }
+})
+
+test('a block at or below the accounted cursor is never counted twice', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  try {
+    m.ledger.through = 1758531
+    assert.equal(m.accountBlock(1758531, payloads, { recipient: bw.addresses[0], net: 'mainnet' }), 'duplicate')
+    assert.equal(m.ledger.recordedBlocks, 0)
+  } finally { resetLedger() }
+})
+
+test('the ledger survives a restart exactly (BigInt strings, no float drift)', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  try {
+    for (let i = 0; i < 3; i++) m.accountBlock(1758531 + i * 10, payloads, { recipient: bw.addresses[0], net: 'mainnet' })
+    m.ledger.through = 1758551
+    const doc = JSON.parse(JSON.stringify(m.ledgerDoc()))
+    resetLedger(); m.restoreLedger(doc)
+    assert.equal(m.ledger.recorded, xl1('142.5'))
+    assert.equal(m.ledger.recordedBlocks, 3)
+    assert.equal(m.ledger.fees, xl1('0.0003648'))
+    assert.equal(m.ledger.through, 1758551)
+    assert.equal(m.accountBlock(1758551, payloads, { recipient: bw.addresses[0], net: 'mainnet' }), 'duplicate', 'restored cursor still guards')
+  } finally { resetLedger() }
+})
+
+test('blocks before the ledger are reconstructed only inside one verified era', () => {
+  assert.equal(m.REWARD_ERAS.mainnet(1_721_227, 1_758_000), xl1('47.5'), 'all inside Mainnet step 2')
+  assert.equal(m.REWARD_ERAS.mainnet(999_000, 1_001_000), undefined, 'straddles the 1,000,000 boundary: unknown')
+  assert.equal(m.REWARD_ERAS.sequence(577_263, 669_000), xl1('50'), 'Sequence 10%-share era')
+  assert.equal(m.REWARD_ERAS.sequence(500_000, 669_000), undefined, 'reaches back into the 5%-share era: unknown')
+})
+
+test('rewardsView: per-block from the record, next step, and totals that add up', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  try {
+    Object.assign(m.ledger, { preLedgerBlocks: 7000, preLedgerFrom: 1_721_227 })
+    m.accountBlock(1758531, payloads, { recipient: bw.addresses[0], net: 'mainnet' })
+    m.accountBlock(1758540, undefined, { recipient: bw.addresses[0], net: 'mainnet' })
+    const v = m.rewardsView(1_758_600, 'mainnet')
+    assert.deepEqual(v.perBlock, { xl1: '47.5', source: 'recorded', block: 1758531, ofTotalXl1: '475' })
+    assert.equal(v.nextStep.atBlock, 2_000_000); assert.equal(v.nextStep.xl1, '45.125'); assert.equal(v.nextStep.blocksAway, 241_400)
+    assert.equal(v.recorded.xl1, '47.5'); assert.equal(v.estimated.xl1, '47.5')
+    assert.equal(v.reconstructed.xl1, '332500'); assert.equal(v.reconstructed.perBlockXl1, '47.5')
+    assert.equal(v.earned.xl1, '332595', '332,500 + 47.5 + 47.5')
+    assert.equal(v.fees.xl1, '0.0001216')
+  } finally { resetLedger() }
+})
+
+test('rewardsView with no recorded block yet: schedule on Mainnet, nothing on Sequence', () => {
+  resetLedger()
+  try {
+    assert.equal(m.rewardsView(1_758_600, 'mainnet').perBlock.source, 'protocol-schedule')
+    assert.equal(m.rewardsView(669_000, 'sequence').perBlock, undefined, 'no invented Sequence figure')
+  } finally { resetLedger() }
+})
+
+
+test('the API carries derived.rewards without changing existing fields', () => {
+  resetLedger()
+  try {
+    baselineHealthyState()
+    const s = m.snapshot()
+    assert.ok(s.derived && 'rewards' in s.derived, 'derived.rewards present')
+    for (const k of ['rewardPerHour', 'rewardPerDay', 'blocksByWindow']) assert.ok(k in s.derived, `${k} still present`)
+  } finally { resetLedger() }
+})
+
+test('the page carries no hardcoded per-block reward', async () => {
+  const page = await readFile(new URL('../dashboard/index.html', import.meta.url), 'utf8')
+  assert.doesNotMatch(page, /~50 XL1|worthOf\(50\)|pays in fixed 50/, 'per-block reward must come from dv.rewards')
+  assert.match(page, /dv\.rewards/)
 })

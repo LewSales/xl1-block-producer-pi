@@ -194,6 +194,188 @@ function formatXl1(atto, decimals = 4) {
   return `${neg ? '-' : ''}${grouped}${decimals > 0 ? `.${frac}` : ''}`
 }
 
+/** AttoXL1 → exact decimal XL1, trailing zeros dropped ("47.5", "0.0001216"). */
+function exactXl1(atto) {
+  if (atto === undefined || atto === null) return undefined
+  const v = BigInt(atto)
+  const frac = (v % ATTO).toString().padStart(18, '0').replace(/0+$/, '')
+  return `${v / ATTO}${frac ? `.${frac}` : ''}`
+}
+
+// -------------------------------------------------------------------- rewards
+//
+// The XL1 block reward, from xl1-cli 5.6.2's own protocol constants
+// (xl1-protocol protocol-model XL1_REWARDS_*, xl1-sdk rewardFromBlockNumber):
+// 500 XL1 for blocks 1..999,999, multiplied by 95/100 every 1,000,000 blocks,
+// never below 10 XL1; the block producer is paid a fixed 10% share by a
+// transfer from the zero address that is recorded IN the block (the rest goes
+// to the step-reward address). Checked on Mainnet: #999,999 paid 500 in total,
+// #1,000,000 (2026-05-19T15:10:34Z) paid 475, #1,758,531 paid its producer 47.5.
+// Sequence's early history followed other rules -- 50,000 per block, then
+// 1,000 at a 5% share, then 500 at 5%, and 500 at 10% only from about block
+// 577,263 -- so what a block recorded always wins over this formula, and the
+// formula alone is only ever reported as an estimate.
+const REWARD_STARTING = 500n * ATTO
+const REWARD_BLOCKS_PER_STEP = 1_000_000
+const REWARD_STEP_NUM = 95n
+const REWARD_STEP_DEN = 100n
+const REWARD_MIN = 10n * ATTO
+const PRODUCER_SHARE_NUM = 10n
+const PRODUCER_SHARE_DEN = 100n
+const ZERO_ADDRESS = '0'.repeat(40)
+
+/** Total block reward the protocol schedule allows at height n (atto). */
+function protocolBlockReward(n) {
+  if (!Number.isInteger(n) || n < 1) return undefined
+  const step = Math.floor((n + REWARD_BLOCKS_PER_STEP) / REWARD_BLOCKS_PER_STEP)
+  const e = BigInt(step - 1)
+  const r = REWARD_STARTING * REWARD_STEP_NUM ** e / REWARD_STEP_DEN ** e
+  return r < REWARD_MIN ? REWARD_MIN : r
+}
+/** The producer's share of protocolBlockReward(n) (atto). */
+function protocolProducerReward(n) {
+  const r = protocolBlockReward(n)
+  return r === undefined ? undefined : r * PRODUCER_SHARE_NUM / PRODUCER_SHARE_DEN
+}
+
+// Verified eras, for blocks counted before the ledger below existed. A range is
+// reconstructed only when it lies entirely inside one era; otherwise it stays
+// unknown rather than being priced at one era's rate.
+const REWARD_ERAS = {
+  mainnet: (from, to) => {
+    const a = protocolProducerReward(from)
+    return a !== undefined && a === protocolProducerReward(to) ? a : undefined
+  },
+  // From the chain's own records (sampled 2026-10-10): 500 XL1 at a 10% share
+  // from block 577,263; earlier blocks paid 25 or less to their producer.
+  sequence: (from, to) => (from >= 577_263 && to < REWARD_BLOCKS_PER_STEP ? 50n * ATTO : undefined),
+}
+
+const bare = (a) => String(a ?? '').replace(/^0x/i, '').toLowerCase()
+
+/** What a block recorded for `recipient`: its share of the zero-address reward
+ *  transfer, that transfer's total, and fees other addresses paid it. */
+function recordedRewards(payloads, recipient) {
+  const out = { reward: undefined, total: undefined, fees: 0n }
+  if (!Array.isArray(payloads) || !recipient) return out
+  for (const p of payloads) {
+    if (p?.schema !== 'network.xyo.transfer' || !p.transfers || typeof p.transfers !== 'object') continue
+    const from = bare(p.from)
+    for (const [to, hex] of Object.entries(p.transfers)) {
+      let v
+      try { v = BigInt(`0x${bare(hex)}`) } catch { continue }
+      if (from === ZERO_ADDRESS) {
+        out.total = (out.total ?? 0n) + v
+        if (bare(to) === recipient) out.reward = (out.reward ?? 0n) + v
+      } else if (bare(to) === recipient && from !== recipient) {
+        out.fees += v
+      }
+    }
+  }
+  return out
+}
+
+// Our block rewards, one block at a time, as the production scan finds them.
+// Amounts are atto-XL1 BigInts; persisted as strings with the scan cursor so a
+// restart neither loses nor double-counts a block.
+const ledger = {
+  since: undefined, // first block the ledger accounted
+  through: undefined, // highest block accounted (persisted)
+  preLedgerBlocks: undefined, // our blocks counted before the ledger existed
+  preLedgerFrom: undefined,
+  recorded: 0n, recordedBlocks: 0,
+  estimated: 0n, estimatedBlocks: 0,
+  unknownBlocks: 0,
+  fees: 0n,
+  last: undefined, // { n, reward, total } of our latest recorded block
+}
+
+/** Account one of our blocks. Returns how it was classified. */
+function accountBlock(n, payloads, { recipient = REWARD_ADDRESS || PRODUCER_ADDRESS, net = NETWORK } = {}) {
+  if (!Number.isInteger(n) || (ledger.through !== undefined && n <= ledger.through)) return 'duplicate'
+  ledger.since ??= n
+  const rec = recordedRewards(payloads, recipient)
+  ledger.fees += rec.fees
+  if (rec.reward !== undefined) {
+    ledger.recorded += rec.reward
+    ledger.recordedBlocks += 1
+    if (!ledger.last || n > ledger.last.n) ledger.last = { n, reward: rec.reward, total: rec.total }
+    return 'recorded'
+  }
+  // No recorded transfer to us in a block we signed: payloads missing, or the
+  // reward went elsewhere. Mainnet follows the protocol schedule exactly, so it
+  // is estimated and labelled; Sequence's history did not, so it stays unknown.
+  const est = net === 'mainnet' ? protocolProducerReward(n) : undefined
+  if (est !== undefined) { ledger.estimated += est; ledger.estimatedBlocks += 1; return 'estimated' }
+  ledger.unknownBlocks += 1
+  return 'unknown'
+}
+
+function ledgerDoc() {
+  return {
+    since: ledger.since, through: ledger.through,
+    preLedgerBlocks: ledger.preLedgerBlocks, preLedgerFrom: ledger.preLedgerFrom,
+    recorded: ledger.recorded.toString(), recordedBlocks: ledger.recordedBlocks,
+    estimated: ledger.estimated.toString(), estimatedBlocks: ledger.estimatedBlocks,
+    unknownBlocks: ledger.unknownBlocks, fees: ledger.fees.toString(),
+    last: ledger.last && { n: ledger.last.n, reward: ledger.last.reward.toString(), total: ledger.last.total?.toString() },
+  }
+}
+function restoreLedger(doc) {
+  if (!doc || typeof doc !== 'object') return
+  const big = (x) => { try { return BigInt(x ?? 0) } catch { return 0n } }
+  const int = (x) => (Number.isFinite(Number(x)) ? Number(x) : undefined)
+  Object.assign(ledger, {
+    since: int(doc.since), through: int(doc.through),
+    preLedgerBlocks: int(doc.preLedgerBlocks), preLedgerFrom: int(doc.preLedgerFrom),
+    recorded: big(doc.recorded), recordedBlocks: int(doc.recordedBlocks) ?? 0,
+    estimated: big(doc.estimated), estimatedBlocks: int(doc.estimatedBlocks) ?? 0,
+    unknownBlocks: int(doc.unknownBlocks) ?? 0, fees: big(doc.fees),
+    last: doc.last && Number.isFinite(Number(doc.last.n)) ? { n: Number(doc.last.n), reward: big(doc.last.reward), total: doc.last.total !== undefined ? big(doc.last.total) : undefined } : undefined,
+  })
+}
+
+/** The rewards section of the API: what was recorded, what is estimated or
+ *  reconstructed (and on what basis), and what is unknown -- never one number
+ *  pretending to be all three. */
+function rewardsView(currentBlock = state.chain?.currentBlock, net = NETWORK) {
+  const x = (atto) => exactXl1(atto)
+  const view = { network: net, recipient: REWARD_ADDRESS || PRODUCER_ADDRESS || undefined }
+  if (ledger.last) {
+    view.perBlock = { xl1: x(ledger.last.reward), source: 'recorded', block: ledger.last.n, ofTotalXl1: x(ledger.last.total) }
+  } else if (net === 'mainnet' && Number.isInteger(currentBlock)) {
+    view.perBlock = { xl1: x(protocolProducerReward(currentBlock)), source: 'protocol-schedule' }
+  }
+  if (Number.isInteger(currentBlock) && currentBlock > 0) {
+    const at = (Math.floor(currentBlock / REWARD_BLOCKS_PER_STEP) + 1) * REWARD_BLOCKS_PER_STEP
+    const now = protocolProducerReward(currentBlock), next = protocolProducerReward(at)
+    if (next !== now) {
+      view.nextStep = {
+        atBlock: at, blocksAway: at - currentBlock, xl1: x(next),
+        basis: net === 'mainnet' ? 'protocol schedule (xl1-cli 5.6.2)' : 'protocol schedule (xl1-cli 5.6.2); Sequence history has not always followed it',
+      }
+    }
+  }
+  view.recorded = { xl1: x(ledger.recorded), blocks: ledger.recordedBlocks, since: ledger.since }
+  if (ledger.estimatedBlocks) view.estimated = { xl1: x(ledger.estimated), blocks: ledger.estimatedBlocks, basis: 'protocol schedule' }
+  if (ledger.unknownBlocks) view.unknownBlocks = ledger.unknownBlocks
+  view.fees = { xl1: x(ledger.fees) }
+  let reconstructed = 0n
+  if (ledger.preLedgerBlocks) {
+    const from = ledger.preLedgerFrom, to = (ledger.since ?? currentBlock ?? 0) - 1
+    const per = Number.isInteger(from) && to >= from ? REWARD_ERAS[net]?.(from, to) : undefined
+    if (per !== undefined) {
+      reconstructed = per * BigInt(ledger.preLedgerBlocks)
+      view.reconstructed = { xl1: x(reconstructed), blocks: ledger.preLedgerBlocks, from, to, perBlockXl1: x(per), basis: 'one verified reward era covers the whole range' }
+    } else {
+      view.reconstructed = { blocks: ledger.preLedgerBlocks, from, to, xl1: undefined, basis: 'unknown: range is not inside one verified era' }
+    }
+  }
+  const total = ledger.recorded + ledger.estimated + reconstructed
+  view.earned = { xl1: x(total), recordedShare: total > 0n ? Number(ledger.recorded * 10000n / total) / 100 : undefined }
+  return view
+}
+
 // ---------------------------------------------------------------- chain source
 
 const network = DefaultNetworks.find((n) => n.id === NETWORK)
@@ -975,6 +1157,7 @@ async function loadPeers() {
     production.scannedFrom = doc.scannedFrom
     production.scannedTo = doc.scannedTo
     production.scanned = Number(doc.scanned) || 0
+    restoreLedger(doc.ledger)
     // The last block this node landed, from the persisted recent strip. Without
     // it a restarted dashboard knows the head but not our last block until the
     // scan next finds one -- and for that minute "no block of ours seen" was
@@ -1071,6 +1254,8 @@ async function persistPeers(force = false) {
     // Rebuilding it from the scan alone would take an hour of chain to refill,
     // during which the strip would understate this node for no reason.
     recent: production.recent.slice(-RECENT_BLOCKS),
+    // Reward ledger, written with the cursor it was counted against.
+    ledger: ledgerDoc(),
     days: Object.fromEntries([...days.entries()].sort().map(([key, day]) => [key, {
       scanned: day.scanned,
       counts: Object.fromEntries([...day.counts.entries()].sort((a, b) => b[1] - a[1])),
@@ -1152,6 +1337,15 @@ async function scanProduction(viewer, currentNum) {
   if (from > currentNum) return
 
   production.scannedFrom ??= from
+  // The reward ledger starts with the first block this build scans. Blocks the
+  // scan counted before it existed are remembered as a count and range, and
+  // priced only if one verified reward era covers them (rewardsView).
+  if (ledger.preLedgerBlocks === undefined) {
+    const before = production.scannedFrom < from
+    ledger.preLedgerBlocks = before ? (peers.get(self) ?? 0) : 0
+    ledger.preLedgerFrom = before ? production.scannedFrom : undefined
+    ledger.since ??= from
+  }
   peersSince ??= new Date().toISOString()
   let budget = PEERS_CATCHUP
 
@@ -1213,6 +1407,8 @@ async function scanProduction(viewer, currentNum) {
         // of "produced", so the headline and the table can never disagree.
         if (self && signers.has(self)) {
           production.counted += 1
+          // Rewards from the block's own transfer, off payloads already in hand.
+          accountBlock(n, Array.isArray(entry) ? entry[1] : undefined)
           if (production.lastBlock === undefined || n > production.lastBlock) {
             production.lastBlock = n
             production.lastBlockAt = Number.isFinite(epoch) && epoch > 0 ? epoch : undefined
@@ -1234,6 +1430,7 @@ async function scanProduction(viewer, currentNum) {
 
       production.cursor = top
       production.scannedTo = top
+      ledger.through = Math.max(ledger.through ?? -1, top)
       from = top + 1
       budget -= limit
       if (!production.error) production.error = undefined
@@ -2451,6 +2648,8 @@ function derived(board = peerBoard()) {
     // Extrapolated, and labelled as such on the page: an hour of observation is
     // not a day of earnings, and presenting it as one would be a lie by rounding.
     rewardPerHour: rewardRate !== undefined ? Number(rewardRate.toFixed(4)) : undefined,
+    // Per-block reward and earnings from the chain's own records (see ledger).
+    rewards: rewardsView(),
     // A rate measured over minutes says nothing about a day. 15 minutes is the
     // floor at which the number stops being an artefact of when you looked.
     rewardPerDay: (rewardRate !== undefined && observedSeconds >= 900)
@@ -3073,7 +3272,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

@@ -427,9 +427,9 @@ const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v,
  *  rescales. The delta answers the question actually being asked: WHEN did
  *  something happen, and how much.
  *
- *  It reads especially well for rewards, where the chain pays in fixed 50 XL1
- *  steps: every bar is a block won, and the gaps between bars are the dry
- *  spells. `summary` turns the same numbers into one line of plain language,
+ *  It reads especially well for rewards, where each won block adds one fixed
+ *  payment (its size is set by the chain's reward schedule -- see Rewards):
+ *  every bar is a block won, and the gaps between bars are the dry spells. `summary` turns the same numbers into one line of plain language,
  *  because a bar chart with no scale is still just a shape.
  */
 const sparkDelta = (series, cls = '', summary) => {
@@ -726,9 +726,34 @@ function render(d) {
           b.producer && !dv.rewardEqualsProducer && ['Producer address', addrCell(b.producer)],
         ])}
       </details>
-      <div class="sub" style="margin-top:7px" title="At step 0 the block reward is 500 XL1 and the producer share is 10%. Only accepted blocks pay — a published candidate that loses its race earns nothing.">
-        Each accepted block pays <strong>~50 XL1</strong> — 10% of the 500 XL1 block reward.
-      </div>
+      ${(() => {
+        // The per-block figure comes from the chain: the reward transfer
+        // recorded in this node's latest block. The protocol schedule is shown
+        // only as a labelled fallback, and the next step as a forecast.
+        const rw = dv.rewards ?? {}
+        const pb = rw.perBlock
+        const lead = pb
+          ? `Each accepted block pays <strong>${esc(pb.xl1)} XL1</strong>${pb.source === 'recorded'
+              ? ` — recorded in block #${num(pb.block)}${pb.ofTotalXl1 ? ` (10% of ${esc(pb.ofTotalXl1)} XL1)` : ''}`
+              : ' — from the protocol schedule (no recorded payment seen yet)'}.`
+          : 'Per-block reward: not yet seen on chain.'
+        const next = rw.nextStep ? ` Next step at block #${num(rw.nextStep.atBlock)} → ${esc(rw.nextStep.xl1)} XL1 (${num(rw.nextStep.blocksAway)} blocks away).` : ''
+        return `<div class="sub" style="margin-top:7px" title="XL1's block reward starts at 500 XL1 and falls by 5% every 1,000,000 blocks (floor 10 XL1); the producer is paid 10% of it by a transfer recorded in the block. Only accepted blocks pay — a published candidate that loses its race earns nothing.${rw.nextStep ? ' Next step basis: ' + esc(rw.nextStep.basis) + '.' : ''}">${lead}${next}</div>`
+      })()}
+      ${(() => {
+        const rw = dv.rewards ?? {}
+        if (!rw.earned) return ''
+        return dl([
+          ['Block rewards earned', `${esc(rw.earned.xl1)} XL1 ${info('Recorded = read from the reward transfer inside each of this node’s blocks. Reconstructed = blocks counted before recording began, priced only where one verified reward era covers them. Estimated = blocks whose transfer could not be read, priced by the protocol schedule. Fees are listed separately.')}`],
+          rw.recorded?.blocks && ['Recorded on chain', `${esc(rw.recorded.xl1)} XL1 <span class="sub">${num(rw.recorded.blocks)} block(s) since #${num(rw.recorded.since)}</span>`],
+          rw.reconstructed && ['Before recording', rw.reconstructed.xl1 !== undefined
+            ? `${esc(rw.reconstructed.xl1)} XL1 <span class="sub">${num(rw.reconstructed.blocks)} block(s) × ${esc(rw.reconstructed.perBlockXl1)} · reconstructed</span>`
+            : `<span class="warn">unknown</span> <span class="sub">${num(rw.reconstructed.blocks)} block(s) — not inside one verified reward era</span>`],
+          rw.estimated && ['Estimated', `${esc(rw.estimated.xl1)} XL1 <span class="sub">${num(rw.estimated.blocks)} block(s) without a readable transfer</span>`],
+          rw.unknownBlocks && ['Unknown', `<span class="warn">${num(rw.unknownBlocks)} block(s)</span> <span class="sub">no recorded transfer and no reliable schedule</span>`],
+          rw.fees?.xl1 && rw.fees.xl1 !== '0' && ['Transaction fees', `${esc(rw.fees.xl1)} XL1 <span class="sub">paid to this node inside its blocks</span>`],
+        ])
+      })()}
       ${bw ? tiles([
         // One cumulative total cannot tell a node earning steadily from one that
         // earned it all yesterday. The hour is withheld until the ring covers
@@ -745,7 +770,7 @@ function render(d) {
         ['All time', bw.total !== undefined ? num(bw.total) : '—', 'since scanning began'],
       ]) : ''}
       ${sparkDelta(d.history?.reward, '', (total, active, intervals, max) =>
-        // The chain pays ~50 XL1 per block, so each bar is a win and the count
+        // Each won block adds one payment, so each bar is a win and the count
         // of non-empty intervals is how many times this node was paid.
         total > 0
           ? `+${num(Number(total.toFixed(4)))} XL1 · ${num(active)} payout(s)`
@@ -771,9 +796,10 @@ function render(d) {
       ? `${cur} ${num(Number((xl1 * pr.value).toFixed(2)))}` : undefined
     const sinceXl1 = Number(String(b.reward?.sinceStart?.xl1 ?? '').replace(/,/g, ''))
     const sinceWorth = worthOf(sinceXl1)
-    // The chain pays ~50 XL1 per accepted block; Rewards states that in XL1, so
-    // this states the same block in the other unit rather than repeating it.
-    const blockWorth = worthOf(50)
+    // The per-block payment as the chain recorded it (Rewards states it in
+    // XL1); this states the same block in the other unit.
+    const perBlockXl1 = Number(dv.rewards?.perBlock?.xl1)
+    const blockWorth = worthOf(perBlockXl1)
 
     if (pr.configured || pr.marketNote) {
       groups.performance.push(`<section style="--c: var(--acc-rewards); --mo:64">
@@ -806,7 +832,7 @@ function render(d) {
                 ? `${esc(b.reward.sinceStart.xl1)} XL1`
                 : `${esc(b.reward.sinceStart.xl1)} XL1 <span class="sub">≈ ${esc(sinceWorth)}</span>`],
             // Also withheld on a test network, for the same reason as the balance.
-          blockWorth && !pr.marketNote && ['Per accepted block', `~50 XL1 <span class="sub">≈ ${esc(blockWorth)}</span>`],
+          blockWorth && !pr.marketNote && ['Per accepted block', `${esc(dv.rewards.perBlock.xl1)} XL1 <span class="sub">≈ ${esc(blockWorth)}${dv.rewards.perBlock.source === 'recorded' ? '' : ' · schedule'}</span>`],
             // A quote that stopped updating is worse than none: it looks current.
             pr.ok === false && ['Quote', `<span class="warn">stale — ${esc(pr.error)}</span>`],
           ])}

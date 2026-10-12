@@ -21,7 +21,7 @@ SHELL_SCRIPTS=(
   "${ROOT}/provision.sh" "${ROOT}/preflight.sh" "${ROOT}/build-images.sh"
   "${ROOT}/scripts/xl1-collect.sh" "${ROOT}/scripts/xl1-alert.sh"
   "${ROOT}/scripts/xl1ctl" "${ROOT}/scripts/xl1-screen-setup.sh" "${ROOT}/scripts/xl1-screen"
-  "${ROOT}/scripts/xl1-cpu-governor" "${ROOT}/scripts/deploy-dashboard.sh"
+  "${ROOT}/scripts/xl1-cpu-governor" "${ROOT}/scripts/deploy-dashboard.sh" "${ROOT}/scripts/xl1-publish.sh"
 )
 
 step "Shell syntax"
@@ -102,6 +102,9 @@ if bash "${HERE}/alert.test.sh"; then ok "alerter tests passed"; else bad "alert
 
 step "Dashboard deploy"
 if bash "${HERE}/deploy.test.sh"; then ok "deploy refuses without an alert hold"; else bad "deploy tests failed"; fi
+
+step "Status publisher"
+if bash "${HERE}/publish.test.sh"; then ok "publisher stages only its own file and recovers from divergence"; else bad "publisher tests failed"; fi
 
 step "Panel parsing"
 if bash "${HERE}/screen.test.sh"; then ok "screen tests passed"; else bad "screen tests failed"; fi

@@ -143,14 +143,15 @@ const FULL = {
   history: { height: [100, 105, 110, 118, 130], reward: [0, 50, 50, 100, 150], tempC: [50, 52, 51, 55, 54] },
 }
 
-test('every card sorts into exactly one of the four topic groups', () => {
+test('every card sorts into exactly one of the five topic groups', () => {
   const els = renderTo(FULL)
   const groups = groupsOf(els.grid.innerHTML)
-  assert.deepEqual(Object.keys(groups), ['Producer performance', 'Network health', 'Production performance', 'Analytics'],
-    'the four groups must appear in this order, and only these four')
+  assert.deepEqual(Object.keys(groups), ['Standings &amp; race', 'Producer performance', 'Network health', 'Production performance', 'Analytics'],
+    'the five groups must appear in this order, and only these five: standings and the race lead')
+  assert.deepEqual(groups['Standings &amp; race'], ['Producer standings', 'Block race'])
   assert.deepEqual(groups['Producer performance'], ['Producer', 'Software & host', 'Rewards', 'What it is worth', 'Trends'],
     'Software & host is the second box: the versions a node runs should never be buried')
-  assert.deepEqual(groups['Network health'], ['Chain', 'Alerts', 'XL1 Network', 'Producer standings'])
+  assert.deepEqual(groups['Network health'], ['Chain', 'Alerts', 'XL1 Network'])
   assert.deepEqual(groups['Production performance'], ['Operations', 'Candidate race', 'Latency'])
   assert.deepEqual(groups['Analytics'], ['Block time', 'Continuity', 'Producer movement', 'Fleet', 'Raspberry Pi'])
 })
@@ -169,13 +170,13 @@ test('the ineligibility banner and the log sit outside every group', () => {
 test('mobile order matches the sequence the brief specifies, KPIs and cards alike', () => {
   const grid = renderTo(FULL).grid.innerHTML
   assert.deepEqual(mobileOrder(grid), [
-    'Blocks won', 'Network rank', 'Last 24h', 'Observed share', 'Current block',
+    'Blocks won', 'Network rank', 'Last 24h', 'Observed share', 'Current block', 'Race win rate',
+    'Producer standings', 'Block race',
     'Chain',
     'Producer', 'Software & host', 'Rewards', 'What it is worth', 'Trends',
     'XL1 Network', 'Alerts',
     'Operations', 'Candidate race', 'Latency',
     'Block time', 'Producer movement', 'Fleet', 'Raspberry Pi', 'Continuity',
-    'Producer standings',
   ])
 })
 

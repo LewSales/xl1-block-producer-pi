@@ -108,10 +108,13 @@
   @media (max-width: 1279px) { .group-grid { grid-template-columns: repeat(2, 1fr); } }
   .card-lg { grid-column: span 2; }
   .card-full { grid-column: 1 / -1; }
+  /* Phones: ".group .group-heading" (not ".group-heading") hides the headings, since
+     the general rule further down would otherwise win on source order and stack
+     every heading at the top; the log carries --mo:999 so it stays last. */
   @media (max-width: 767px) {
     main#grid { display: flex; }
     .kpi-row, .group, .group-grid { display: contents; }
-    .group-heading { display: none; }
+    .group .group-heading { display: none; }
     [style*="--mo"] { order: var(--mo); }
   }
   /* A section is a heading and a divider, not another bordered box around its
@@ -1776,7 +1779,7 @@ function render(d) {
   // Log tail, newest first, outside every group and always last — a scroll box
   // this size reads as an afterthought anywhere but the bottom of the page.
   if (d.node?.recentLog?.length) {
-    logHtml = `<section class="card-full">
+    logHtml = `<section class="card-full" style="--mo:999">
       <h2><span class="ico" aria-hidden="true">📜</span>Producer log — newest first (${d.node.recentLog.length} lines)</h2>
       <pre class="log">${esc([...d.node.recentLog].reverse().join('\n'))}</pre>
       <div class="logfoot">Most recent at the top. Collected ${d.node.ageSeconds ?? '?'}s ago.</div>

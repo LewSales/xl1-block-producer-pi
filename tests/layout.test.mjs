@@ -177,6 +177,8 @@ test('mobile order matches the sequence the brief specifies, KPIs and cards alik
     'XL1 Network', 'Alerts',
     'Operations', 'Candidate race', 'Latency',
     'Block time', 'Producer movement', 'Fleet', 'Raspberry Pi', 'Continuity',
+    // The log is last on phones too (it carried no order and floated to the top).
+    'Producer log — newest first (40 lines)',
   ])
 })
 

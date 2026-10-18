@@ -73,7 +73,10 @@ const timeOf = p => (p || []).find(x => x.schema === 'network.xyo.time') || {}
 // ---- state: rolling events, loaded from disk so a restart keeps the window ----
 let events = []
 try { events = fs.readFileSync(EVENTS_FILE, 'utf8').split('\n').map(l => { try { return JSON.parse(l) } catch { return null } }).filter(e => e && e.t > Date.now() - WINDOW) } catch {}
-const seenCand = new Set(events.filter(e => e.k === 'cand').map(e => e.hash)), seenTx = new Set(events.filter(e => e.k === 'tx').map(e => e.hash))
+// Dedupe sets, rebuilt from the window at every rebuild (see rebuild()). They
+// were never pruned: every hash seen since start stayed until the process died.
+const windowSet = k => new Set(events.filter(e => e.k === k).map(e => e.hash))
+let seenCand = windowSet('cand'), seenTx = windowSet('tx')
 let lastHead = null
 const add = e => { events.push(e); try { fs.appendFileSync(EVENTS_FILE, JSON.stringify(e) + '\n') } catch {} }
 
@@ -155,6 +158,9 @@ async function rebuild() {
   try {
     const cut = Date.now() - WINDOW
     events = events.filter(e => e.t > cut)
+    // A hash older than the window cannot come back: the pool only holds
+    // candidates and transactions for the current heights.
+    seenCand = windowSet('cand'); seenTx = windowSet('tx')
     try { fs.writeFileSync(EVENTS_FILE, events.map(e => JSON.stringify(e)).join('\n') + '\n') } catch {}   // compact the on-disk window
     await refreshChain().catch(e => log('chain refresh failed: ' + e))
     const builds = await readBuilds().catch(() => ({}))

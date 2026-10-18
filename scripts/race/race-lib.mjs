@@ -17,6 +17,9 @@ export const PRODUCERS_BY_NET = {
   },
   mainnet: {
     ca08120874f071739d932b24da41cc13299123b3: { name: 'Oxyon-pi', owner: 'Oxyon' },
+    // The Windows host's two mainnet containers (cc91 since 2026-10-08; 653e named 2026-10-17).
+    '2152e6aec996742fb6e52ae1aad87bd44f2ccc91': { name: 'Oxyon-windows', owner: 'Oxyon' },
+    a9304753eade52dd22b1a6fc519b571a4dc2653e: { name: 'Oxyon-windows-2', owner: 'Oxyon' },
     fb4c535221f91c1811bd42f70b6ec305aa658551: { name: 'FreeCryptoA', owner: 'FreeCryptoA' },
     '30251291ac55017d90a3c892ab5604bdacf9bcde': { name: 'Jim-pi4-2', owner: 'Jim' },
   },

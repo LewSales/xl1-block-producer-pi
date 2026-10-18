@@ -1635,6 +1635,17 @@ test('nothing that identifies the machine survives the projection', () => {
   }
 })
 
+test('the clock is published by named field only, and only when read', () => {
+  m.state.node = { ok: true, clock: { synced: true, source: '0.debian.pool.ntp.org', stratum: 2, offsetMs: -23.1,
+    jitterMs: 11, rootDistanceMs: 19.1, pollIntervalSeconds: 2048, checkedAt: '2026-10-18T19:00:00Z', CANARY: 'CANARY-CLOCK' } }
+  const pub = m.publicView(m.peerBoard())
+  assert.equal(pub.clock.offsetMs, -23.1)
+  assert.equal(pub.clock.pollIntervalSeconds, 2048)
+  assert.equal(JSON.stringify(pub).includes('CANARY-CLOCK'), false)
+  m.state.node = { ok: true }
+  assert.equal(m.publicView(m.peerBoard()).clock, undefined, 'no reading is no field, never a zero offset')
+})
+
 test('the status is a word, never the sentences behind it', () => {
   // Problem strings are assembled from error messages, and an error message is
   // exactly where a path or a hostname arrives without anyone deciding it should.

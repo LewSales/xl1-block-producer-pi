@@ -3476,6 +3476,21 @@ function publicView(board) {
       samples: state.node.latency.samples,
     } : undefined,
 
+    // How far this host's clock can be trusted, so its timestamps (and the race
+    // observer's arrival times) can be weighed against another host's. Named
+    // fields only.
+    clock: state.node?.clock ? {
+      synced: state.node.clock.synced,
+      source: state.node.clock.source,
+      stratum: state.node.clock.stratum,
+      offsetMs: state.node.clock.offsetMs,
+      offsetAgainst: state.node.clock.offsetAgainst,
+      jitterMs: state.node.clock.jitterMs,
+      rootDistanceMs: state.node.clock.rootDistanceMs,
+      pollIntervalSeconds: state.node.clock.pollIntervalSeconds,
+      checkedAt: state.node.clock.checkedAt,
+    } : undefined,
+
     // Daily production and earnings, from the chain scan. The same rows the
     // Trends card draws.
     trend: { daily: trendDaily(), retainDays: TREND_RETAIN_DAYS },

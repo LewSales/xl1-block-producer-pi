@@ -495,6 +495,50 @@ MPT_P50="$(statz_num mempoolPendingTransactionsFetch p50Ms)"
 MPB_P50="$(statz_num mempoolPendingBlocksFetch p50Ms)"
 SUB_P50="$(statz_num mempoolSubmitBlock p50Ms)"
 
+# ---------------------------------------------------------------------- clock
+#
+# Whether this machine's timestamps can be compared with another host's. The
+# race observer on this Pi stamps when each candidate arrived, and those times
+# are only as good as the clock. systemd-timesyncd keeps time here; its own
+# status says how far off it measured itself. Cached ten minutes. A missing
+# timedatectl (tests, containers) leaves the field out rather than guessing.
+CLOCK_CACHE="${STATE_DIR}/.clock"
+if [[ "$(cache_age "${CLOCK_CACHE}")" -gt 600 ]] && command -v timedatectl >/dev/null 2>&1; then
+  CL_SYNCED="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+  CL_STATUS="$(timedatectl timesync-status 2>/dev/null || true)"
+  # "-23.136ms" / "512us" / "1.2s" -> milliseconds; anything else -> empty.
+  to_ms() { awk -v v="$1" 'BEGIN { if (match(v, /^[+-]?[0-9.]+/)) { n = substr(v, 1, RLENGTH); u = substr(v, RLENGTH + 1);
+    if (u == "ms") printf "%.1f", n; else if (u == "us") printf "%.3f", n / 1000; else if (u == "s") printf "%.1f", n * 1000 } }'; }
+  field() { printf '%s\n' "${CL_STATUS}" | sed -nE "s/^ *$1: *([^ ].*)$/\1/p" | head -1; }
+  CL_SERVER="$(field Server | sed -nE 's/.*\(([^)]+)\).*/\1/p')"
+  [[ -z "${CL_SERVER}" ]] && CL_SERVER="$(field Server | awk '{print $1}')"
+  CL_STRATUM="$(field Stratum)"
+  CL_OFFSET="$(to_ms "$(field Offset)")"
+  CL_JITTER="$(to_ms "$(field Jitter)")"
+  CL_ROOT="$(to_ms "$(field 'Root distance' | awk '{print $1}')")"
+  # "34min 8s" -> 2048
+  CL_POLL="$(field 'Poll interval' | sed -E 's/\(.*//' | awk '{ t = 0; for (i = 1; i <= NF; i++) { v = $i + 0;
+    if ($i ~ /min$/) t += v * 60; else if ($i ~ /h$/) t += v * 3600; else if ($i ~ /ms$/) t += 0; else if ($i ~ /s$/) t += v } if (t) print t }')"
+  if [[ "${CL_SYNCED}" == "yes" || "${CL_SYNCED}" == "no" ]]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${CL_SYNCED}" "${CL_SERVER}" "${CL_STRATUM}" "${CL_OFFSET}" \
+      "${CL_JITTER}" "${CL_ROOT}" "${CL_POLL}" "${COLLECTED_AT}" > "${CLOCK_CACHE}"
+  fi
+fi
+CLOCK_JSON=""
+if [[ -s "${CLOCK_CACHE}" ]]; then
+  IFS=$'\t' read -r C_SYNCED C_SERVER C_STRATUM C_OFFSET C_JITTER C_ROOT C_POLL C_AT < "${CLOCK_CACHE}" || true
+  num='^-?[0-9]+(\.[0-9]+)?$'
+  CLOCK_JSON="\"clock\":{\"synced\":$([[ "${C_SYNCED}" == yes ]] && echo true || echo false)"
+  [[ -n "${C_SERVER}" ]] && CLOCK_JSON+=",\"source\":\"$(json_escape "${C_SERVER}")\""
+  [[ "${C_STRATUM}" =~ ^[0-9]+$ ]] && CLOCK_JSON+=",\"stratum\":${C_STRATUM}"
+  [[ "${C_OFFSET}" =~ ${num} ]] && CLOCK_JSON+=",\"offsetMs\":${C_OFFSET},\"offsetAgainst\":\"$(json_escape "${C_SERVER}")\""
+  [[ "${C_JITTER}" =~ ${num} ]] && CLOCK_JSON+=",\"jitterMs\":${C_JITTER}"
+  [[ "${C_ROOT}" =~ ${num} ]] && CLOCK_JSON+=",\"rootDistanceMs\":${C_ROOT}"
+  [[ "${C_POLL}" =~ ^[0-9]+$ ]] && CLOCK_JSON+=",\"pollIntervalSeconds\":${C_POLL}"
+  [[ -n "${C_AT}" ]] && CLOCK_JSON+=",\"checkedAt\":\"$(json_escape "${C_AT}")\""
+  CLOCK_JSON+="},"
+fi
+
 {
   printf '{'
   printf '"collectedAt":"%s",' "${COLLECTED_AT}"
@@ -551,6 +595,7 @@ SUB_P50="$(statz_num mempoolSubmitBlock p50Ms)"
     [[ -n "${OS_AGE}" ]] && printf ',"aptAgeHours":%s' "${OS_AGE}"
     printf '},'
   fi
+  [[ -n "${CLOCK_JSON}" ]] && printf '%s' "${CLOCK_JSON}"
   [[ -n "${LAST_PUBLISHED}" ]] && printf '"lastPublishedAt":"%s",' "${LAST_PUBLISHED}"
   # JSON-number shape, not merely "digits": 0540 is digits and is not a number,
   # and this printf is the last thing standing between a bad read and a snapshot

@@ -3491,6 +3491,15 @@ function publicView(board) {
       checkedAt: state.node.clock.checkedAt,
     } : undefined,
 
+    // One row per height this node attempted (see the collector), joined to the
+    // chain and the race observer by oxyon.io. Only the agreed six columns, as
+    // numbers or null.
+    heights: Array.isArray(state.node?.heights?.rows) ? {
+      columns: ['n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs'],
+      rows: state.node.heights.rows.slice(-360).filter(Array.isArray)
+        .map((r) => r.slice(0, 6).map((v) => (v === null || !Number.isFinite(Number(v)) ? null : Number(v)))),
+    } : undefined,
+
     // Daily production and earnings, from the chain scan. The same rows the
     // Trends card draws.
     trend: { daily: trendDaily(), retainDays: TREND_RETAIN_DAYS },

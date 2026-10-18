@@ -524,6 +524,62 @@ if [[ "$(cache_age "${CLOCK_CACHE}")" -gt 600 ]] && command -v timedatectl >/dev
       "${CL_JITTER}" "${CL_ROOT}" "${CL_POLL}" "${COLLECTED_AT}" > "${CLOCK_CACHE}"
   fi
 fi
+# ------------------------------------------------------------- per-height rows
+#
+# One row per height this producer attempted: when it started building (this
+# host's clock, ms), its retries, validation failures and rejections, and how
+# long the time payload before it took (null when the node did not log it as
+# slow). oxyon.io joins these to the chain and the race observer by (network,
+# height, producer). Built up 30 s at a time from the slice already read, in a
+# small rolling file; a height that spans two cycles is merged, never doubled.
+HEIGHT_FILE="${STATE_DIR}/.height-rows"
+HEIGHT_CUR="${STATE_DIR}/.height-cur"
+declare -A H_AT=() H_RET=() H_VF=() H_REJ=() H_TP=()
+H_ORDER=()
+if [[ -s "${HEIGHT_FILE}" ]]; then
+  while read -r hn hat hret hvf hrej htp; do
+    [[ "${hn}" =~ ^[0-9]+$ ]] || continue
+    H_ORDER+=("${hn}"); H_AT[$hn]="${hat}"; H_RET[$hn]="${hret}"; H_VF[$hn]="${hvf}"; H_REJ[$hn]="${hrej}"; H_TP[$hn]="${htp}"
+  done < "${HEIGHT_FILE}"
+fi
+H_CURRENT=""; TP_LAST=""
+[[ -s "${HEIGHT_CUR}" ]] && read -r H_CURRENT TP_LAST < "${HEIGHT_CUR}"
+while IFS= read -r hline; do
+  [[ "${hline}" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)\ (.*)$ ]] || continue
+  hts="${BASH_REMATCH[1]}"; htext="${BASH_REMATCH[2]}"
+  if [[ "${htext}" =~ Generated\ time\ payload\ in\ ([0-9]+)ms ]]; then TP_LAST="${BASH_REMATCH[1]}"; continue; fi
+  if [[ "${htext}" =~ Building\ block\ ([0-9]+)(\ \(retry\ ([0-9]+)\))?$ ]]; then
+    hn="${BASH_REMATCH[1]}"; hr="${BASH_REMATCH[3]:-0}"
+    if [[ -z "${H_AT[$hn]:-}" ]]; then
+      H_ORDER+=("${hn}")
+      H_AT[$hn]="$(date -u -d "${hts}" +%s%3N 2>/dev/null || echo null)"
+      H_RET[$hn]=0; H_VF[$hn]=0; H_REJ[$hn]=0; H_TP[$hn]="${TP_LAST:-null}"
+    fi
+    (( hr > H_RET[$hn] )) && H_RET[$hn]="${hr}"
+    H_CURRENT="${hn}"; TP_LAST=""
+    continue
+  fi
+  if [[ -n "${H_CURRENT}" && -n "${H_AT[$H_CURRENT]:-}" ]]; then
+    [[ "${htext}" == *"Block validation failed"* ]] && H_VF[$H_CURRENT]=$(( H_VF[$H_CURRENT] + 1 ))
+    [[ "${htext}" == *"No candidate block can be appended"* ]] && H_REJ[$H_CURRENT]=$(( H_REJ[$H_CURRENT] + 1 ))
+  fi
+done <<< "${RAW_NEW_LOG}"
+HEIGHTS_JSON=""
+if (( ${#H_ORDER[@]} > 0 )); then
+  # ${a[@]: -360} is EMPTY when there are fewer than 360, so start at max(0, n-360).
+  HSTART=$(( ${#H_ORDER[@]} > 360 ? ${#H_ORDER[@]} - 360 : 0 ))
+  KEEP=("${H_ORDER[@]:HSTART}")
+  : > "${HEIGHT_FILE}.tmp"
+  HROWS=""
+  for hn in "${KEEP[@]}"; do
+    printf '%s %s %s %s %s %s\n' "${hn}" "${H_AT[$hn]}" "${H_RET[$hn]}" "${H_VF[$hn]}" "${H_REJ[$hn]}" "${H_TP[$hn]}" >> "${HEIGHT_FILE}.tmp"
+    HROWS+="${HROWS:+,}[${hn},${H_AT[$hn]},${H_RET[$hn]},${H_VF[$hn]},${H_REJ[$hn]},${H_TP[$hn]}]"
+  done
+  mv "${HEIGHT_FILE}.tmp" "${HEIGHT_FILE}"
+  HEIGHTS_JSON="\"heights\":{\"columns\":[\"n\",\"buildAt\",\"retries\",\"validationFailures\",\"rejected\",\"timePayloadMs\"],\"rows\":[${HROWS}]},"
+fi
+printf '%s %s\n' "${H_CURRENT}" "${TP_LAST}" > "${HEIGHT_CUR}"
+
 CLOCK_JSON=""
 if [[ -s "${CLOCK_CACHE}" ]]; then
   IFS=$'\t' read -r C_SYNCED C_SERVER C_STRATUM C_OFFSET C_JITTER C_ROOT C_POLL C_AT < "${CLOCK_CACHE}" || true
@@ -596,6 +652,7 @@ fi
     printf '},'
   fi
   [[ -n "${CLOCK_JSON}" ]] && printf '%s' "${CLOCK_JSON}"
+  [[ -n "${HEIGHTS_JSON}" ]] && printf '%s' "${HEIGHTS_JSON}"
   [[ -n "${LAST_PUBLISHED}" ]] && printf '"lastPublishedAt":"%s",' "${LAST_PUBLISHED}"
   # JSON-number shape, not merely "digits": 0540 is digits and is not a number,
   # and this printf is the last thing standing between a bad read and a snapshot

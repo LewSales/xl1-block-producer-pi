@@ -1646,6 +1646,16 @@ test('the clock is published by named field only, and only when read', () => {
   assert.equal(m.publicView(m.peerBoard()).clock, undefined, 'no reading is no field, never a zero offset')
 })
 
+test('per-height rows are published as six numbers or null, nothing else', () => {
+  m.state.node = { ok: true, heights: { columns: ['ignored'], rows: [[1827870, 1792353777865, 0, 1, 1, 25998, 'CANARY-EXTRA'], ['CANARY-ROW', 2], 'not-a-row'] } }
+  const pub = m.publicView(m.peerBoard())
+  assert.deepEqual(pub.heights.columns, ['n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs'])
+  assert.deepEqual(pub.heights.rows, [[1827870, 1792353777865, 0, 1, 1, 25998], [null, 2]])
+  assert.equal(JSON.stringify(pub).includes('CANARY'), false)
+  m.state.node = { ok: true }
+  assert.equal(m.publicView(m.peerBoard()).heights, undefined)
+})
+
 test('the status is a word, never the sentences behind it', () => {
   // Problem strings are assembled from error messages, and an error message is
   // exactly where a path or a hostname arrives without anyone deciding it should.

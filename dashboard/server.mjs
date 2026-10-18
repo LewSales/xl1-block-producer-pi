@@ -2773,10 +2773,19 @@ function eligibilityVerdict(node = state.node, ev = chainEvidence(), now = Date.
   if (node.eligibilityIgnored) return { category: 'not-enforced', counts: false, note: node.eligibilityNote }
   if (!ev.usable) {
     const warming = now - Date.parse(state.startedAt ?? 0) < ELIGIBILITY_WARMUP_MS
+    // A node with blocks on record whose complaint merely cannot be checked
+    // this minute is not a fault. Its self-report ("insufficient stake") is
+    // standing noise, and every chain-poll blip turned it into a high-priority
+    // page that cleared a minute later -- a dozen times in the week of
+    // 2026-10-12, while the node held rank 1. A real stall is still caught by
+    // the alerter's not-producing and chain-unreachable checks.
+    const record = peers.get(PRODUCER_ADDRESS) ?? 0
     return {
       category: 'unverified',
-      counts: !warming,
-      note: warming ? 'dashboard starting: the chain has not been read yet' : `the node's own report; ${ev.why}`,
+      counts: !warming && record === 0,
+      note: warming ? 'dashboard starting: the chain has not been read yet'
+        : record > 0 ? `the node's own report; ${ev.why}; this node has ${record} blocks on record`
+        : `the node's own report; ${ev.why}`,
       problem: `producer reports ${reason} — unverified: ${ev.why}`,
     }
   }

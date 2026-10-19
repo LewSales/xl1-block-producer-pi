@@ -114,9 +114,12 @@ export function buildDataset(events, chain, builds, opts = {}) {
       }
       const b = builds[name]?.get(N)
       if (b && b.timePayloadMs != null && !early(c)) { s.tp.push(b.timePayloadMs); s.afterBuild.push(c.t - b.buildLog) }
-      rows.push({ p: name, epoch: c.epoch, seen: c.t, rank: r || null, early: early(c), parentProducer: isParent, won, txs: c.txs, timePayloadMs: b?.timePayloadMs ?? null })
+      // Candidate identity: the hash XYO's RPC reported for this candidate (not recomputed here).
+      // A producer that offered more candidates at this height lists the later ones in alt.
+      const alt = cs.filter(x => x.prod === c.prod && x.hash !== c.hash).sort((a, b) => a.t - b.t).map(x => ({ h: x.hash ?? null, epoch: x.epoch, seen: x.t }))
+      rows.push({ p: name, epoch: c.epoch, seen: c.t, rank: r || null, early: early(c), parentProducer: isParent, won, txs: c.txs, timePayloadMs: b?.timePayloadMs ?? null, h: c.hash ?? null, ...(alt.length ? { alt } : {}) })
     }
-    heights.push({ n: N, heartbeat, parentSeen: parent.t, opens, winner, winnerRank: wr || null, headSeen: win.t, rows })
+    heights.push({ n: N, heartbeat, parentSeen: parent.t, opens, winner, winnerRank: wr || null, headSeen: win.t, headHash: win.hash ?? null, rows })
   }
   const range = (a) => ({ p10: q(a, .1), p50: q(a, .5), p90: q(a, .9), n: a.length })
   const producers = Object.entries(per).map(([name, s]) => ({
@@ -141,6 +144,8 @@ export function buildDataset(events, chain, builds, opts = {}) {
     schema: 1, generatedAt: Date.now(), network: net, names: addressOf,
     window: { from: ts.length ? Math.min(...ts) : null, to: ts.length ? Math.max(...ts) : null },
     heightsAnalysed: heights.length, rankDist, rule: { newestAt2nd: ruleHits, firstArrival: firstHits },
+    // Where the hashes in heights[].headHash and rows[].h / alt[].h come from, and what they are not.
+    candidateIds: { rows: "XYO RPC mempoolViewer_pendingBlocks _hash, as reported", head: 'block CDN head _hash, as reported', recomputedByObserver: false },
     producers, heights: heights.slice(-waterfallHeights), board,
   }
 }

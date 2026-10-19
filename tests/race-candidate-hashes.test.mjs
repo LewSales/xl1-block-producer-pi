@@ -22,6 +22,8 @@ assert.ok([a.h, ...a.alt.map((x) => x.h)].includes(h.headHash), 'the winner is i
 assert.equal(b.alt, undefined, 'alt appears only when a producer offered more than one candidate')
 assert.equal(d.candidateIds.recomputedByObserver, false, 'provenance says the hashes are as reported, not recomputed')
 assert.match(d.candidateIds.rows, /mempoolViewer_pendingBlocks/)
+assert.deepEqual(d.candidateIds.coverage, { candidates: 3, firstSeen: t0 + 1000, lastSeen: t0 + 5000 }, 'coverage says when candidates were last recorded (window.to also moves with heads)')
+assert.deepEqual(buildDataset(events.filter((e) => e.k !== 'cand'), [], {}, { net: 'sequence' }).candidateIds.coverage, { candidates: 0, firstSeen: null, lastSeen: null }, 'no candidates recorded is stated, not hidden')
 // unchanged fields: removing the new ones gives what the previous code produced for the same input
 for (const r of h.rows) for (const k of ['p', 'epoch', 'seen', 'rank', 'early', 'parentProducer', 'won', 'txs', 'timePayloadMs']) assert.ok(k in r, `row keeps ${k}`)
 assert.equal(h.winnerRank, 1, 'stage A does not change ranking (earliest candidate per producer, as before)')

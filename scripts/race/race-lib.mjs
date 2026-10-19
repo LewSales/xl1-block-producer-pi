@@ -145,7 +145,10 @@ export function buildDataset(events, chain, builds, opts = {}) {
     window: { from: ts.length ? Math.min(...ts) : null, to: ts.length ? Math.max(...ts) : null },
     heightsAnalysed: heights.length, rankDist, rule: { newestAt2nd: ruleHits, firstArrival: firstHits },
     // Where the hashes in heights[].headHash and rows[].h / alt[].h come from, and what they are not.
-    candidateIds: { rows: "XYO RPC mempoolViewer_pendingBlocks _hash, as reported", head: 'block CDN head _hash, as reported', recomputedByObserver: false },
+    // coverage: when this observer last recorded a candidate. window.to also moves with heads and
+    // transactions, so a stalled candidate feed is only visible here.
+    candidateIds: { rows: "XYO RPC mempoolViewer_pendingBlocks _hash, as reported", head: 'block CDN head _hash, as reported', recomputedByObserver: false,
+      coverage: (() => { const ct = events.filter(e => e.k === 'cand').map(e => e.t); return { candidates: ct.length, firstSeen: ct.length ? Math.min(...ct) : null, lastSeen: ct.length ? Math.max(...ct) : null } })() },
     producers, heights: heights.slice(-waterfallHeights), board,
   }
 }

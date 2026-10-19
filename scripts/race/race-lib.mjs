@@ -74,25 +74,38 @@ export function buildDataset(events, chain, builds, opts = {}) {
   const per = {}, P = n => (per[n] ??= { heights: 0, wins: 0, slot: { 1: 0, 2: 0, 3: 0, 4: 0 }, winAt: { 1: 0, 2: 0, 3: 0, 4: 0 }, early: 0, missing: 0, pool: [], hbReact: [], txReact: [], tp: [], afterBuild: [] })
   const rankDist = { 1: 0, 2: 0, 3: 0, 4: 0 }
   let ruleHits = 0, firstHits = 0
+  const rankDistLegacy = { 1: 0, 2: 0, 3: 0, 4: 0 }; let ruleHitsLegacy = 0, firstHitsLegacy = 0
   const heights = []
   for (const [N, cs] of [...cands].sort((a, b) => a[0] - b[0])) {
     const parent = heads.get(N - 1), win = heads.get(N)
     if (!parent || !win || !parent.epoch) continue
     const due = parent.epoch + 60000
-    const by = new Map(); for (const c of cs) if (!by.has(c.prod) || c.t < by.get(c.prod).t) by.set(c.prod, c)
+    const byEarliest = new Map(); for (const c of cs) if (!byEarliest.has(c.prod) || c.t < byEarliest.get(c.prod).t) byEarliest.set(c.prod, c)
+    // The winning producer is represented by its WINNING candidate (hash = canonical head hash), not
+    // by its earliest: a producer can offer several candidates at one height and a later one can win.
+    // Without a hash match it stays the earliest, and the height says so (winnerBy: 'producer').
+    const winC = win.hash ? cs.find(c => c.hash === win.hash) : null
+    const by = new Map(byEarliest); if (winC) by.set(winC.prod, winC)
+    const rankCorrected = Boolean(winC && byEarliest.get(winC.prod) !== winC)
     const isHb = c => c.txs === 0
     const early = c => isHb(c) && c.epoch < due
-    const el = [...by.values()].filter(c => !early(c) && c.prod !== parent.prod).sort((a, b) => a.t - b.t || b.idx - a.idx)
+    const eligible = m => [...m.values()].filter(c => !early(c) && c.prod !== parent.prod).sort((a, b) => a.t - b.t || b.idx - a.idx)
+    const el = eligible(by), elLegacy = eligible(byEarliest)
     if (!el.length) continue
     const winner = nameOf(win.prod)
-    const wr = el.findIndex(c => nameOf(c.prod) === winner) + 1
-    if (wr >= 1) rankDist[Math.min(wr, 4)]++
-    if (wr === 1) firstHits++
-    if (el.length >= 2) {
-      const cut = el[1].t
-      const newest = el.filter(c => c.t <= cut).reduce((a, b) => (b.t > a.t || (b.t === a.t && b.idx < a.idx)) ? b : a)
-      if (nameOf(newest.prod) === winner) ruleHits++
+    const tally = (list, dist, onFirst, onRule) => {
+      const r = list.findIndex(c => nameOf(c.prod) === winner) + 1
+      if (r >= 1) dist[Math.min(r, 4)]++
+      if (r === 1) onFirst()
+      if (list.length >= 2) {
+        const cut = list[1].t
+        const newest = list.filter(c => c.t <= cut).reduce((a, b) => (b.t > a.t || (b.t === a.t && b.idx < a.idx)) ? b : a)
+        if (nameOf(newest.prod) === winner) onRule()
+      }
+      return r
     }
+    const wr = tally(el, rankDist, () => firstHits++, () => ruleHits++)
+    const wrLegacy = tally(elLegacy, rankDistLegacy, () => firstHitsLegacy++, () => ruleHitsLegacy++)
     const heartbeat = el.every(isHb)
     let opens
     if (heartbeat) opens = due
@@ -119,7 +132,7 @@ export function buildDataset(events, chain, builds, opts = {}) {
       const alt = cs.filter(x => x.prod === c.prod && x.hash !== c.hash).sort((a, b) => a.t - b.t).map(x => ({ h: x.hash ?? null, epoch: x.epoch, seen: x.t }))
       rows.push({ p: name, epoch: c.epoch, seen: c.t, rank: r || null, early: early(c), parentProducer: isParent, won, txs: c.txs, timePayloadMs: b?.timePayloadMs ?? null, h: c.hash ?? null, ...(alt.length ? { alt } : {}) })
     }
-    heights.push({ n: N, heartbeat, parentSeen: parent.t, opens, winner, winnerRank: wr || null, headSeen: win.t, headHash: win.hash ?? null, rows })
+    heights.push({ n: N, heartbeat, parentSeen: parent.t, opens, winner, winnerRank: wr || null, winnerBy: winC ? 'hash' : 'producer', ...(rankCorrected ? { rankCorrected: true, winnerRankLegacy: wrLegacy || null } : {}), headSeen: win.t, headHash: win.hash ?? null, rows })
   }
   const range = (a) => ({ p10: q(a, .1), p50: q(a, .5), p90: q(a, .9), n: a.length })
   const producers = Object.entries(per).map(([name, s]) => ({
@@ -144,6 +157,11 @@ export function buildDataset(events, chain, builds, opts = {}) {
     schema: 1, generatedAt: Date.now(), network: net, names: addressOf,
     window: { from: ts.length ? Math.min(...ts) : null, to: ts.length ? Math.max(...ts) : null },
     heightsAnalysed: heights.length, rankDist, rule: { newestAt2nd: ruleHits, firstArrival: firstHits },
+    // rankDist and rule rank the winner by its winning candidate (matched by hash); legacy keeps the
+    // earlier method (each producer's earliest candidate) so published history stays comparable.
+    // Observed arrival order is the order this observer saw candidates in XYO's RPC listing, not network arrival.
+    rankBasis: 'winning candidate by hash, else earliest candidate per producer',
+    legacy: { rankBasis: 'earliest candidate per producer', rankDist: rankDistLegacy, rule: { newestAt2nd: ruleHitsLegacy, firstArrival: firstHitsLegacy } },
     // Where the hashes in heights[].headHash and rows[].h / alt[].h come from, and what they are not.
     // coverage: when this observer last recorded a candidate. window.to also moves with heads and
     // transactions, so a stalled candidate feed is only visible here.

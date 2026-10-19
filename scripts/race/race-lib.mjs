@@ -80,7 +80,8 @@ export function buildDataset(events, chain, builds, opts = {}) {
     const parent = heads.get(N - 1), win = heads.get(N)
     if (!parent || !win || !parent.epoch) continue
     const due = parent.epoch + 60000
-    const byEarliest = new Map(); for (const c of cs) if (!byEarliest.has(c.prod) || c.t < byEarliest.get(c.prod).t) byEarliest.set(c.prod, c)
+    const byEarliest = new Map(), ofProd = new Map()
+    for (const c of cs) { if (!byEarliest.has(c.prod) || c.t < byEarliest.get(c.prod).t) byEarliest.set(c.prod, c); (ofProd.get(c.prod) || ofProd.set(c.prod, []).get(c.prod)).push(c) }
     // The winning producer is represented by its WINNING candidate (hash = canonical head hash), not
     // by its earliest: a producer can offer several candidates at one height and a later one can win.
     // Without a hash match it stays the earliest, and the height says so (winnerBy: 'producer').
@@ -129,10 +130,16 @@ export function buildDataset(events, chain, builds, opts = {}) {
       if (b && b.timePayloadMs != null && !early(c)) { s.tp.push(b.timePayloadMs); s.afterBuild.push(c.t - b.buildLog) }
       // Candidate identity: the hash XYO's RPC reported for this candidate (not recomputed here).
       // A producer that offered more candidates at this height lists the later ones in alt.
-      const alt = cs.filter(x => x.prod === c.prod && x.hash !== c.hash).sort((a, b) => a.t - b.t).map(x => ({ h: x.hash ?? null, epoch: x.epoch, seen: x.t }))
-      rows.push({ p: name, epoch: c.epoch, seen: c.t, rank: r || null, early: early(c), parentProducer: isParent, won, txs: c.txs, timePayloadMs: b?.timePayloadMs ?? null, h: c.hash ?? null, ...(alt.length ? { alt } : {}) })
+      const mine = ofProd.get(c.prod)
+      const alt = mine.length > 1 ? mine.filter(x => x.hash !== c.hash).sort((a, b) => a.t - b.t).map(x => ({ h: x.hash ?? null, epoch: x.epoch, seen: x.t })) : []
+      const row = { p: name, epoch: c.epoch, seen: c.t, rank: r || null, early: early(c), parentProducer: isParent, won, txs: c.txs, timePayloadMs: b?.timePayloadMs ?? null, h: c.hash ?? null }
+      if (alt.length) row.alt = alt
+      rows.push(row)
     }
-    heights.push({ n: N, heartbeat, parentSeen: parent.t, opens, winner, winnerRank: wr || null, winnerBy: winC ? 'hash' : 'producer', ...(rankCorrected ? { rankCorrected: true, winnerRankLegacy: wrLegacy || null } : {}), headSeen: win.t, headHash: win.hash ?? null, rows })
+    const height = { n: N, heartbeat, parentSeen: parent.t, opens, winner, winnerRank: wr || null, winnerBy: winC ? 'hash' : 'producer' }
+    if (rankCorrected) { height.rankCorrected = true; height.winnerRankLegacy = wrLegacy || null }
+    height.headSeen = win.t; height.headHash = win.hash ?? null; height.rows = rows
+    heights.push(height)
   }
   const range = (a) => ({ p10: q(a, .1), p50: q(a, .5), p90: q(a, .9), n: a.length })
   const producers = Object.entries(per).map(([name, s]) => ({
@@ -166,7 +173,7 @@ export function buildDataset(events, chain, builds, opts = {}) {
     // coverage: when this observer last recorded a candidate. window.to also moves with heads and
     // transactions, so a stalled candidate feed is only visible here.
     candidateIds: { rows: "XYO RPC mempoolViewer_pendingBlocks _hash, as reported", head: 'block CDN head _hash, as reported', recomputedByObserver: false,
-      coverage: (() => { const ct = events.filter(e => e.k === 'cand').map(e => e.t); return { candidates: ct.length, firstSeen: ct.length ? Math.min(...ct) : null, lastSeen: ct.length ? Math.max(...ct) : null } })() },
+      coverage: (() => { let n = 0, lo = Infinity, hi = -Infinity; for (const e of events) if (e.k === 'cand') { n++; if (e.t < lo) lo = e.t; if (e.t > hi) hi = e.t } return { candidates: n, firstSeen: n ? lo : null, lastSeen: n ? hi : null } })() },
     producers, heights: heights.slice(-waterfallHeights), board,
   }
 }

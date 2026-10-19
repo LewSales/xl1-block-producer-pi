@@ -131,8 +131,8 @@ export function buildDataset(events, chain, builds, opts = {}) {
       // Candidate identity: the hash XYO's RPC reported for this candidate (not recomputed here).
       // A producer that offered more candidates at this height lists the later ones in alt.
       const mine = ofProd.get(c.prod)
-      const alt = mine.length > 1 ? mine.filter(x => x.hash !== c.hash).sort((a, b) => a.t - b.t).map(x => ({ h: x.hash ?? null, epoch: x.epoch, seen: x.t })) : []
-      const row = { p: name, epoch: c.epoch, seen: c.t, rank: r || null, early: early(c), parentProducer: isParent, won, txs: c.txs, timePayloadMs: b?.timePayloadMs ?? null, h: c.hash ?? null }
+      const alt = mine.length > 1 ? mine.filter(x => x.hash !== c.hash).sort((a, b) => a.t - b.t).map(x => ({ h: x.hash ?? null, hv: x.hv ?? null, epoch: x.epoch, seen: x.t })) : []
+      const row = { p: name, epoch: c.epoch, seen: c.t, rank: r || null, early: early(c), parentProducer: isParent, won, txs: c.txs, timePayloadMs: b?.timePayloadMs ?? null, h: c.hash ?? null, hv: c.hv ?? null }
       if (alt.length) row.alt = alt
       rows.push(row)
     }
@@ -172,7 +172,7 @@ export function buildDataset(events, chain, builds, opts = {}) {
     // Where the hashes in heights[].headHash and rows[].h / alt[].h come from, and what they are not.
     // coverage: when this observer last recorded a candidate. window.to also moves with heads and
     // transactions, so a stalled candidate feed is only visible here.
-    candidateIds: { rows: "XYO RPC mempoolViewer_pendingBlocks _hash, as reported", head: 'block CDN head _hash, as reported', recomputedByObserver: false,
+    candidateIds: { rows: "XYO RPC mempoolViewer_pendingBlocks _hash, as reported", head: 'block CDN head _hash, as reported', recomputedByObserver: true, hv: 'rows[].hv / alt[].hv: true = the observer recomputed the hash from the candidate bytes and it matched; false = mismatch; null = not checked (collected before this version)',
       coverage: (() => { let n = 0, lo = Infinity, hi = -Infinity; for (const e of events) if (e.k === 'cand') { n++; if (e.t < lo) lo = e.t; if (e.t > hi) hi = e.t } return { candidates: n, firstSeen: n ? lo : null, lastSeen: n ? hi : null } })() },
     producers, heights: heights.slice(-waterfallHeights), board,
   }

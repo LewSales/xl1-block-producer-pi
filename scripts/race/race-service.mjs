@@ -19,6 +19,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { buildDataset, makeNameOf, parseBuildLog } from './race-lib.mjs'
 
@@ -69,6 +70,11 @@ process.on('exit', code => { if (code) log(`exit ${code}`) })
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const rpc = async (method, params) => (await (await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(5000) })).json()).result
 const timeOf = p => (p || []).find(x => x.schema === 'network.xyo.time') || {}
+// Independent check of each candidate's hash, from the bytes the poll already returned: SHA-256 of
+// compact JSON, keys sorted at every level, top-level '_' fields removed (oxyon-evidence xyo_hash).
+// true = recomputed and equal to the RPC's _hash; false = recomputed and different; null = could not.
+const sortDeep = v => Array.isArray(v) ? v.map(sortDeep) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortDeep(v[k])])) : v
+const hashVerified = bw => { try { return createHash('sha256').update(JSON.stringify(sortDeep(Object.fromEntries(Object.entries(bw).filter(([k]) => !k.startsWith('_')))))).digest('hex') === bw._hash } catch { return null } }
 
 // ---- state: rolling events, loaded from disk so a restart keeps the window ----
 let events = []
@@ -92,7 +98,7 @@ async function poolLoop(until) {
         seenCand.add(bw._hash)
         const tp = timeOf(p)
         const txHashes = (p || []).filter(x => x.schema === 'network.xyo.boundwitness' && x.fees).map(x => x._hash)
-        add({ k: 'cand', t, block: bw.block, prod: (bw.addresses || [])[0], epoch: tp.epoch, hash: bw._hash, idx, txs: txHashes.length, txHashes })
+        add({ k: 'cand', t, block: bw.block, prod: (bw.addresses || [])[0], epoch: tp.epoch, hash: bw._hash, hv: hashVerified(bw), idx, txs: txHashes.length, txHashes })
       })
     } catch {}
     await sleep(Math.max(0, POOL_MS - (Date.now() - s)))

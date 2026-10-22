@@ -966,10 +966,12 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 // the only thing that says which build answered. It must degrade to "unknown"
 // rather than throwing or, worse, claiming a version it is not.
 
-test('the snapshot carries a build identity', () => {
+test('the snapshot carries a build identity', async () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.7', 'read from package.json, not hardcoded')
+  // Compared with package.json itself: a literal here failed on every version bump.
+  const pkg = JSON.parse(await readFile(join(here, '..', 'dashboard', 'package.json'), 'utf8'))
+  assert.equal(b.version, pkg.version, 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -2386,4 +2388,116 @@ test('a batch still partial at the smallest size is retried, never skipped', asy
   await m.backfillHistory(viewer, 1000)
   assert.equal(m.chainHistory.cursor, 1000, 'the checkpoint did not move past the hole')
   assert.match(m.chainHistory.error, /even at the smallest batch/)
+})
+
+// ------------------------------------------------------------- time payload
+//
+// The wait on Ethereum before every candidate. On 2026-10-22 it hung for 15-140 s
+// at a time and every other card on this page stayed green.
+
+const NOW = Date.parse('2026-10-22T22:00:00Z')
+const tpRow = (minsAgo, ms, rejected = 0) => [1_000_000 + minsAgo, NOW - minsAgo * 60_000, 0, 0, rejected, ms]
+
+test('a payload summary covers the last hour of builds and nothing older', () => {
+  const rows = [tpRow(90, 99_000), tpRow(50, 300), tpRow(40, 400), tpRow(30, 5_000, 1), tpRow(20, null), tpRow(10, 200)]
+  const s = m.payloadSummary({ rows }, { host: 'eth.drpc.org' }, NOW)
+  assert.equal(s.builds, 5, 'the 90-minute-old build is outside the window')
+  assert.equal(s.measured, 4, 'a build with no payload line is counted as built, not as measured')
+  assert.equal(s.p50Ms, 400)
+  assert.equal(s.maxMs, 5_000)
+  assert.equal(s.slow, 1)
+  assert.equal(s.rejected, 1)
+  assert.deepEqual(s.endpoint, { host: 'eth.drpc.org', configured: true })
+})
+
+test('a payload summary of nothing is zeroes and blanks, never a throw', () => {
+  for (const h of [undefined, null, {}, { rows: 'x' }, { rows: [null, 'a', [1, null, 0, 0, 0, 5]] }]) {
+    const s = m.payloadSummary(h, undefined, NOW)
+    assert.equal(s.measured, 0)
+    assert.equal(s.p50Ms, undefined)
+    assert.deepEqual(s.endpoint, { host: null, configured: false }, 'no host is the image default')
+  }
+})
+
+test('only a plain hostname survives as the endpoint', () => {
+  for (const bad of ['https://eth.drpc.org', 'eth-mainnet.g.alchemy.com/v2/KEY', 'a b', '', 42, { x: 1 }]) {
+    assert.equal(m.evmEndpoint({ host: bad }).host, null, `rejected: ${JSON.stringify(bad)}`)
+  }
+  assert.equal(m.evmEndpoint({ host: 'ETH.drpc.ORG' }).host, 'eth.drpc.org')
+})
+
+test('slow payloads page only when they are a real share of enough builds', () => {
+  const prev = m.state.node
+  try {
+    const slowRows = Array.from({ length: 30 }, (_, i) => tpRow(i + 1, i < 7 ? 20_000 : 300))
+    m.state.node = { ok: true, heights: { rows: slowRows }, evmRpc: { host: null } }
+    let v = m.timePayloadView(NOW)
+    assert.equal(v.producers.length, 1)
+    assert.equal(v.producers[0].id, 'self')
+    assert.equal(v.alerts.length, 1, '7 of 30 is over one in five')
+    assert.match(v.alerts[0], /^this producer: 7 of 30 time payloads over 3 s in the last hour \(Ethereum RPC image default\)$/)
+
+    // Two slow out of five builds is a bigger share and still not enough to page on.
+    m.state.node = { ok: true, heights: { rows: [tpRow(1, 9_000), tpRow(2, 9_000), tpRow(3, 300), tpRow(4, 300), tpRow(5, 300)] } }
+    assert.deepEqual(m.timePayloadView(NOW).alerts, [])
+
+    // Every producer the collector reports, each under its own name and endpoint.
+    m.state.node = { ok: true, localProducers: [
+      { id: 'main-cc91', network: 'mainnet', evmRpc: { host: 'eth.drpc.org' }, heights: { rows: Array.from({ length: 25 }, (_, i) => tpRow(i + 1, 280)) } },
+      { id: 'main-653e', network: 'mainnet', evmRpc: { host: null }, heights: { rows: slowRows } },
+    ] }
+    v = m.timePayloadView(NOW)
+    assert.deepEqual(v.producers.map((p) => p.id), ['main-cc91', 'main-653e'])
+    assert.equal(v.alerts.length, 1)
+    assert.match(v.alerts[0], /^main-653e: /)
+    assert.equal('hasRows' in v.producers[0], false, 'internal bookkeeping is not published')
+
+    // A collector too old to write height rows: no card, rather than a card of zeroes.
+    m.state.node = { ok: true, container: { running: true } }
+    assert.equal(m.timePayloadView(NOW), undefined)
+    m.state.node = { ok: false, error: 'x' }
+    assert.equal(m.timePayloadView(NOW), undefined)
+  } finally {
+    m.state.node = prev
+  }
+})
+
+test('the status document carries the payload view for the alerter', () => {
+  const prev = m.state.node
+  try {
+    m.state.node = { ok: true, stale: false, container: { running: true }, heights: { rows: [tpRow(1, 300)] } }
+    const s = m.snapshot()
+    assert.ok(Array.isArray(s.timePayload?.producers))
+    assert.deepEqual(s.timePayload.alerts, [])
+  } finally {
+    m.state.node = prev
+  }
+})
+
+test('a peer\'s producers are listed under it, with only the fields the card draws', () => {
+  const addr = 'a9304753eade52dd22b1a6fc519b571a4dc2653e'
+  const list = m.fleetProducers({
+    chain: { network: 'sequence' },
+    peers: { top: [{ address: '2152e6aec996742fb6e52ae1aad87bd44f2ccc91', blocks: 50, sharePercent: 12.5, rank: 2, label: 'LewSales-2' }] },
+    timePayload: { producers: [{ id: 'main-653e', p50Ms: 360, slow: 2, measured: 40, endpoint: { host: 'eth.drpc.org' } }] },
+    node: { localProducers: [
+      { id: 'node', network: 'sequence', rewardAddress: '2152e6aec996742fb6e52ae1aad87bd44f2ccc91', running: true, builds: 120, heights: { rows: [[1, 2, 3]] }, mnemonic: 'never' },
+      { id: 'main-653e', network: 'mainnet', rewardAddress: addr, running: false, builds: 300, timePayloadP50Ms: 999 },
+      { id: 'x', rewardAddress: 'not-hex' },
+      null,
+    ] },
+  })
+  assert.equal(list.length, 3, 'non-objects are dropped')
+  assert.equal(list[0].label, 'LewSales-2', 'standing from the peer, for a producer on the peer\'s own chain')
+  assert.equal(list[0].rank, 2)
+  assert.equal(list[0].heights, undefined, 'no height rows travel between dashboards')
+  assert.equal(list[0].mnemonic, undefined)
+  assert.equal(list[1].rank, undefined, 'the peer cannot rank a producer on a chain it does not scan')
+  assert.equal(list[1].running, false)
+  assert.equal(list[1].payloadP50Ms, 360, 'the payload view wins over the older single figure')
+  assert.equal(list[1].evmHost, 'eth.drpc.org')
+  assert.equal(list[2].address, undefined, 'a malformed address is not passed on')
+  assert.equal(m.fleetProducers({ node: {} }), undefined)
+  // fleetSummary carries the list.
+  assert.equal(m.fleetSummary({ node: { localProducers: [{ id: 'a' }] } }).localProducers.length, 1)
 })

@@ -564,6 +564,22 @@ while IFS= read -r hline; do
     [[ "${htext}" == *"No candidate block can be appended"* ]] && H_REJ[$H_CURRENT]=$(( H_REJ[$H_CURRENT] + 1 ))
   fi
 done <<< "${RAW_NEW_LOG}"
+# Which Ethereum endpoint the time payload is fetched from: the host only. The
+# URL is one of the image's secrets -- Alchemy and Infura carry the API key in
+# its path -- so it is matched here and only the hostname leaves this script.
+# No host means the variable is unset and the image's default is in use.
+EVM_HOST=""
+# The template names the one variable, so the rest of the environment (the
+# recovery phrase among it) never leaves Docker, not even into this pipe.
+EVM_URL="$(docker inspect "${CONTAINER}" \
+  --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "XL1_EVM_RPC_URL"}}{{println .}}{{end}}{{end}}' 2>/dev/null \
+  | sed -n 's/^XL1_EVM_RPC_URL=//p' | head -n 1)"
+if [[ "${EVM_URL}" =~ ^[A-Za-z][A-Za-z0-9+.-]*://([^/?#@]*@)?([A-Za-z0-9.-]+) ]]; then
+  EVM_HOST="${BASH_REMATCH[2],,}"
+fi
+unset EVM_URL
+EVM_JSON="\"evmRpc\":{\"host\":$([[ -n "${EVM_HOST}" ]] && printf '"%s"' "${EVM_HOST}" || printf 'null')},"
+
 HEIGHTS_JSON=""
 if (( ${#H_ORDER[@]} > 0 )); then
   # ${a[@]: -360} is EMPTY when there are fewer than 360, so start at max(0, n-360).
@@ -653,6 +669,7 @@ fi
   fi
   [[ -n "${CLOCK_JSON}" ]] && printf '%s' "${CLOCK_JSON}"
   [[ -n "${HEIGHTS_JSON}" ]] && printf '%s' "${HEIGHTS_JSON}"
+  printf '%s' "${EVM_JSON}"
   [[ -n "${LAST_PUBLISHED}" ]] && printf '"lastPublishedAt":"%s",' "${LAST_PUBLISHED}"
   # JSON-number shape, not merely "digits": 0540 is digits and is not a number,
   # and this printf is the last thing standing between a bad read and a snapshot

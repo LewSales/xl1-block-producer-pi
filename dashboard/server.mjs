@@ -2398,6 +2398,78 @@ function priceView() {
   }
 }
 
+// ------------------------------------------------------------- time payload
+//
+// Before every candidate the producer asks Ethereum for its latest block and
+// waits for the answer. On 2026-10-22 the image's default endpoint hung for
+// 15-140 s at a time for about an hour and a half; every candidate built after
+// such a wait arrived too late, and nothing on this page moved -- the node was
+// up, healthy and building. Read from the per-height rows the collector already
+// writes, so it costs no request of its own.
+const SLOW_PAYLOAD_MS = 3_000
+const PAYLOAD_WINDOW_MS = 3_600_000
+// One slow payload in five over an hour, and only with enough builds behind it:
+// one 4 s payload out of three builds is noise, twelve out of sixty is not.
+const PAYLOAD_ALERT_SHARE = 0.2
+const PAYLOAD_ALERT_MIN = 20
+
+/** Host only. The URL can carry an API key in its path or query (Alchemy and
+ *  Infura both put it there), so the collector sends the host alone and this
+ *  keeps nothing that is not a plain hostname. No host means the image's own
+ *  default endpoint. */
+function evmEndpoint(evm) {
+  const host = typeof evm?.host === 'string' && /^[a-z0-9.-]{1,253}$/i.test(evm.host) ? evm.host.toLowerCase() : null
+  return { host, configured: Boolean(host) }
+}
+
+/** The last hour of one producer's builds: how long each waited on its time
+ *  payload, and how many candidates were rejected. Rows are the collector's
+ *  [n, buildAt, retries, validationFailures, rejected, timePayloadMs]. */
+function payloadSummary(heights, evm, now = Date.now()) {
+  const rows = Array.isArray(heights?.rows) ? heights.rows.filter(Array.isArray) : []
+  const recent = rows.filter((r) => r[1] !== null && Number.isFinite(Number(r[1])) && now - Number(r[1]) <= PAYLOAD_WINDOW_MS)
+  const tp = recent.map((r) => r[5])
+    .filter((v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)))
+    .map(Number).sort((a, b) => a - b)
+  const at = (q) => (tp.length ? tp[Math.min(tp.length - 1, Math.floor(tp.length * q))] : undefined)
+  return {
+    windowSeconds: PAYLOAD_WINDOW_MS / 1000,
+    builds: recent.length,
+    measured: tp.length,
+    p50Ms: at(0.5),
+    p90Ms: at(0.9),
+    maxMs: tp.length ? tp[tp.length - 1] : undefined,
+    slow: tp.filter((v) => v > SLOW_PAYLOAD_MS).length,
+    slowOverMs: SLOW_PAYLOAD_MS,
+    rejected: recent.reduce((a, r) => a + (Number(r[4]) || 0), 0),
+    endpoint: evmEndpoint(evm),
+  }
+}
+
+/** Every producer this host's collector reports, or the one this page is about
+ *  when the collector reports only that. `alerts` is what the alerter pages on:
+ *  worded here, once, so both hosts' alerters say the same thing. */
+function timePayloadView(now = Date.now()) {
+  const n = state.node
+  if (!n?.ok) return undefined
+  const local = Array.isArray(n.localProducers) ? n.localProducers.filter((p) => p && typeof p === 'object') : []
+  const producers = local.length
+    ? local.map((p) => ({ id: typeof p.id === 'string' ? p.id : 'unknown', network: p.network, hasRows: Array.isArray(p.heights?.rows), ...payloadSummary(p.heights, p.evmRpc, now) }))
+    : [{ id: 'self', network: NETWORK, hasRows: Array.isArray(n.heights?.rows), ...payloadSummary(n.heights, n.evmRpc, now) }]
+  // A collector too old to write height rows says nothing about payloads, and
+  // a card of zeroes would claim that it did.
+  if (!producers.some((p) => p.hasRows)) return undefined
+  const alerts = producers
+    .filter((p) => p.measured >= PAYLOAD_ALERT_MIN && p.slow / p.measured >= PAYLOAD_ALERT_SHARE)
+    .map((p) => `${p.id === 'self' ? 'this producer' : p.id}: ${p.slow} of ${p.measured} time payloads over ${SLOW_PAYLOAD_MS / 1000} s in the last hour (Ethereum RPC ${p.endpoint.host ?? 'image default'})`)
+  return {
+    producers: producers.map(({ hasRows, ...p }) => p),
+    alerts,
+    alertShare: PAYLOAD_ALERT_SHARE,
+    alertMin: PAYLOAD_ALERT_MIN,
+  }
+}
+
 // -------------------------------------------------------------- fleet source
 //
 // One page for every node you run, instead of one page each.
@@ -2484,7 +2556,43 @@ function fleetSummary(doc) {
     alerterRunning: doc?.alerts?.installed ? Boolean(doc.alerts.running) : undefined,
     uptimeSeconds: doc?.node?.runSeconds,
     cliVersion: doc?.node?.cliVersion,
+    // Every producer behind that dashboard, not only the one its page is about.
+    // The Windows host runs four on two networks and showed here as a single
+    // Sequence node. Standings come from that dashboard's own table, and only
+    // for producers on the chain it scans.
+    localProducers: fleetProducers(doc),
   }
+}
+
+function fleetProducers(doc) {
+  if (!Array.isArray(doc?.node?.localProducers)) return undefined
+  const top = Array.isArray(doc?.peers?.top) ? doc.peers.top : []
+  const payloads = Array.isArray(doc?.timePayload?.producers) ? doc.timePayload.producers : []
+  const chain = typeof doc?.chain?.network === 'string' ? doc.chain.network : undefined
+  return doc.node.localProducers.filter((p) => p && typeof p === 'object').slice(0, 8).map((p) => {
+    const address = typeof p.rewardAddress === 'string' && /^[0-9a-f]{40}$/.test(p.rewardAddress) ? p.rewardAddress : undefined
+    const network = typeof p.network === 'string' ? p.network : undefined
+    const standing = address && network && network === chain ? top.find((r) => r?.address === address) : undefined
+    const tp = payloads.find((x) => x?.id === p.id)
+    const n = (v) => (Number.isFinite(v) ? v : undefined)
+    return {
+      id: typeof p.id === 'string' ? p.id.slice(0, 40) : undefined,
+      network: network?.slice(0, 40),
+      address,
+      running: p.running === true,
+      builds: n(p.builds),
+      rejected: n(p.rejected),
+      blocksTotal: n(standing?.blocks),
+      sharePercent: n(standing?.sharePercent),
+      rank: n(standing?.rank),
+      label: typeof standing?.label === 'string' ? standing.label.slice(0, 40) : undefined,
+      payloadP50Ms: n(tp?.p50Ms) ?? n(p.timePayloadP50Ms),
+      payloadSlow: n(tp?.slow),
+      payloadMeasured: n(tp?.measured),
+      // Re-validated: a peer is another machine's output, relayed onward here.
+      evmHost: evmEndpoint(tp?.endpoint).host ?? undefined,
+    }
+  })
 }
 
 async function pollFleet() {
@@ -2549,7 +2657,17 @@ function fleetView(board) {
     cliVersion: state.node?.cliVersion,
   }
 
-  const nodes = [self, ...FLEET.peers.map(({ label }) => fleet.get(label) ?? { label, ok: false, error: 'not polled yet' })]
+  // A peer's producers on this node's chain are ranked from this node's own
+  // table: the peer cannot rank them, it scans a different chain.
+  const ours = (lp) => {
+    if (lp.network !== NETWORK || !lp.address) return lp
+    const r = board?.top?.find((x) => x.address === lp.address)
+    return r ? { ...lp, blocksTotal: r.blocks, sharePercent: r.sharePercent, rank: r.rank, label: r.label ?? lp.label } : lp
+  }
+  const nodes = [self, ...FLEET.peers.map(({ label }) => {
+    const n = fleet.get(label) ?? { label, ok: false, error: 'not polled yet' }
+    return Array.isArray(n.localProducers) ? { ...n, localProducers: n.localProducers.map(ours) } : n
+  })]
 
   // Combined production, over the nodes that could actually be read. Stated
   // with a count of how many contributed, because a total that silently drops
@@ -3303,6 +3421,7 @@ const snapshot = () => ({
   })(),
   ...state,
   node: nodeView(),
+  timePayload: timePayloadView(),
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   // One board per response. It was being rebuilt three times -- once in the
   // payload and twice inside derived() -- over the same tally, for three
@@ -3608,7 +3727,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, fleetProducers, pollFleet, payloadSummary, timePayloadView, evmEndpoint, SLOW_PAYLOAD_MS, PAYLOAD_ALERT_SHARE, PAYLOAD_ALERT_MIN, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

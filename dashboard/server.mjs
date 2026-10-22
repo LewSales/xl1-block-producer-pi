@@ -2577,7 +2577,7 @@ function fleetProducers(doc) {
     const n = (v) => (Number.isFinite(v) ? v : undefined)
     return {
       id: typeof p.id === 'string' ? p.id.slice(0, 40) : undefined,
-      network,
+      network: network?.slice(0, 40),
       address,
       running: p.running === true,
       builds: n(p.builds),
@@ -2589,7 +2589,8 @@ function fleetProducers(doc) {
       payloadP50Ms: n(tp?.p50Ms) ?? n(p.timePayloadP50Ms),
       payloadSlow: n(tp?.slow),
       payloadMeasured: n(tp?.measured),
-      evmHost: typeof tp?.endpoint?.host === 'string' ? tp.endpoint.host : undefined,
+      // Re-validated: a peer is another machine's output, relayed onward here.
+      evmHost: evmEndpoint(tp?.endpoint).host ?? undefined,
     }
   })
 }

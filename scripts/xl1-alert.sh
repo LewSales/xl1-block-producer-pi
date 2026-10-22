@@ -371,7 +371,11 @@ if [[ -n "${FRESH_FILES}" ]]; then
     fi
   done
   [[ -n "${CHECK_FAILING}" ]] && FRESH_CONDITIONS+="telemetry-check-failing|default|Could not read public telemetry for over $(( FRESH_CHECK_FAIL_AFTER / 60 )) min: ${CHECK_FAILING% }"$'\n'
-  [[ "${MODE}" == "--status" ]] || printf '%s' "${NEW_CACHE}" > "${FRESH_CACHE}.tmp" 2>/dev/null && mv "${FRESH_CACHE}.tmp" "${FRESH_CACHE}" 2>/dev/null || true
+  # An if, not `A || B && C`: that groups as (A || B) && C, and --status then
+  # still moved whatever tmp file an earlier run had left behind.
+  if [[ "${MODE}" != "--status" ]]; then
+    printf '%s' "${NEW_CACHE}" > "${FRESH_CACHE}.tmp" 2>/dev/null && mv "${FRESH_CACHE}.tmp" "${FRESH_CACHE}" 2>/dev/null || true
+  fi
   FRESH_CONDITIONS="${FRESH_CONDITIONS%$'\n'}"
   if [[ -n "${FRESH_CONDITIONS}" ]]; then
     if [[ -n "${CONDITIONS}" ]]; then CONDITIONS+=$'\n'"${FRESH_CONDITIONS}"; else CONDITIONS="${FRESH_CONDITIONS}"; fi

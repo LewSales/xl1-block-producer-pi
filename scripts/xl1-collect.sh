@@ -569,7 +569,10 @@ done <<< "${RAW_NEW_LOG}"
 # its path -- so it is matched here and only the hostname leaves this script.
 # No host means the variable is unset and the image's default is in use.
 EVM_HOST=""
-EVM_URL="$(docker inspect "${CONTAINER}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+# The template names the one variable, so the rest of the environment (the
+# recovery phrase among it) never leaves Docker, not even into this pipe.
+EVM_URL="$(docker inspect "${CONTAINER}" \
+  --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "XL1_EVM_RPC_URL"}}{{println .}}{{end}}{{end}}' 2>/dev/null \
   | sed -n 's/^XL1_EVM_RPC_URL=//p' | head -n 1)"
 if [[ "${EVM_URL}" =~ ^[A-Za-z][A-Za-z0-9+.-]*://([^/?#@]*@)?([A-Za-z0-9.-]+) ]]; then
   EVM_HOST="${BASH_REMATCH[2],,}"

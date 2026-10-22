@@ -1616,7 +1616,7 @@ function render(d) {
     const host = (p) => (p.endpoint?.host ? `<span class="mono">${esc(p.endpoint.host)}</span>` : '<span class="sub">image default</span>')
     const share = (p) => (p.measured ? p.slow / p.measured : 0)
     const slowCell = (p) => (!p.measured ? '<span class="sub">—</span>'
-      : `<span class="${!p.slow ? 'ok' : share(p) >= tpv.alertShare ? 'bad' : 'warn'}">${num(p.slow)} of ${num(p.measured)}</span>`)
+      : `<span class="${!p.slow ? 'ok' : share(p) >= tpv.alertShare && p.measured >= tpv.alertMin ? 'bad' : 'warn'}">${num(p.slow)} of ${num(p.measured)}</span>`)
     const one = tpv.producers[0]
     const headline = tpv.alerts?.length
       ? `<div class="big bad">${num(tpv.alerts.length)} <span style="font-size:14px;color:var(--muted)">producer(s) waiting on slow payloads</span></div>`
@@ -1640,7 +1640,7 @@ function render(d) {
       </table></div>
       <div class="sub" style="margin-top:7px">Last hour, from each build's own log line. A payload over
         ${num(one.slowOverMs / 1000)} s usually means that candidate arrived too late. Alerts when ${num(tpv.alertShare * 100)}% or more
-        of at least ${num(tpv.alertMin)} payloads are slow.</div>
+        of at least ${num(tpv.alertMin)} payloads are slow; the hour is rolling, so an alert clears up to an hour after the endpoint recovers.</div>
     </section>`)
   }
 

@@ -27,6 +27,7 @@ run() { : > "${WORK}/calls"; PATH="${WORK}/bin:${PATH}" XL1_STATE_DIR="${WORK}/s
 check "an unknown argument exits 2"            "$(run --runtme)" "2"
 check "and runs nothing"                       "$(wc -l < "${WORK}/calls" | tr -d ' ')" "0"
 check "an unknown second argument exits 2"     "$(run --check --bogus)" "2"
+check "and runs nothing either"                "$(wc -l < "${WORK}/calls" | tr -d ' ')" "0"
 check "--runtime --check exits 0"              "$(run --runtime --check)" "0"
 check "and upgrades nothing"                   "$(grep -c 'install' "${WORK}/calls")" "0"
 check "--check --runtime, either order"        "$(run --check --runtime; grep -c 'install' "${WORK}/calls")" "$(printf '0\n0')"

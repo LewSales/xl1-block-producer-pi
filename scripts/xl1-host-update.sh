@@ -55,8 +55,7 @@ for arg in "$@"; do
   case "${arg}" in
     --check)   CHECK_ONLY=1 ;;
     --runtime) RUNTIME=1 ;;
-    *) printf 'xl1-host-update: unknown argument %s (use --check and/or --runtime)
-' "${arg}" >&2; exit 2 ;;
+    *) printf 'xl1-host-update: unknown argument %s (use --check and/or --runtime)\n' "${arg}" >&2; exit 2 ;;
   esac
 done
 

@@ -99,6 +99,27 @@ rm -f "${WORK}/state/.run-builds" "${WORK}/state/.collect-cursor"
 run
 check "a launch that never built reads zero" "$(field "['buildsThisRun']")" "0"
 
+# The Ethereum endpoint: host only. The URL is a secret -- the key rides in its
+# path -- and it must not reach the snapshot in any form.
+check "no endpoint set reads as the image default" "$(field "['evmRpc']['host']")" "null"
+cat > "${WORK}/bin/docker" <<'INNER'
+#!/usr/bin/env bash
+case "$1" in
+  inspect)
+    if [[ "$*" == *Config.Env* ]]; then printf 'XL1_NETWORK=mainnet
+XL1_EVM_RPC_URL=https://user:pw@ETH-Mainnet.g.alchemy.com/v2/SECRETKEY123?x=1
+'
+    else echo "running true 2026-01-01T00:00:00Z 0 xl1:local healthy sha256:eee"; fi; exit 0 ;;
+  logs) echo "[BlockRunner] all good"; exit 0 ;;
+  exec) echo "xl1 5.7.0"; exit 0 ;;
+esac
+exit 0
+INNER
+chmod +x "${WORK}/bin/docker"
+run
+check "endpoint host published, lower-cased" "$(field "['evmRpc']['host']")" '"eth-mainnet.g.alchemy.com"'
+check "endpoint key and credentials never published" "$(grep -cE 'SECRETKEY123|user:pw' "${WORK}/state/producer-status.json")" "0"
+
 # The container disappearing mid-cycle must produce a valid document, not commas.
 cat > "${WORK}/bin/docker" <<'INNER'
 #!/usr/bin/env bash

@@ -1291,6 +1291,19 @@ function render(d) {
           ? esc(n.version ?? '—')
           : esc((n.error ?? 'no answer') + (n.lastSeenAt ? ' · last seen ' + new Date(n.lastSeenAt).toLocaleTimeString() : ''))}</td>
       </tr>`
+      // Each producer behind a peer's dashboard, under that peer. A host running
+      // four producers on two chains otherwise reads as one node on one chain.
+      // Standings on this node's chain come from this node's own table.
+      const subRow = (lp) => `<tr>
+        <td style="padding-left:18px">↳ ${esc(lp.label ?? lp.id ?? '—')}${lp.label && lp.id ? ` <span class="sub">${esc(lp.id)}</span>` : ''}</td>
+        <td>${lp.running ? '<span class="ok">running</span>' : '<span class="bad">stopped</span>'}</td>
+        <td${lp.network && lp.network !== fl.combinedNetwork ? ' class="warn"' : ''}>${esc(netName(lp.network))}</td>
+        <td>${lp.blocksTotal !== undefined ? num(lp.blocksTotal) : '—'}</td>
+        <td>${lp.sharePercent !== undefined ? lp.sharePercent + '%' : '—'}</td>
+        <td>${lp.rank !== undefined ? '#' + num(lp.rank) : '—'}</td>
+        <td class="sub">—</td>
+        <td class="sub">${lp.payloadP50Ms !== undefined ? `payload ${num(lp.payloadP50Ms)} ms` : '—'}${lp.payloadSlow ? ` · <span class="warn">${num(lp.payloadSlow)} slow</span>` : ''}${lp.evmHost ? ` · ${esc(lp.evmHost)}` : ''}</td>
+      </tr>`
       groups.analytics.push(`<section class="card-full" style="--c: var(--acc-analytics); --mo:104">
         <h2><span class="ico" aria-hidden="true">🛰️</span>Fleet</h2>
         <div class="big ${fl.reachable === fl.total ? 'ok' : 'warn'}">${num(fl.reachable)}<span class="sub" style="font-size:16px"> of ${num(fl.total)}</span></div>
@@ -1298,7 +1311,7 @@ function render(d) {
           ? ` · ${num(fl.combinedBlocks)} block(s) between ${num(fl.combinedFrom)} of them${mixed ? ` on ${esc(netName(fl.combinedNetwork))}` : ''}` : ''}</div>
         <table class="board">
           <thead><tr><th>Node</th><th>State</th><th>Network</th><th>Blocks</th><th>Share</th><th>Rank</th><th>Alerts</th><th>Build</th></tr></thead>
-          <tbody>${fl.nodes.map(row).join('')}</tbody>
+          <tbody>${fl.nodes.map((n) => row(n) + (Array.isArray(n.localProducers) ? n.localProducers.map(subRow).join('') : '')).join('')}</tbody>
         </table>
         ${fl.combinedSharePercent !== undefined
           ? `<div class="sub">combined share of the chain: ${fl.combinedSharePercent}%</div>`
@@ -1586,6 +1599,48 @@ function render(d) {
       ${lat.localMs !== undefined ? `<div class="sub" style="margin-top:7px"
         title="The wire floor is the fastest head fetch seen — the network. Everything above it is this machine parsing and validating the answer.">
         <strong>+${num(lat.localMs)} ms</strong> local · ${num(lat.samples)} samples</div>` : ''}
+    </section>`)
+  }
+
+  // Time payload — the wait before every candidate on Ethereum's latest block.
+  //
+  // On 2026-10-22 the image's default Ethereum endpoint hung 15-140 s at a time
+  // for about an hour and a half. Every candidate built after such a wait landed
+  // late, and nothing on this page moved: the node was up, healthy and building.
+  // One row per producer this host runs; the endpoint is shown by host only.
+  const tpv = d.timePayload
+  if (tpv?.producers?.length) {
+    const many = tpv.producers.length > 1
+    const ms = (v) => (Number.isFinite(v) ? `${num(v)} ms` : '—')
+    const name = (p) => (p.id === 'self' ? 'this producer' : p.id)
+    const host = (p) => (p.endpoint?.host ? `<span class="mono">${esc(p.endpoint.host)}</span>` : '<span class="sub">image default</span>')
+    const share = (p) => (p.measured ? p.slow / p.measured : 0)
+    const slowCell = (p) => (!p.measured ? '<span class="sub">—</span>'
+      : `<span class="${!p.slow ? 'ok' : share(p) >= tpv.alertShare ? 'bad' : 'warn'}">${num(p.slow)} of ${num(p.measured)}</span>`)
+    const one = tpv.producers[0]
+    const headline = tpv.alerts?.length
+      ? `<div class="big bad">${num(tpv.alerts.length)} <span style="font-size:14px;color:var(--muted)">producer(s) waiting on slow payloads</span></div>`
+      : many
+        ? `<div class="big ok">${num(tpv.producers.filter((p) => p.measured).length)} <span style="font-size:14px;color:var(--muted)">of ${num(tpv.producers.length)} producers measured, none slow</span></div>`
+        : `<div class="big">${ms(one.p50Ms)} <span style="font-size:14px;color:var(--muted)">typical</span></div>`
+    groups.production.push(`<section${many ? ' class="card-full"' : ''} style="--c: var(--acc-latency); --mo:85">
+      <h2><span class="ico" aria-hidden="true">⏱️</span>Time payload</h2>
+      ${headline}
+      ${(tpv.alerts ?? []).map((a) => `<div class="sub bad">${esc(a)}</div>`).join('')}
+      <div class="board-wrap"><table class="board">
+        <thead><tr><th>Producer</th><th>Ethereum RPC</th><th>p50 / p90</th><th>Max</th><th>Over ${num(one.slowOverMs / 1000)} s</th><th>Rejected</th></tr></thead>
+        <tbody>${tpv.producers.map((p) => `<tr>
+          <td>${esc(name(p))}${many && p.network ? ` <span class="sub">${esc(p.network)}</span>` : ''}</td>
+          <td>${host(p)}</td>
+          <td>${ms(p.p50Ms)} / ${ms(p.p90Ms)}</td>
+          <td>${ms(p.maxMs)}</td>
+          <td>${slowCell(p)}</td>
+          <td>${p.rejected ? `<span class="warn">${num(p.rejected)}</span>` : '0'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="sub" style="margin-top:7px">Last hour, from each build's own log line. A payload over
+        ${num(one.slowOverMs / 1000)} s usually means that candidate arrived too late. Alerts when ${num(tpv.alertShare * 100)}% or more
+        of at least ${num(tpv.alertMin)} payloads are slow.</div>
     </section>`)
   }
 

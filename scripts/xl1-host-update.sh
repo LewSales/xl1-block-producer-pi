@@ -35,6 +35,7 @@
 set -uo pipefail
 
 STATE_DIR="${XL1_STATE_DIR:-/var/lib/xl1}"
+APT_LOG="${XL1_HOST_UPDATE_LOG:-/tmp/xl1-host-update.log}"
 LAST_FILE="${STATE_DIR}/.host-update-last"
 RUNTIME_FILE="${STATE_DIR}/.host-update-runtime-pending"
 REBOOT_FILE="${STATE_DIR}/.host-update-reboot-pending"
@@ -46,10 +47,18 @@ REBOOT_FLAG="${XL1_REBOOT_REQUIRED_FILE:-/var/run/reboot-required}"
 # names (without the architecture suffix).
 RUNTIME_RE="${XL1_HOST_UPDATE_RUNTIME_RE:-^(docker-ce|docker-ce-cli|docker-ce-rootless-extras|docker-buildx-plugin|docker-compose-plugin|containerd\.io|containerd|runc|docker\.io)$}"
 CHECK_ONLY=0; RUNTIME=0
-case "${1:-}" in
-  --check)   CHECK_ONLY=1 ;;
-  --runtime) RUNTIME=1 ;;
-esac
+# Every argument is read, and anything unknown stops here. Only the first used
+# to be: a typo for --runtime fell through to a full timer run -- upgrade and,
+# in auto mode, a reboot that restarts the producer -- and in "--runtime
+# --check" the --check was silently dropped and the runtime upgraded.
+for arg in "$@"; do
+  case "${arg}" in
+    --check)   CHECK_ONLY=1 ;;
+    --runtime) RUNTIME=1 ;;
+    *) printf 'xl1-host-update: unknown argument %s (use --check and/or --runtime)
+' "${arg}" >&2; exit 2 ;;
+  esac
+done
 
 log() { printf '%s xl1-host-update: %s\n' "$(date -Is)" "$*"; }
 
@@ -57,9 +66,9 @@ case "${REBOOT_MODE}" in auto|notify) ;; *) log "XL1_HOST_UPDATE_REBOOT=${REBOOT
 
 mkdir -p "${STATE_DIR}"
 
-if ! apt-get update -q >/tmp/xl1-host-update.log 2>&1; then
+if ! apt-get update -q >"${APT_LOG}" 2>&1; then
   log "apt-get update failed -- leaving packages alone"
-  cat /tmp/xl1-host-update.log
+  cat "${APT_LOG}"
   exit 1
 fi
 
@@ -86,8 +95,8 @@ if (( RUNTIME )); then
   # shellcheck disable=SC2086
   if ! DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y \
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-        ${RUNTIME_PKGS} >/tmp/xl1-host-update.log 2>&1; then
-    log "runtime upgrade FAILED -- see /tmp/xl1-host-update.log"
+        ${RUNTIME_PKGS} >"${APT_LOG}" 2>&1; then
+    log "runtime upgrade FAILED -- see ${APT_LOG}"
     exit 1
   fi
   rm -f "${RUNTIME_FILE}"
@@ -127,8 +136,8 @@ fi
 # shellcheck disable=SC2086
 if ! DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y \
       -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-      ${OTHER_PKGS} >/tmp/xl1-host-update.log 2>&1; then
-  log "apt-get upgrade FAILED -- see /tmp/xl1-host-update.log"
+      ${OTHER_PKGS} >"${APT_LOG}" 2>&1; then
+  log "apt-get upgrade FAILED -- see ${APT_LOG}"
   exit 1
 fi
 

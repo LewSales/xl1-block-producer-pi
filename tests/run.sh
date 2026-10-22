@@ -100,6 +100,9 @@ if bash "${HERE}/collect.test.sh"; then ok "collector tests passed"; else bad "c
 step "Alerter behaviour"
 if bash "${HERE}/alert.test.sh"; then ok "alerter tests passed"; else bad "alerter tests failed"; fi
 
+step "Host update arguments"
+if bash "${HERE}/host-update.test.sh"; then ok "host update tests passed"; else bad "host update tests failed"; fi
+
 step "Dashboard deploy"
 if bash "${HERE}/deploy.test.sh"; then ok "deploy refuses without an alert hold"; else bad "deploy tests failed"; fi
 

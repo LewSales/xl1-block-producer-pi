@@ -35,6 +35,11 @@ for the differences and why each one exists.
 | `scripts/xl1-collect.sh` | Host-side collector feeding the dashboard. |
 | `scripts/xl1-alert.sh` | Watches the dashboard's own status and notifies on changes. |
 | `alert.env.template` | Alert channels → `/etc/xl1/alert.env` (mode 0600). |
+| `scripts/xl1-publish.sh` | Pushes this node's public status (the dashboard's `/api/public` allow-list) to the status repository. |
+| `publish.env.template` | Publisher config → `/etc/xl1/publish.env`. |
+| `scripts/xl1-host-update.sh` | Keeps the host's Debian packages patched; `--runtime` for Docker/containerd, which restarts the producer. |
+| `scripts/xl1-autoupdate.sh` | Checks the published release manifest and installs a newer bundle; `--check` changes nothing. |
+| `scripts/deploy-dashboard.sh` | From a workstation: ships the dashboard's three files to the Pi under an alert hold. |
 | `build-images.sh` | Cross-builds both arm64 images on a workstation. Emits `SHA256SUMS`. |
 | `tests/` | The full check suite. `./tests/run.sh` runs everything CI runs. |
 | `dashboard/` | Dashboard source, for rebuilding after edits. |

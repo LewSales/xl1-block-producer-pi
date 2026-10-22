@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # xl1-host-update — keep the Debian packages this producer runs on patched.
 #
-#   xl1-host-update.sh            check, and upgrade if due
+#   xl1-host-update.sh            check, and upgrade if due (runtime excluded)
 #   xl1-host-update.sh --check    report only, change nothing
+#   xl1-host-update.sh --runtime  operator-run: upgrade the container runtime
+#                                 packages too. This restarts Docker, and with it
+#                                 the producer. Run it in a window you chose.
 #
 # xl1-autoupdate.sh handles the xl1-cli image; this is the layer underneath
 # it — the OS packages the Pi itself runs, which drift independently of the
@@ -15,17 +18,42 @@
 # A timer that only fired every 72h would leave a burst of updates sitting for
 # up to three days; a threshold alone could fire every few minutes right after
 # a fresh image. Together, whichever is more urgent wins.
+#
+# Container runtime packages are never upgraded on the timer. On 2026-10-08 an
+# unattended run upgraded docker-ce 29.8.2 -> 29.9.0 and containerd 2.3.6 ->
+# 2.4.1; docker-ce's maintainer script restarted docker.service, and
+# xl1-producer.service (Requires=docker.service) went down with it: a Mainnet
+# producer restarted by a cron-like job nobody was watching. Everything else
+# still flows -- security fixes included -- and pending runtime upgrades are
+# written to ${RUNTIME_FILE} for the collector and dashboard to surface, so
+# deferring them is visible rather than silent.
+#
+# XL1_HOST_UPDATE_REBOOT decides what a required reboot does:
+#   auto   (default, unchanged) reboot one minute after the upgrade
+#   notify write ${REBOOT_FILE} and leave the reboot to the operator
 
 set -uo pipefail
 
 STATE_DIR="${XL1_STATE_DIR:-/var/lib/xl1}"
 LAST_FILE="${STATE_DIR}/.host-update-last"
+RUNTIME_FILE="${STATE_DIR}/.host-update-runtime-pending"
+REBOOT_FILE="${STATE_DIR}/.host-update-reboot-pending"
 THRESHOLD="${XL1_HOST_UPDATE_THRESHOLD:-10}"
 MAX_AGE="${XL1_HOST_UPDATE_MAX_AGE:-259200}"   # 72h, in seconds
-CHECK_ONLY=0
-[[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
+REBOOT_MODE="${XL1_HOST_UPDATE_REBOOT:-auto}"
+REBOOT_FLAG="${XL1_REBOOT_REQUIRED_FILE:-/var/run/reboot-required}"
+# Packages whose upgrade restarts the container runtime. A regex over package
+# names (without the architecture suffix).
+RUNTIME_RE="${XL1_HOST_UPDATE_RUNTIME_RE:-^(docker-ce|docker-ce-cli|docker-ce-rootless-extras|docker-buildx-plugin|docker-compose-plugin|containerd\.io|containerd|runc|docker\.io)$}"
+CHECK_ONLY=0; RUNTIME=0
+case "${1:-}" in
+  --check)   CHECK_ONLY=1 ;;
+  --runtime) RUNTIME=1 ;;
+esac
 
 log() { printf '%s xl1-host-update: %s\n' "$(date -Is)" "$*"; }
+
+case "${REBOOT_MODE}" in auto|notify) ;; *) log "XL1_HOST_UPDATE_REBOOT=${REBOOT_MODE} is not auto|notify -- refusing to guess"; exit 2 ;; esac
 
 mkdir -p "${STATE_DIR}"
 
@@ -35,10 +63,37 @@ if ! apt-get update -q >/tmp/xl1-host-update.log 2>&1; then
   exit 1
 fi
 
-# Same count the dashboard card uses (scripts/xl1-collect.sh), computed fresh
-# here rather than read from its cache so this never acts on a stale number.
-PENDING="$(apt list --upgradable 2>/dev/null | grep -cF '[upgradable from:' || true)"
-PENDING="${PENDING:-0}"
+# Names of upgradable packages, split into the runtime set and the rest.
+UPGRADABLE="$(apt list --upgradable 2>/dev/null | grep -F '[upgradable from:' | cut -d/ -f1 || true)"
+RUNTIME_PKGS="$(printf '%s\n' "${UPGRADABLE}" | grep -E "${RUNTIME_RE}" || true)"
+OTHER_PKGS="$(printf '%s\n' "${UPGRADABLE}" | grep -vE "${RUNTIME_RE}" | grep -v '^$' || true)"
+count() { [[ -z "$1" ]] && echo 0 || printf '%s\n' "$1" | grep -c .; }
+PENDING="$(count "${UPGRADABLE}")"
+RUNTIME_PENDING="$(count "${RUNTIME_PKGS}")"
+OTHER_PENDING="$(count "${OTHER_PKGS}")"
+
+# Always record what the runtime is waiting on, so the deferral is visible.
+if (( RUNTIME_PENDING > 0 )); then
+  printf '%s\n' "${RUNTIME_PKGS}" | tr '\n' ' ' | sed 's/ $/\n/' > "${RUNTIME_FILE}"
+else
+  rm -f "${RUNTIME_FILE}"
+fi
+
+if (( RUNTIME )); then
+  if (( CHECK_ONLY )); then exit 0; fi
+  if (( RUNTIME_PENDING == 0 )); then log "no container runtime upgrade pending"; exit 0; fi
+  log "operator-run runtime upgrade: $(tr '\n' ' ' <<< "${RUNTIME_PKGS}")-- Docker and the producer will restart"
+  # shellcheck disable=SC2086
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+        ${RUNTIME_PKGS} >/tmp/xl1-host-update.log 2>&1; then
+    log "runtime upgrade FAILED -- see /tmp/xl1-host-update.log"
+    exit 1
+  fi
+  rm -f "${RUNTIME_FILE}"
+  log "runtime upgrade applied"
+  exit 0
+fi
 
 last=0
 [[ -s "${LAST_FILE}" ]] && last="$(cat "${LAST_FILE}")"
@@ -46,43 +101,54 @@ now="$(date +%s)"
 age=$(( now - last ))
 
 if (( PENDING < THRESHOLD )) && (( age < MAX_AGE )); then
-  log "${PENDING} pending (threshold ${THRESHOLD}), last applied $(( age / 3600 ))h ago (max $(( MAX_AGE / 3600 ))h) -- nothing to do"
+  log "${PENDING} pending (${RUNTIME_PENDING} runtime, deferred; threshold ${THRESHOLD}), last applied $(( age / 3600 ))h ago (max $(( MAX_AGE / 3600 ))h) -- nothing to do"
   exit 0
 fi
 
-log "${PENDING} pending / last applied $(( age / 3600 ))h ago -- upgrading"
+log "${PENDING} pending (${RUNTIME_PENDING} runtime, deferred) / last applied $(( age / 3600 ))h ago -- upgrading"
 if (( CHECK_ONLY )); then
   log "--check given, stopping here"
   exit 0
 fi
 
-if (( PENDING == 0 )); then
-  # Nothing to install but the age trigger fired -- record the check so the
-  # 72h clock resets rather than firing again on every run until something
-  # actually becomes available.
+if (( OTHER_PENDING == 0 )); then
+  # Nothing to install on the timer but the age trigger fired -- record the
+  # check so the 72h clock resets rather than firing again on every run.
   echo "${now}" > "${LAST_FILE}"
-  log "nothing pending to install"
+  if (( RUNTIME_PENDING > 0 )); then
+    log "nothing pending to install on the timer (runtime upgrade waits for --runtime)"
+  else
+    log "nothing pending to install"
+  fi
   exit 0
 fi
 
-if ! DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+# Named packages only, so a runtime package is never pulled in by `upgrade`.
+# shellcheck disable=SC2086
+if ! DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y \
       -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-      >/tmp/xl1-host-update.log 2>&1; then
+      ${OTHER_PKGS} >/tmp/xl1-host-update.log 2>&1; then
   log "apt-get upgrade FAILED -- see /tmp/xl1-host-update.log"
   exit 1
 fi
 
 echo "${now}" > "${LAST_FILE}"
-log "upgrade applied"
+log "upgrade applied (${OTHER_PENDING} package(s); ${RUNTIME_PENDING} runtime deferred)"
 
-if [[ -f /var/run/reboot-required ]]; then
+if [[ -f "${REBOOT_FLAG}" ]]; then
   pkgs=""
-  [[ -f /var/run/reboot-required.pkgs ]] && pkgs="$(tr '\n' ' ' < /var/run/reboot-required.pkgs)"
-  log "reboot required (${pkgs:-kernel/libs}) -- rebooting in 1 minute"
-  # xl1-producer.service and xl1-dashboard.service are both enabled, so they
-  # come back on their own at boot; the delay just gives this log line and any
-  # in-flight journal writes time to land before the box goes down.
-  shutdown -r +1 "xl1-host-update: rebooting to finish an applied package upgrade"
+  [[ -f "${REBOOT_FLAG}.pkgs" ]] && pkgs="$(tr '\n' ' ' < "${REBOOT_FLAG}.pkgs")"
+  if [[ "${REBOOT_MODE}" == "notify" ]]; then
+    printf '%s\n' "${pkgs:-kernel/libs}" > "${REBOOT_FILE}"
+    log "reboot required (${pkgs:-kernel/libs}) -- XL1_HOST_UPDATE_REBOOT=notify, leaving it to the operator"
+  else
+    log "reboot required (${pkgs:-kernel/libs}) -- rebooting in 1 minute"
+    # xl1-producer.service and xl1-dashboard.service are both enabled, so they
+    # come back on their own at boot; the delay just gives this log line and any
+    # in-flight journal writes time to land before the box goes down.
+    shutdown -r +1 "xl1-host-update: rebooting to finish an applied package upgrade"
+  fi
 else
+  rm -f "${REBOOT_FILE}"
   log "no reboot required"
 fi

@@ -65,6 +65,23 @@ check('mode file switches passive to recover without a restart', before === 'sta
 // 13. mode file 'off' is an instant manual disable
 const s11 = tmp('modeoff'); fs.writeFileSync(path.join(s11, 'watchdog.mode'), 'off'); r = await run(s11, { RACE_TEST_FREEZE: 'pool' }, 35000); w = wdState(s11)
 check("mode file 'off' disables recovery", r.code === 'still-running' && w.status === 'off', `${r.code}, status ${w.status}`)
+// 14. a real, fast upstream failure (DNS) with a frozen loop: no restart, without the test hook
+const s12 = tmp('upreal'); r = await run(s12, { RACE_TEST_FREEZE: 'pool' }, 45000, path.join(HERE, 'fetch-dns-fail.mjs')); w = wdState(s12)
+check('a real DNS outage blocks the restart', r.code === 'still-running' && w.status === 'upstream-unavailable' && !(w.exits?.length), `${r.code}, status ${w.status}`)
+// 15. this process's network wedged (every fetch hangs, so the loops stall and the probe times out): it recovers
+const s13 = tmp('hang'); r = await run(s13, { RACE_WATCHDOG_PROBE_MS: '2000' }, 60000, path.join(HERE, 'fetch-hang.mjs')); w = wdState(s13)
+check('a wedged network (probe timeout) still recovers', r.code === 75 && w.history?.at(-1)?.kind === 'recovery-exit' && w.history.at(-1).probe?.timedOut === true, `exit ${r.code}, probe ${JSON.stringify(w.history?.at(-1)?.probe)}`)
+// 16. 'recovery-failed' latches: no exit even after the window has emptied, while the loop is still frozen
+const s14 = tmp('latch'); fs.writeFileSync(path.join(s14, 'watchdog.json'), JSON.stringify({ exits: [], history: [], status: 'recovery-failed' }))
+r = await run(s14, { RACE_TEST_FREEZE: 'pool' }, 40000); w = wdState(s14)
+check("'recovery-failed' latches while still frozen", r.code === 'still-running' && w.status === 'recovery-failed' && !(w.exits?.length), `${r.code}, status ${w.status}`)
+// 17. ... and clears once the loops have run healthy for the verify period
+const s15 = tmp('clear'); fs.writeFileSync(path.join(s15, 'watchdog.json'), JSON.stringify({ exits: [], history: [], status: 'recovery-failed' }))
+r = await run(s15, {}, 35000); w = wdState(s15)
+check("'recovery-failed' clears after healthy running", r.code === 'still-running' && w.status === 'monitoring' && w.history?.some((h) => h.kind === 'recovery-failed-cleared'), `${r.code}, status ${w.status}`)
+// 18. bad numeric settings fall back to the defaults (no NaN tight loop, detection still on)
+const s16 = tmp('nan'); r = await run(s16, { RACE_WATCHDOG_CHECK_MS: 'abc', RACE_WATCHDOG_STALL_MS: 'x' }, 20000); w = wdState(s16)
+check('bad numeric settings are ignored', r.code === 'still-running' && !fs.existsSync(path.join(s16, 'watchdog.json')), `${r.code}, state written ${fs.existsSync(path.join(s16, 'watchdog.json'))} (first check at the 60 s default)`)
 // 11. it can only ever stop itself: no process-control code in the watchdog section (fails closed by construction)
 const src = fs.readFileSync(SERVICE, 'utf8'), section = src.slice(src.indexOf('// ---- self-watchdog'), src.indexOf('const until ='))
   .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n')   // code only: the comments name what it must NOT do

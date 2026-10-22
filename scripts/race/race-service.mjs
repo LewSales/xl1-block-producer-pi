@@ -202,33 +202,40 @@ if (!ONCE) {
 // consecutive checks, is stalled. A quiet mempool or a failing network still iterates, so neither is a
 // stall. Recovery = diagnostics, then this process exits, and this host's own supervisor (Windows task,
 // pm2, systemd) starts it again. It controls nothing else: no docker, pm2, systemctl or kill calls.
-// Bounded: a cooldown, at most RACE_WATCHDOG_MAX exits per rolling window (then 'recovery-failed' and
-// it stays up for a person), state persisted in STATE/watchdog.json so limits survive the restarts.
+// Bounded: a cooldown, at most RACE_WATCHDOG_MAX exits per rolling window, then 'recovery-failed', which
+// latches (no more exits) until the loops have run healthy for RACE_WATCHDOG_VERIFY_MS, e.g. after a person
+// fixes the cause and restarts it. State persists in STATE/watchdog.json so limits survive the restarts.
 // RACE_WATCHDOG=recover (default) | passive (detect and log only) | off. A file STATE/watchdog.mode holding one
-// of those words overrides it at every check: a manual switch that needs no restart.
+// of those words overrides it at every check: a manual switch that needs no restart. Env 'off' is a hard
+// off: no checks run, so the mode file cannot turn it back on.
+const wdNum = (k, d) => { const v = Number(env(k, d)); return Number.isFinite(v) && v >= 0 ? v : d }
 const WD = {
-  mode: env('RACE_WATCHDOG', 'recover'), stallMs: +env('RACE_WATCHDOG_STALL_MS', 300000), checkMs: +env('RACE_WATCHDOG_CHECK_MS', 60000),
-  confirm: +env('RACE_WATCHDOG_CONFIRM', 2), max: +env('RACE_WATCHDOG_MAX', 3), windowMs: +env('RACE_WATCHDOG_WINDOW_MS', 3600000),
-  cooldownMs: +env('RACE_WATCHDOG_COOLDOWN_MS', 900000), verifyMs: +env('RACE_WATCHDOG_VERIFY_MS', 300000), keepDiag: 10,
+  mode: env('RACE_WATCHDOG', 'recover'), stallMs: wdNum('RACE_WATCHDOG_STALL_MS', 300000), checkMs: Math.max(1000, wdNum('RACE_WATCHDOG_CHECK_MS', 60000)),
+  confirm: wdNum('RACE_WATCHDOG_CONFIRM', 2), max: wdNum('RACE_WATCHDOG_MAX', 3), windowMs: wdNum('RACE_WATCHDOG_WINDOW_MS', 3600000),
+  cooldownMs: wdNum('RACE_WATCHDOG_COOLDOWN_MS', 900000), verifyMs: wdNum('RACE_WATCHDOG_VERIFY_MS', 300000), probeMs: wdNum('RACE_WATCHDOG_PROBE_MS', 8000), keepDiag: 10,
 }
 const WD_FILE = path.join(STATE, 'watchdog.json'), DIAG_DIR = path.join(STATE, 'watchdog-diag'), MODE_FILE = path.join(STATE, 'watchdog.mode')
 const currentMode = () => { try { const m = fs.readFileSync(MODE_FILE, 'utf8').trim(); if (['off', 'passive', 'recover'].includes(m)) return m } catch {} return WD.mode }
 const startedAt = Date.now()
 const wdRead = () => { try { return JSON.parse(fs.readFileSync(WD_FILE, 'utf8')) } catch { return {} } }
 const wdWrite = () => { try { fs.writeFileSync(WD_FILE + '.tmp', JSON.stringify(wd)); fs.renameSync(WD_FILE + '.tmp', WD_FILE) } catch {} }
-const wd = { exits: [], history: [], ...wdRead() }
-wd.status = wd.status === 'recovery-failed' ? 'recovery-failed' : 'monitoring'; wd.mode = WD.mode
+const wd = wdRead()
+wd.exits = Array.isArray(wd.exits) ? wd.exits : []; wd.history = Array.isArray(wd.history) ? wd.history : []
+wd.status = wd.status === 'recovery-failed' ? 'recovery-failed' : 'monitoring'; wd.mode = currentMode()
 const strikes = { pool: 0, head: 0, tx: 0 }
 const record = (kind, extra = {}) => { wd.history.push({ at: new Date().toISOString(), kind, ...extra }); wd.history = wd.history.slice(-50) }
 // One bounded probe of what the stalled loop reads: an upstream outage is not fixed by restarting.
-// Promise.race with a plain timer, so the probe always settles even if fetch itself would not.
+// Promise.race with a plain timer, so the probe always settles even if fetch itself would not. Only an
+// explicit answer (an HTTP error, a refused connection, a DNS failure) counts as an outage. A probe that
+// times out may be this process's own network stack wedged, which is what a restart fixes, so it does not
+// block recovery (the limits above still apply).
 async function upstreamOk(loops) {
   if (env('RACE_TEST_UPSTREAM_DOWN', '') === '1') return { ok: false, reason: 'test: upstream down' }
   const url = loops.includes('head') ? CDN_HEAD : RPC
   const ac = new AbortController(), t0 = Date.now()
   const req = (url === RPC ? fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'mempoolViewer_pendingBlocks', params: [] }), signal: ac.signal }) : fetch(url, { signal: ac.signal }))
     .then(r => ({ ok: r.ok, status: r.status, ms: Date.now() - t0 }), e => ({ ok: false, reason: String(e?.name ?? e), ms: Date.now() - t0 }))
-  const timer = new Promise(r => setTimeout(() => { ac.abort(); r({ ok: false, reason: 'timeout 8 s', ms: Date.now() - t0 }) }, 8000))
+  const timer = new Promise(r => setTimeout(() => { ac.abort(); r({ ok: true, timedOut: true, reason: `no answer in ${WD.probeMs / 1000} s: treated as a local hang`, ms: Date.now() - t0 }) }, WD.probeMs))
   return Promise.race([req, timer])
 }
 function writeDiag(loops) {
@@ -245,14 +252,20 @@ function writeDiag(loops) {
     return f
   } catch (e) { return `diagnostics failed: ${e}` }
 }
+let checking = false
 async function watchdogCheck() {
+  if (checking) return
+  checking = true
+  try { await watchdogStep() } finally { checking = false }
+}
+async function watchdogStep() {
   const now = Date.now(), mode = currentMode()
   wd.mode = mode
   if (mode === 'off') { wd.status = 'off'; wdWrite(); return }
   wd.loops = Object.fromEntries(Object.keys(beats).map(k => [k, { ageS: Math.round((now - beats[k]) / 1000), iterations: iterations[k] }]))
   // After a recovery exit, the next process confirms the outcome once it has run for verifyMs.
   if (wd.pendingVerify && now - startedAt > WD.verifyMs) {
-    const fresh = Object.values(beats).every(b => now - b < WD.stallMs), cand = events.some(e => e.k === 'cand' && e.t > startedAt)
+    const fresh = Object.values(beats).every(b => now - b < WD.stallMs), cand = events.some(e => (e.k === 'cand' || e.k === 'head') && e.t > startedAt)
     const was = wd.pendingVerify.loops
     wd.lastResult = fresh && cand ? 'recovered' : 'not-recovered'; record(wd.lastResult, { loops: was, candidatesSinceStart: cand }); delete wd.pendingVerify
     log(`watchdog: restart after the ${was.join(',')} stall: ${wd.lastResult}`)
@@ -260,11 +273,15 @@ async function watchdogCheck() {
   const stalled = Object.keys(beats).filter(k => now - beats[k] > WD.stallMs)
   for (const k of Object.keys(strikes)) strikes[k] = stalled.includes(k) ? strikes[k] + 1 : 0
   const confirmed = stalled.filter(k => strikes[k] >= WD.confirm)
-  if (!confirmed.length) { if (!['recovery-failed'].includes(wd.status)) wd.status = 'monitoring'; wdWrite(); return }
+  if (!confirmed.length) {
+    if (wd.status !== 'recovery-failed') wd.status = 'monitoring'
+    else if (!stalled.length && now - startedAt > WD.verifyMs) { wd.status = 'monitoring'; record('recovery-failed-cleared'); log('watchdog: loops healthy again; automatic recovery re-enabled') }
+    wdWrite(); return
+  }
   wd.lastStallAt = new Date(now).toISOString()
   if (mode !== 'recover') { if (wd.status !== 'stalled-passive') { record('stall-detected', { loops: confirmed, mode }); log(`watchdog (passive): ${confirmed.join(',')} stalled`) } wd.status = 'stalled-passive'; wdWrite(); return }
   wd.exits = (wd.exits ?? []).filter(t => now - t < WD.windowMs)
-  if (wd.exits.length >= WD.max) { if (wd.status !== 'recovery-failed') { record('limit-reached', { loops: confirmed, exitsInWindow: wd.exits.length }); log(`watchdog: ${wd.exits.length} recoveries in ${WD.windowMs / 60000} min; stopping automatic recovery, observer needs attention`) } wd.status = 'recovery-failed'; wdWrite(); return }
+  if (wd.status === 'recovery-failed' || wd.exits.length >= WD.max) { if (wd.status !== 'recovery-failed') { record('limit-reached', { loops: confirmed, exitsInWindow: wd.exits.length }); log(`watchdog: ${wd.exits.length} recoveries in ${WD.windowMs / 60000} min; stopping automatic recovery, observer needs attention`) } wd.status = 'recovery-failed'; wdWrite(); return }
   const last = wd.exits.at(-1)
   if (last && now - last < WD.cooldownMs) { wd.status = 'cooldown'; wd.cooldownUntil = new Date(last + WD.cooldownMs).toISOString(); wdWrite(); return }
   const up = await upstreamOk(confirmed)
@@ -272,7 +289,7 @@ async function watchdogCheck() {
   const diag = writeDiag(confirmed)
   wd.exits.push(now); wd.pendingVerify = { since: now, loops: confirmed }; wd.status = 'restarting'; wd.lastRecoveryAt = new Date(now).toISOString()
   record('recovery-exit', { loops: confirmed, diag, probe: up }); wdWrite()
-  log(`watchdog: ${confirmed.join(',')} loop(s) stalled ${Math.round((now - Math.min(...confirmed.map(k => beats[k]))) / 1000)} s; upstream ok (${up.ms} ms); diagnostics ${diag}; exiting for this host's supervisor to restart the observer`)
+  log(`watchdog: ${confirmed.join(',')} loop(s) stalled ${Math.round((now - Math.min(...confirmed.map(k => beats[k]))) / 1000)} s; upstream ${up.timedOut ? 'probe timed out' : 'ok'} (${up.ms} ms); diagnostics ${diag}; exiting for this host's supervisor to restart the observer`)
   setTimeout(() => process.exit(75), 200)
 }
 // What the public feed and /health may show: state only, no paths, hosts or file names.
@@ -284,6 +301,6 @@ log(`start${ONCE ? ' (once)' : ''} on ${NET}: ${events.length} events restored, 
 const loops = Promise.all([poolLoop(until), headLoop(until), txLoop(until), guardLoop(until)])
 if (ONCE) { await loops; await rebuild(); console.log(fs.readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(-2).join('\n')) }
 else {
-  if (WD.mode !== 'off') { setInterval(() => watchdogCheck().catch(e => log('watchdog check failed: ' + e)), WD.checkMs); log(`watchdog ${WD.mode}: stall ${WD.stallMs / 1000} s x${WD.confirm}, max ${WD.max}/${WD.windowMs / 60000} min, cooldown ${WD.cooldownMs / 60000} min`) }
+  if (WD.mode !== 'off') { setInterval(() => watchdogCheck().catch(e => log('watchdog check failed: ' + e)), WD.checkMs); log(`watchdog ${currentMode()}: stall ${WD.stallMs / 1000} s x${WD.confirm}, max ${WD.max}/${WD.windowMs / 60000} min, cooldown ${WD.cooldownMs / 60000} min`) }
   await sleep(15000); await rebuild(); setInterval(rebuild, REBUILD_MS)
 }

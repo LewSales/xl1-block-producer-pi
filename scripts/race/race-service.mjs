@@ -202,26 +202,30 @@ if (!ONCE) {
 // consecutive checks, is stalled. A quiet mempool or a failing network still iterates, so neither is a
 // stall. Recovery = diagnostics, then this process exits, and this host's own supervisor (Windows task,
 // pm2, systemd) starts it again. It controls nothing else: no docker, pm2, systemctl or kill calls.
-// Bounded: a cooldown, at most RACE_WATCHDOG_MAX exits per rolling window, then 'recovery-failed', which
-// latches (no more exits) until the loops have run healthy for RACE_WATCHDOG_VERIFY_MS, e.g. after a person
-// fixes the cause and restarts it. State persists in STATE/watchdog.json so limits survive the restarts.
+// Bounded: a cooldown, at most RACE_WATCHDOG_MAX exits per rolling window, then a latch ('recovery-failed'):
+// no more exits until every loop has kept iterating, check after check, for RACE_WATCHDOG_VERIFY_MS (e.g. after
+// a person fixes the cause). Switching the mode to passive or off does not clear it. State persists in
+// STATE/watchdog.json so limits and the latch survive restarts.
 // RACE_WATCHDOG=recover (default) | passive (detect and log only) | off. A file STATE/watchdog.mode holding one
 // of those words overrides it at every check: a manual switch that needs no restart. Env 'off' is a hard
 // off: no checks run, so the mode file cannot turn it back on.
-const wdNum = (k, d) => { const v = Number(env(k, d)); return Number.isFinite(v) && v >= 0 ? v : d }
+const wdNum = (k, d, min = 1) => { const raw = String(env(k, '')).trim(); const v = raw === '' ? d : Number(raw); return Number.isFinite(v) && v >= min ? v : d }
 const WD = {
   mode: env('RACE_WATCHDOG', 'recover'), stallMs: wdNum('RACE_WATCHDOG_STALL_MS', 300000), checkMs: Math.max(1000, wdNum('RACE_WATCHDOG_CHECK_MS', 60000)),
   confirm: wdNum('RACE_WATCHDOG_CONFIRM', 2), max: wdNum('RACE_WATCHDOG_MAX', 3), windowMs: wdNum('RACE_WATCHDOG_WINDOW_MS', 3600000),
-  cooldownMs: wdNum('RACE_WATCHDOG_COOLDOWN_MS', 900000), verifyMs: wdNum('RACE_WATCHDOG_VERIFY_MS', 300000), probeMs: wdNum('RACE_WATCHDOG_PROBE_MS', 8000), keepDiag: 10,
+  cooldownMs: wdNum('RACE_WATCHDOG_COOLDOWN_MS', 900000, 0), verifyMs: wdNum('RACE_WATCHDOG_VERIFY_MS', 300000), probeMs: wdNum('RACE_WATCHDOG_PROBE_MS', 8000), keepDiag: 10,
 }
 const WD_FILE = path.join(STATE, 'watchdog.json'), DIAG_DIR = path.join(STATE, 'watchdog-diag'), MODE_FILE = path.join(STATE, 'watchdog.mode')
 const currentMode = () => { try { const m = fs.readFileSync(MODE_FILE, 'utf8').trim(); if (['off', 'passive', 'recover'].includes(m)) return m } catch {} return WD.mode }
 const startedAt = Date.now()
-const wdRead = () => { try { return JSON.parse(fs.readFileSync(WD_FILE, 'utf8')) } catch { return {} } }
+const wdRead = () => { try { const v = JSON.parse(fs.readFileSync(WD_FILE, 'utf8')); return v && typeof v === 'object' && !Array.isArray(v) ? v : {} } catch { return {} } }
 const wdWrite = () => { try { fs.writeFileSync(WD_FILE + '.tmp', JSON.stringify(wd)); fs.renameSync(WD_FILE + '.tmp', WD_FILE) } catch {} }
 const wd = wdRead()
 wd.exits = Array.isArray(wd.exits) ? wd.exits : []; wd.history = Array.isArray(wd.history) ? wd.history : []
-wd.status = wd.status === 'recovery-failed' ? 'recovery-failed' : 'monitoring'; wd.mode = currentMode()
+wd.latched = wd.latched === true || wd.status === 'recovery-failed'
+wd.status = wd.latched ? 'recovery-failed' : 'monitoring'; wd.mode = WD.mode === 'off' ? 'off' : currentMode()
+// Sustained health: every loop must have iterated since the previous check, continuously, before the latch clears.
+let healthySince = null, lastIterations = { ...iterations }
 const strikes = { pool: 0, head: 0, tx: 0 }
 const record = (kind, extra = {}) => { wd.history.push({ at: new Date().toISOString(), kind, ...extra }); wd.history = wd.history.slice(-50) }
 // One bounded probe of what the stalled loop reads: an upstream outage is not fixed by restarting.
@@ -235,7 +239,7 @@ async function upstreamOk(loops) {
   const ac = new AbortController(), t0 = Date.now()
   const req = (url === RPC ? fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'mempoolViewer_pendingBlocks', params: [] }), signal: ac.signal }) : fetch(url, { signal: ac.signal }))
     .then(r => ({ ok: r.ok, status: r.status, ms: Date.now() - t0 }), e => ({ ok: false, reason: String(e?.name ?? e), ms: Date.now() - t0 }))
-  const timer = new Promise(r => setTimeout(() => { ac.abort(); r({ ok: true, timedOut: true, reason: `no answer in ${WD.probeMs / 1000} s: treated as a local hang`, ms: Date.now() - t0 }) }, WD.probeMs))
+  const timer = new Promise(r => setTimeout(() => { r({ ok: true, timedOut: true, reason: `no answer in ${WD.probeMs / 1000} s: treated as a local hang`, ms: Date.now() - t0 }); ac.abort() }, WD.probeMs))
   return Promise.race([req, timer])
 }
 function writeDiag(loops) {
@@ -261,27 +265,29 @@ async function watchdogCheck() {
 async function watchdogStep() {
   const now = Date.now(), mode = currentMode()
   wd.mode = mode
+  const progressed = Object.keys(iterations).every(k => iterations[k] > lastIterations[k])
+  lastIterations = { ...iterations }
   if (mode === 'off') { wd.status = 'off'; wdWrite(); return }
   wd.loops = Object.fromEntries(Object.keys(beats).map(k => [k, { ageS: Math.round((now - beats[k]) / 1000), iterations: iterations[k] }]))
   // After a recovery exit, the next process confirms the outcome once it has run for verifyMs.
   if (wd.pendingVerify && now - startedAt > WD.verifyMs) {
     const fresh = Object.values(beats).every(b => now - b < WD.stallMs), cand = events.some(e => (e.k === 'cand' || e.k === 'head') && e.t > startedAt)
     const was = wd.pendingVerify.loops
-    wd.lastResult = fresh && cand ? 'recovered' : 'not-recovered'; record(wd.lastResult, { loops: was, candidatesSinceStart: cand }); delete wd.pendingVerify
+    wd.lastResult = fresh && cand ? 'recovered' : 'not-recovered'; record(wd.lastResult, { loops: was, activitySinceStart: cand }); delete wd.pendingVerify
     log(`watchdog: restart after the ${was.join(',')} stall: ${wd.lastResult}`)
   }
   const stalled = Object.keys(beats).filter(k => now - beats[k] > WD.stallMs)
   for (const k of Object.keys(strikes)) strikes[k] = stalled.includes(k) ? strikes[k] + 1 : 0
   const confirmed = stalled.filter(k => strikes[k] >= WD.confirm)
-  if (!confirmed.length) {
-    if (wd.status !== 'recovery-failed') wd.status = 'monitoring'
-    else if (!stalled.length && now - startedAt > WD.verifyMs) { wd.status = 'monitoring'; record('recovery-failed-cleared'); log('watchdog: loops healthy again; automatic recovery re-enabled') }
-    wdWrite(); return
+  healthySince = !stalled.length && progressed ? healthySince ?? now : null
+  if (wd.latched && healthySince !== null && now - healthySince >= WD.verifyMs) {
+    wd.latched = false; record('recovery-failed-cleared', { healthyForS: Math.round((now - healthySince) / 1000) }); log('watchdog: every loop iterating steadily again; automatic recovery re-enabled')
   }
+  if (!confirmed.length) { wd.status = wd.latched ? 'recovery-failed' : 'monitoring'; wdWrite(); return }
   wd.lastStallAt = new Date(now).toISOString()
-  if (mode !== 'recover') { if (wd.status !== 'stalled-passive') { record('stall-detected', { loops: confirmed, mode }); log(`watchdog (passive): ${confirmed.join(',')} stalled`) } wd.status = 'stalled-passive'; wdWrite(); return }
+  if (mode !== 'recover') { if (wd.latched) { wd.status = 'recovery-failed'; wdWrite(); return } if (wd.status !== 'stalled-passive') { record('stall-detected', { loops: confirmed, mode }); log(`watchdog (passive): ${confirmed.join(',')} stalled`) } wd.status = 'stalled-passive'; wdWrite(); return }
   wd.exits = (wd.exits ?? []).filter(t => now - t < WD.windowMs)
-  if (wd.status === 'recovery-failed' || wd.exits.length >= WD.max) { if (wd.status !== 'recovery-failed') { record('limit-reached', { loops: confirmed, exitsInWindow: wd.exits.length }); log(`watchdog: ${wd.exits.length} recoveries in ${WD.windowMs / 60000} min; stopping automatic recovery, observer needs attention`) } wd.status = 'recovery-failed'; wdWrite(); return }
+  if (wd.latched || wd.exits.length >= WD.max) { if (!wd.latched) { wd.latched = true; record('limit-reached', { loops: confirmed, exitsInWindow: wd.exits.length }); log(`watchdog: ${wd.exits.length} recoveries in ${WD.windowMs / 60000} min; stopping automatic recovery, observer needs attention`) } wd.status = 'recovery-failed'; wdWrite(); return }
   const last = wd.exits.at(-1)
   if (last && now - last < WD.cooldownMs) { wd.status = 'cooldown'; wd.cooldownUntil = new Date(last + WD.cooldownMs).toISOString(); wdWrite(); return }
   const up = await upstreamOk(confirmed)

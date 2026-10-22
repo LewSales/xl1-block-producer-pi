@@ -204,8 +204,10 @@ if (!ONCE) {
 // pm2, systemd) starts it again. It controls nothing else: no docker, pm2, systemctl or kill calls.
 // Bounded: a cooldown, at most RACE_WATCHDOG_MAX exits per rolling window, then a latch ('recovery-failed'):
 // no more exits until every loop has kept iterating, check after check, for RACE_WATCHDOG_VERIFY_MS (e.g. after
-// a person fixes the cause). Switching the mode to passive or off does not clear it. State persists in
-// STATE/watchdog.json so limits and the latch survive restarts.
+// a person fixes the cause). Switching the mode to passive or off does not clear it, and after it clears the
+// rolling window still caps exits. Every loop interval (RACE_POOL_MS, _HEAD_MS, _TX_MS) must stay below
+// RACE_WATCHDOG_CHECK_MS, or a slow loop cannot show progress at every check and the latch will not clear
+// by itself (fails safe: no exits). State persists in STATE/watchdog.json so limits and the latch survive restarts.
 // RACE_WATCHDOG=recover (default) | passive (detect and log only) | off. A file STATE/watchdog.mode holding one
 // of those words overrides it at every check: a manual switch that needs no restart. Env 'off' is a hard
 // off: no checks run, so the mode file cannot turn it back on.
@@ -222,6 +224,7 @@ const wdRead = () => { try { const v = JSON.parse(fs.readFileSync(WD_FILE, 'utf8
 const wdWrite = () => { try { fs.writeFileSync(WD_FILE + '.tmp', JSON.stringify(wd)); fs.renameSync(WD_FILE + '.tmp', WD_FILE) } catch {} }
 const wd = wdRead()
 wd.exits = Array.isArray(wd.exits) ? wd.exits : []; wd.history = Array.isArray(wd.history) ? wd.history : []
+if (wd.pendingVerify && !Array.isArray(wd.pendingVerify.loops)) delete wd.pendingVerify
 wd.latched = wd.latched === true || wd.status === 'recovery-failed'
 wd.status = wd.latched ? 'recovery-failed' : 'monitoring'; wd.mode = WD.mode === 'off' ? 'off' : currentMode()
 // Sustained health: every loop must have iterated since the previous check, continuously, before the latch clears.
@@ -267,7 +270,8 @@ async function watchdogStep() {
   wd.mode = mode
   const progressed = Object.keys(iterations).every(k => iterations[k] > lastIterations[k])
   lastIterations = { ...iterations }
-  if (mode === 'off') { wd.status = 'off'; wdWrite(); return }
+  // Off: nothing observed now may count later, so health tracking and stall strikes start again on return.
+  if (mode === 'off') { healthySince = null; for (const k of Object.keys(strikes)) strikes[k] = 0; wd.status = 'off'; wdWrite(); return }
   wd.loops = Object.fromEntries(Object.keys(beats).map(k => [k, { ageS: Math.round((now - beats[k]) / 1000), iterations: iterations[k] }]))
   // After a recovery exit, the next process confirms the outcome once it has run for verifyMs.
   if (wd.pendingVerify && now - startedAt > WD.verifyMs) {

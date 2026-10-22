@@ -36,7 +36,8 @@ let r, w
 // 0. the fake is really in place: a healthy run must see the fake's candidates (block heights >= 1,000,000)
 const s0 = tmp('offline'); r = await run(s0, {}, 12000)
 const ev = (() => { try { return fs.readFileSync(path.join(s0, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)) } catch { return [] } })()
-const offline = ev.length > 0 && ev.filter((e) => e.k === 'cand').every((e) => e.block >= 1_000_000 && e.block < 1_100_000)
+const fakeBlock = (e) => e.block >= 1_000_000 && e.block < 1_100_000
+const offline = ev.some((e) => e.k === 'cand') && ev.some((e) => e.k === 'head') && ev.filter((e) => e.k === 'cand' || e.k === 'head').every(fakeBlock)
 check('runs offline against the fake network', offline, `${ev.length} events, candidate blocks ${[...new Set(ev.filter((e) => e.k === 'cand').map((e) => e.block))].slice(0, 3).join(',')}…`)
 if (!offline) { console.error('not offline: stopping before any further run'); process.exit(2) }
 

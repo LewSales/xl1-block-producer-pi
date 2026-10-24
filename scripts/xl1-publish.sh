@@ -247,10 +247,13 @@ cd "${WORKDIR}" || exit 1
 # A run that stopped halfway through a rebuild leaves files and no usable .git
 # (missing, or with no commit). A clone refuses a directory that is not empty,
 # so this used to fail every run until someone stepped in; rebuild it instead.
-if [[ ! -d .git ]] || ! git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
-  rebuild_in_place "working copy has no usable .git (an interrupted rebuild?)"
+# Not in a dry run: a dry run only writes files, it never moves or deletes anything.
+if (( ! DRY )); then
+  if [[ ! -d .git ]] || ! git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+    rebuild_in_place "working copy has no usable .git (an interrupted rebuild?)"
+  fi
+  prune_broken
 fi
-prune_broken
 git config user.name "${GIT_NAME}"
 git config user.email "${GIT_EMAIL}"
 

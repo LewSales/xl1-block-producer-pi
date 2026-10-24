@@ -125,7 +125,7 @@ if (( SECURITY_PENDING == 0 )) && (( PENDING < THRESHOLD )) && (( age < MAX_AGE 
 fi
 
 if (( SECURITY_PENDING > 0 )); then
-  log "${SECURITY_PENDING} security update(s) pending ($(tr '\n' ' ' <<< "${SECURITY_PKGS}")) -- upgrading now, with the other ${OTHER_PENDING} non-runtime package(s)"
+  log "${SECURITY_PENDING} security update(s) pending ($(tr '\n' ' ' <<< "${SECURITY_PKGS}")) -- upgrading now (${OTHER_PENDING} non-runtime package(s) in total)"
 else
   log "${PENDING} pending (${RUNTIME_PENDING} runtime, deferred) / last applied $(( age / 3600 ))h ago -- upgrading"
 fi

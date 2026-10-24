@@ -19,7 +19,7 @@ bad()  { printf '  %s✗%s %s\n' "${RED}" "${RESET}" "$*"; FAILED=$((FAILED+1));
 
 SHELL_SCRIPTS=(
   "${ROOT}/provision.sh" "${ROOT}/preflight.sh" "${ROOT}/build-images.sh"
-  "${ROOT}/scripts/xl1-collect.sh" "${ROOT}/scripts/xl1-alert.sh"
+  "${ROOT}/scripts/xl1-collect.sh" "${ROOT}/scripts/xl1-alert.sh" "${ROOT}/scripts/xl1-publish.sh"
   "${ROOT}/scripts/xl1ctl" "${ROOT}/scripts/xl1-screen-setup.sh" "${ROOT}/scripts/xl1-screen"
   "${ROOT}/scripts/xl1-cpu-governor" "${ROOT}/scripts/deploy-dashboard.sh"
 )
@@ -108,6 +108,15 @@ if bash "${HERE}/deploy.test.sh"; then ok "deploy refuses without an alert hold"
 
 step "Panel parsing"
 if bash "${HERE}/screen.test.sh"; then ok "screen tests passed"; else bad "screen tests failed"; fi
+
+step "Publisher working copy"
+# Needs a working python3 (the publisher parses the payload with it); the Windows Store stub isn't one.
+if python3 -c 'import json' 2>/dev/null; then
+  if bash "${HERE}/publish.test.sh"; then ok "publisher rebuilds an interrupted working copy and prunes old broken copies"; else bad "publisher tests failed"; fi
+else
+  printf '  %spython3 not available; skipped%s
+' "${DIM}" "${RESET}"
+fi
 
 printf '\n'
 if (( FAILED )); then

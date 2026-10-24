@@ -208,13 +208,52 @@ if (( DRY )) && [[ -z "${REPO}" ]]; then
   exit 0
 fi
 
-if [[ ! -d "${WORKDIR}/.git" ]]; then
+# Rebuild the working copy in place from origin, keeping a broken .git aside for
+# inspection. In place, because the parent (/var/lib) is root's and this runs as
+# the operator. Only the newest broken copy is kept: on 2026-10-24 seven of them
+# (about 540 MB) had piled up over eight days, none ever looked at.
+KEEP_BROKEN=1
+prune_broken() {
+  local old
+  old="$(ls -1d .git.broken-* 2>/dev/null | sort | head -n -"${KEEP_BROKEN}")"
+  [[ -z "${old}" ]] && return 0
+  printf '%s\n' "${old}" | while read -r d; do rm -rf -- "${d}"; done
+  log "removed older broken working copies: $(printf '%s' "${old}" | tr '\n' ' ')"
+}
+rebuild_in_place() {
+  local why="$1" aside=".git.broken-$(date -u '+%Y%m%dT%H%M%SZ')"
+  if [[ -e .git ]]; then
+    logp err "${why}; kept as ${WORKDIR}/${aside}, rebuilding from origin/${BRANCH}"
+    mv .git "${aside}" || fail "could not move the broken working copy aside"
+  else
+    logp warning "${why}; rebuilding from origin/${BRANCH}"
+  fi
+  g init --quiet -b "${BRANCH}" \
+    && g remote add origin "${REPO}" \
+    && git config user.name "${GIT_NAME}" && git config user.email "${GIT_EMAIL}" \
+    && g fetch --quiet --depth 1 origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" \
+    && g reset --quiet --hard "origin/${BRANCH}" \
+    || { rm -rf .git; fail "could not rebuild the working copy (${why}): ${GIT_ERR}"; }
+  prune_broken
+}
+
+if [[ ! -d "${WORKDIR}/.git" ]] && [[ -z "$(ls -A "${WORKDIR}" 2>/dev/null)" ]]; then
   # Shallow and single-branch: this repository is a delivery mechanism, and its
   # history is of no use on a producer.
   g clone --quiet --depth 1 --branch "${BRANCH}" --single-branch "${REPO}" "${WORKDIR}" || {
     log "clone of ${REPO} failed: ${GIT_ERR}"; exit 1; }
 fi
 cd "${WORKDIR}" || exit 1
+# A run that stopped halfway through a rebuild leaves files and no usable .git
+# (missing, or with no commit). A clone refuses a directory that is not empty,
+# so this used to fail every run until someone stepped in; rebuild it instead.
+# Not in a dry run: a dry run only writes files, it never moves or deletes anything.
+if (( ! DRY )); then
+  if [[ ! -d .git ]] || ! git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+    rebuild_in_place "working copy has no usable .git (an interrupted rebuild?)"
+  fi
+  prune_broken
+fi
 git config user.name "${GIT_NAME}"
 git config user.email "${GIT_EMAIL}"
 
@@ -294,19 +333,9 @@ commit_on_tip() {
     # and no other git running (the flock above guarantees the latter) -- never
     # heals: on 2026-10-14 both copies on this Pi failed this way for two days,
     # 500+ runs in a row, while the page froze. The copy is disposable and the
-    # remote holds everything worth keeping, so keep the broken .git for
-    # inspection and rebuild one in place. In place, because the parent
-    # (/var/lib) is root's and this runs as the operator.
+    # remote holds everything worth keeping, so rebuild it (rebuild_in_place).
     if [[ "${GIT_ERR}" == *"cannot lock ref"* ]]; then
-      local aside=".git.broken-$(date -u '+%Y%m%dT%H%M%SZ')" first="${GIT_ERR}"
-      logp err "working copy could not lock HEAD (${first}); kept as ${WORKDIR}/${aside}, rebuilding from origin/${BRANCH}"
-      mv .git "${aside}" \
-        && g init --quiet -b "${BRANCH}" \
-        && g remote add origin "${REPO}" \
-        && git config user.name "${GIT_NAME}" && git config user.email "${GIT_EMAIL}" \
-        && g fetch --quiet --depth 1 origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" \
-        && g reset --quiet --hard "${UPSTREAM}" \
-        || fail "could not rebuild the working copy after a HEAD lock failure: ${GIT_ERR}"
+      rebuild_in_place "working copy could not lock HEAD (${GIT_ERR})"
     else
       fail "could not move the working copy to origin/${BRANCH}: ${GIT_ERR}"
     fi

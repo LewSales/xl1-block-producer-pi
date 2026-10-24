@@ -13,8 +13,13 @@
 #
 # Runs every few hours (see the .timer) and acts on whichever trigger fires
 # first:
+#   - a security update is pending (from a *-security suite, the same test the
+#     collector uses for the dashboard's "host security updates pending")
 #   - XL1_HOST_UPDATE_THRESHOLD or more packages pending      (default 10)
 #   - XL1_HOST_UPDATE_MAX_AGE since the last applied upgrade  (default 72h)
+# Security first since 2026-10-24: the dashboard flags a host "degraded" from
+# the first pending security fix, while this waited for ten packages or three
+# days, so the owner was patching the Pi by hand almost every day.
 # A timer that only fired every 72h would leave a burst of updates sitting for
 # up to three days; a threshold alone could fire every few minutes right after
 # a fresh image. Together, whichever is more urgent wins.
@@ -72,13 +77,19 @@ if ! apt-get update -q >"${APT_LOG}" 2>&1; then
 fi
 
 # Names of upgradable packages, split into the runtime set and the rest.
-UPGRADABLE="$(apt list --upgradable 2>/dev/null | grep -F '[upgradable from:' | cut -d/ -f1 || true)"
+UPG_LINES="$(apt list --upgradable 2>/dev/null | grep -F '[upgradable from:' || true)"
+UPGRADABLE="$(printf '%s\n' "${UPG_LINES}" | cut -d/ -f1 | grep -v '^$' || true)"
 RUNTIME_PKGS="$(printf '%s\n' "${UPGRADABLE}" | grep -E "${RUNTIME_RE}" || true)"
 OTHER_PKGS="$(printf '%s\n' "${UPGRADABLE}" | grep -vE "${RUNTIME_RE}" | grep -v '^$' || true)"
+# Security fixes among the packages the timer may install: "pkg/suite[,suite] ...",
+# a suite ending -security. (Raspberry Pi OS ships some fixes through plain
+# stable; those still flow on the threshold and age triggers.)
+SECURITY_PKGS="$(printf '%s\n' "${UPG_LINES}" | awk '{ split($1, a, "/"); if (a[2] ~ /-security/) print a[1] }' | grep -vE "${RUNTIME_RE}" | grep -v '^$' || true)"
 count() { [[ -z "$1" ]] && echo 0 || printf '%s\n' "$1" | grep -c .; }
 PENDING="$(count "${UPGRADABLE}")"
 RUNTIME_PENDING="$(count "${RUNTIME_PKGS}")"
 OTHER_PENDING="$(count "${OTHER_PKGS}")"
+SECURITY_PENDING="$(count "${SECURITY_PKGS}")"
 
 # Always record what the runtime is waiting on, so the deferral is visible.
 if (( RUNTIME_PENDING > 0 )); then
@@ -108,12 +119,16 @@ last=0
 now="$(date +%s)"
 age=$(( now - last ))
 
-if (( PENDING < THRESHOLD )) && (( age < MAX_AGE )); then
-  log "${PENDING} pending (${RUNTIME_PENDING} runtime, deferred; threshold ${THRESHOLD}), last applied $(( age / 3600 ))h ago (max $(( MAX_AGE / 3600 ))h) -- nothing to do"
+if (( SECURITY_PENDING == 0 )) && (( PENDING < THRESHOLD )) && (( age < MAX_AGE )); then
+  log "${PENDING} pending (0 security, ${RUNTIME_PENDING} runtime, deferred; threshold ${THRESHOLD}), last applied $(( age / 3600 ))h ago (max $(( MAX_AGE / 3600 ))h) -- nothing to do"
   exit 0
 fi
 
-log "${PENDING} pending (${RUNTIME_PENDING} runtime, deferred) / last applied $(( age / 3600 ))h ago -- upgrading"
+if (( SECURITY_PENDING > 0 )); then
+  log "${SECURITY_PENDING} security update(s) pending ($(tr '\n' ' ' <<< "${SECURITY_PKGS}")) -- upgrading now (${OTHER_PENDING} non-runtime package(s) in total)"
+else
+  log "${PENDING} pending (${RUNTIME_PENDING} runtime, deferred) / last applied $(( age / 3600 ))h ago -- upgrading"
+fi
 if (( CHECK_ONLY )); then
   log "--check given, stopping here"
   exit 0
